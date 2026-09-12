@@ -1,7 +1,7 @@
 # SESSION.md — partisync 路线基线 v2
 
 > **用途**：抗上下文压缩的项目事实源。进入新阶段或继续会话前必须重读；若路线变化，先更新本文件再行动。
-> **当前阶段**：MCD 闭环已通过 L3 浏览器验收（T7，8/8 断言）；C2-5 与 T7 三项前提缺口（标签/确认/预览）已补齐；**P2 安全加固批 A2-01…A2-06 已实现并通过 L1/L2/L3 验证，但无独立复审**。详见 §12/§13。
+> **当前阶段**：MCD 闭环已通过 L3 浏览器验收（T7，8/8 断言）；C2-5 与 T7 三项前提缺口（标签/确认/预览）已补齐；**P2 安全加固批 A2-01…A2-06 已实现、复审并修掉 1 个 medium 缺陷，L1/L2/L3 全绿**；但**独立复审三次派发全部无产出，AC-11 仍未满足**（现为实施者自证）。详见 §12/§13。
 
 ## 1. 真实目标
 
@@ -198,7 +198,7 @@
   - **T7 L3 通过（8/8 断言，consoleErrors=0，badResponses=0）**：脚本 `scripts/l3-mcd-acceptance.mjs`，证据 `docs/evidence/l3-mcd-acceptance.md`，截图 `docs/verification/t7-l3/`（7 张）；执行后实测 assets=17/tags=4/asset_tags=6；
   - 声明：修复与验证为主 Agent 实施，未做 T7 后独立复审；建议下轮派 fresh-context 审计员。
 - [x] **SPA 静态托管进 Docker（2026-09-12）**：`cmd/server/main.go` 新增 `spaHandler`（`WEB_DIST=/app/web` 启用，/api 与 /healthz 优先）；Dockerfile 改为 COPY 宿主机 `playground/dist`（容器内无法访问 npm registry，前端由宿主机构建）；`.dockerignore` 放行 dist。L3 全部断言对静态托管服务复测通过（8/8，consoleErrors=0）。体验地址 `http://127.0.0.1:8080/`。
-- [x] **P2 安全加固批收尾（2026-09-13）**：A2-01…A2-06 全部关闭——multipart 改流式（不再落容器 `/tmp`）、新增 `GET /readyz` 就绪探针、请求体上限跟随 `MAX_UPLOAD_BYTES`、预览内容-声明一致性校验（415，并修掉初版 md/csv/json 误拒）、失败路径孤儿文件清理、上传端点按请求放宽读写期限（40.97s 慢上传实测 201）。L1 三绿 + 14 个新用例（含反向验证）；L2 脚本 `scripts/l2-p2-hardening.sh` **53/53 PASS**；L3 回归 **8/8 PASS**（`docs/verification/p2-hardening-run.json`）；证据 `docs/evidence/l2-integration-p2-hardening.md`；任务卡 `docs/P2-HARDENING-TASK-CARD.md`。**独立复审未执行（AC-11 pending）**。
+- [x] **P2 安全加固批收尾（2026-09-13）**：A2-01…A2-06 全部关闭——multipart 改流式（不再落容器 `/tmp`）、新增 `GET /readyz` 就绪探针、请求体上限跟随 `MAX_UPLOAD_BYTES`、预览内容-声明一致性校验（415，并修掉初版 md/csv/json 误拒）、失败路径孤儿文件清理、上传端点按请求放宽读写期限（40.97s 慢上传实测 201）。L1 三绿（初版 14 个新用例，含反向验证）；L2 脚本 `scripts/l2-p2-hardening.sh` **53/53 PASS**；L3 回归 **8/8 PASS**（`docs/verification/p2-hardening-run.json`）；证据 `docs/evidence/l2-integration-p2-hardening.md`；任务卡 `docs/P2-HARDENING-TASK-CARD.md`。随后复审（3 次独立派发全败 → 实施者自查，**非独立**）发现并修复 medium 缺陷 **F6**（`a6a6702`），新增单测与 L2 S8 后 **60/60 PASS**、单测 16 个。**独立复审仍未满足（AC-11 pending）**，详见 §13 与 `docs/evidence/audit-p2-hardening.md`。
 
 ## 10. 项目事实源
 
@@ -250,7 +250,12 @@
   - A2-05 入库/回读失败 → `storage.Discard` 清理孤儿文件（去重对象不删）；
   - A2-06 上传端点用 `ResponseController` 放宽本次请求的读写期限（5min / 5min+30s），服务端级常规超时保持 15s/15s/30s；**顺带解除 `WriteTimeout=30s` 这道第二墙**；
   - 工程卫生：`gofmt -l cmd internal` 为空。
-- **验证**: L1 `build/vet/test -race` 三绿 + 14 个新用例（含反向验证：还原旧实现后新测试确实失败）；L2 `scripts/l2-p2-hardening.sh` **53/53 PASS**（失败 0）；L3 回归 T7 脚本 **8/8 PASS**（静态托管 :8080，consoleErrors=0、badResponses=0）。证据：`docs/evidence/l2-integration-p2-hardening.md`。
-- **门禁**: **独立复审（AC-11）未执行** —— 本批为实施者自证，`audit-t6-prime.md` 原始 `verdict=fail` 与 T6″ 结论均不因本批改变。
-- **下一步建议**: ① 派 fresh-context 审计员复核本批（重点：文本家族放行是否引入新的类型混淆面、流式解析的边界与错误映射、readyz 的探测口径）；② 清理库/卷内测试残留（`p2-*`、历史 `t4-l2.jpg`/`evil.png` 等，需用户批准后实施）；③ C2-7/C2-9（MIME 过滤 UI / 排序 UI）与 B-01/B-02/B-06（证据口径 + 8080 产品链路基准）。
+- **验证**: L1 `build/vet/test -race` 三绿 + **16 个新用例**（含反向验证：还原旧实现后新测试确实失败）；L2 `scripts/l2-p2-hardening.sh` **60/60 PASS**（`75fd604` 为 53/53，修复提交新增 S8 七项）；L3 回归 T7 脚本 **8/8 PASS**（静态托管 :8080，consoleErrors=0、badResponses=0，截图用修复版重采）。证据：`docs/evidence/l2-integration-p2-hardening.md` + `docs/evidence/audit-p2-hardening.md`。
+- **复审（2026-09-13）**: 计划派 3 名 fresh-context 独立审计员（安全面、探针/超时面、证据真实性面），**三次全部无产出失败**（1 次只剩状态栏文字、1 次卡在工具参数序列化坏循环、1 次空消息）；按纪律改为主 Agent 自查并标注**非独立**。
+  - 报告：`docs/evidence/audit-p2-hardening.md`（verdict 分面、findings F1–F6、证伪尝试清单、盲区）。
+  - **复审发现并已修 1 个 medium 缺陷（F6，`a6a6702`）**：file 部件已落盘、随后部件触发请求体上限时，已落盘对象无人清理 → 无 DB 行的孤儿文件（一次性容器实测 413 但对象存在）。修复后同场景 `NO_ORPHAN`，并新增单测 + L2 S8 常驻回归。
+  - 其余 findings：F1（400 文案回显内部错误串）已修；F2（`/readyz` 回显内部拓扑）接受并记录；F3（元数据端点接受任意 path，读取面已中性化）、F4（A2-05 窄并发窗，未实测）待办；F5 接受。
+  - 复核补测：**存储型 XSS 在执行层被拦下**（真实 Chromium：对照组脚本执行成功、预览端点被 CSP sandbox 拒绝）；`去重命中对象不误删` 由代码级说明升级为实测。
+- **门禁**: **独立复审（AC-11）仍未满足** —— `75fd604` 与 `a6a6702` 均为实施者自证；`audit-t6-prime.md` 原始 `verdict=fail` 与 T6″ 结论均不因本批改变。
+- **下一步建议**: ① 补一次**真正独立**的复审（本环境 subagent 派发三次全败，可换路由/模型或由人复核；重点：F6 修复面、文本家族放行判定、`/readyz` 探测口径）；② 清理库/卷内测试残留（`p2-*`、历史 `t4-l2.jpg`/`evil.png` 等，需用户批准后实施）；③ C2-7/C2-9（MIME 过滤 UI / 排序 UI）与 B-01/B-02/B-06（证据口径 + 8080 产品链路基准）。
 - **未做（勿顺手做）**: 认证/RBAC、A2-07…A2-09、前端 415 文案提示、MCD 口径变更。

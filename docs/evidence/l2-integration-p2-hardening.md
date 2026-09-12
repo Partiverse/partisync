@@ -48,7 +48,7 @@ test=0
 
 > `GOCACHE` 显式指向 `/tmp`：本环境默认 `~/.cache/go-build` 曾被沙箱拒绝并产生**假绿**（审计 §6 教训），故取真实退出码（文件重定向，不经管道）。
 
-**新增用例（15 个，全部有断言力）**
+**新增用例（15 个，全部有断言力；本批 `75fd604`）**
 
 | 文件 | 用例 | 断言对象 |
 |---|---|---|
@@ -189,7 +189,7 @@ $ L3_BASE=http://127.0.0.1:8080/ L3_SHOTS=docs/verification/p2-hardening node sc
 
 | ID | 准则 | 状态 | 证据 |
 |---|---|---|---|
-| AC-01 | 内容与声明不一致 → 预览 415；一致 → 200 | **pass** | 单测 15 例 + L2 S2（415/200 对照） |
+| AC-01 | 内容与声明不一致 → 预览 415；一致 → 200 | **pass** | 单测 15 例（`75fd604`）+ L2 S2（415/200 对照） |
 | AC-02 | 文本家族不误拒 | **pass** | 单测 + L2 S3（md/csv/json/png 孪生 200） |
 | AC-03 | 12MiB 上传零 /tmp 落盘、可写层零增长 | **pass** | L2 S4（delta=0 bytes、/tmp 条目 0）+ 反向实验 |
 | AC-04 | `MAX_UPLOAD_BYTES` 生效 | **pass** | L2 S5（1MiB→2MiB 413、512KiB 201） |
@@ -230,3 +230,49 @@ $ L3_BASE=http://127.0.0.1:8080/ L3_SHOTS=docs/verification/p2-hardening node sc
 
 - 本批**修复与验证均由主 Agent（实施者）完成**，按门禁口径**不构成独立复审**；`docs/evidence/audit-t6-prime.md` 的原始 `verdict=fail` 与本文件无关，门禁是否放行需由独立复审（AC-11）+ 用户决策。
 - 本环境无可视觉判读模型：L3 的"预览正常"依据运行时 DOM/网络断言（HTTP 200 + 字节非空 + `img` 存在），非人眼像素校验；`docs/verification/p2-hardening/` 截图仅作过程留痕。
+
+---
+
+## 11. 复审后修复（提交 `a6a6702`）：解析期孤儿对象
+
+本节由 P2 复审（`docs/evidence/audit-p2-hardening.md`，**非独立**）追加。
+
+- **发现（F6, medium）**：multipart 中 `file` 部件已合法落盘、随后部件触发请求体上限时，
+  `saveUploadedFile` 直接返回错误而**不清理已落盘对象** → 无 DB 行的孤儿文件。
+  一次性容器（`MAX_UPLOAD_BYTES=4096`）实测：file 部件 4096B + junk 部件 2MiB → HTTP **413**，
+  但 `/data/assets/26/b7e40be0bcf3e6667020b3acf6e07faa17585b21b2936305dd6c9ad3860b15` 存在。
+  本批 A2-05 只覆盖了"入库失败"路径，未覆盖"落盘成功之后解析失败"。
+- **修复**：`saveUploadedFile` 改具名返回 + `defer` 清理本次已提交对象（去重命中对象不删）；
+  顺带收口 400 文案（不再回显包装后的内部错误串）。
+- **反向验证**：把清理逻辑还原为旧写法后，新单测
+  `TestUploadCleansUpObjectWhenBodyCapTripsAfterFilePart` 失败：
+  `orphan objects left after parse failure: 1 files`。
+- **新增 L2 常驻回归（S8）**：一次性容器（1MiB 上限）对照组 201 + 实验组 413 +
+  失败请求对象不存在 + 先前对象未被误删 + 存储残留文件数 + `.tmp` 残留条目。
+
+**修复版复验（本文件 §4 的 53/53 是 `75fd604` 的记录，修复后为 60/60）**：
+
+```text
+--- 修复验证（一次性容器重跑 F6 场景）---
+  F6 重跑 status=413 body={"error":"upload exceeds maximum request size"}
+  RESULT=NO_ORPHAN（已修复）
+  卷内文件数=0
+  卷内 .tmp 条目=0
+
+=== S8 解析期失败不留孤儿对象（F6 复审回归） ===
+PASS  一次性容器（1MiB 上限）就绪
+PASS  S8 对照组（无超限字段）上传 → 201
+PASS  S8 超限请求（file 部件已落盘后解析失败） → 413
+PASS  S8 失败请求的 file 部件对象被清理（无孤儿）
+PASS  S8 先前成功提交的对象未被误删
+PASS  S8 存储内残留文件数 = 1
+PASS  S8 存储 .tmp 残留条目 = 0
+
+=== 汇总 ===
+PASS=60 FAIL=0
+RESULT=PASS
+```
+
+- L1：`build/vet/test -race` 三绿（新用例 16 个）；`gofmt -l cmd internal` 为空。
+- L3：T7 闭环 **8/8 PASS**（截图已用修复版镜像重采），`consoleErrors=[]`、`badResponses=[]`。
+- **独立性**：修复与复验同样由实施者完成，**不构成独立复审**。

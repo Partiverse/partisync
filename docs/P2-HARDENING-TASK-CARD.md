@@ -48,13 +48,14 @@
 | AC-02 | security | `.md`/`.csv`/`.json`/`.txt` 资产预览不被误拒（200） | L2 curl 实测 | curl 状态码 + 字节数 | **pass** |
 | AC-03 | resource | 上传大文件时容器 `/tmp` 零增长；请求 body 全程流式（无 `ParseMultipartForm`） | L2 `docker ps --size` 前后对比 + `ls /tmp` + 反向实验 | 可写层 delta=0 bytes、/tmp 条目 0（规模取 12MiB，超旧 8MiB 落盘阈值） | **pass** |
 | AC-04 | config | `MAX_UPLOAD_BYTES=1MiB` 时上传 2MiB → 413；512KiB → 201 | L2 一次性容器覆盖 env 实测 | curl 状态码 | **pass** |
-| AC-05 | lifecycle | 入库失败（PG 停机）时落盘文件被清理，资产卷内无该 sha 对象 | L2 停机 postgres 实测 + 容器内 `test -e` 核对 | 对象路径不存在（单测覆盖幂等与越界拒绝；"去重对象不删"由代码分支 + 单测覆盖） | **pass** |
+| AC-05 | lifecycle | 入库失败（PG 停机）时落盘文件被清理，资产卷内无该 sha 对象（含复审补测的去重误删场景） | L2 停机 postgres 实测 + 容器内 `test -e` 核对 | 对象路径不存在（复审补测：去重命中对象在停机场景下确实未被误删，见 `docs/evidence/audit-p2-hardening.md` §4） | **pass** |
 | AC-06 | observability | `/readyz` 三依赖可达 → 200；Meili/PG 停机 → 503 且故障项 `ok:false`；`/healthz` 始终 200 | L2 停机/恢复实测 | curl JSON | **pass** |
 | AC-07 | regression | 慢速上传（限速，用时 > 服务端 15s/30s 常规超时）成功 201，不再 400 | L2 限速上传实测 | 4MiB @100KB/s = 40.97s → 201 | **pass** |
 | AC-08 | regression | T7 L3 浏览器闭环复跑 8/8 PASS，consoleErrors=0，badResponses=0 | `scripts/l3-mcd-acceptance.mjs`（静态托管 :8080） | `docs/verification/p2-hardening-run.json` + 截图 | **pass** |
 | AC-09 | hygiene | `gofmt -l cmd internal` 为空；`go build/vet/test -race` 全绿 | L1 | 命令输出 | **pass** |
 | AC-10 | evidence | 证据文档 `docs/evidence/l2-integration-p2-hardening.md` + SESSION.md 状态更新 + git 提交 | 人工核对 | 文档 + commit | **pass** |
-| AC-11 | gate | 独立复审（fresh-context 审计员）复核本批；未执行则显式声明非独立 | 派发审计员 | 审计报告 | **pending（未执行，已在证据文档显式声明）** |
+| AC-11 | gate | 独立复审（fresh-context 审计员）复核本批；未执行则显式声明非独立 | 派发审计员 | 审计报告 | **仍 pending：3 次派发全部无产出 → 改为实施者自查（非独立），见 `docs/evidence/audit-p2-hardening.md`** |
+| AC-12 | lifecycle | 解析期失败（file 部件已落盘后请求体超限）不留孤儿对象（复审 F6） | 单测 + L2 S8 一次性容器 + 反向验证 | L2 S8 七项 PASS、`NO_ORPHAN` | **pass（`a6a6702`）** |
 
 ## 6. User Verification Scenarios
 
