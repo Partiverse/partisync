@@ -9,13 +9,14 @@
 #   AC-05 入库失败（PG 停机）不留孤儿文件
 #   AC-06 /readyz 依赖故障 → 503；/healthz 保持 200（语义分离）
 #   AC-07 慢速上传（4MiB @100KB/s ≈ 41s，超过服务端 15s/30s 常规超时）→ 201
+#   AC-08 解析期失败（file 部件已落盘后请求体超限）不留孤儿对象（F6 复审回归）
 #
 # 前置：docker compose up -d（三容器 healthy）；镜像 partisync-server:local 已构建。
 # 运行：bash scripts/l2-p2-hardening.sh
 # 退出码：0 = 全部检查通过。
 #
 # 副作用（可恢复）：短暂停止/启动 partisync-postgres 与 partisync-meilisearch；
-# 写入若干 p2-* 测试资产；在 /tmp 下创建并清理一次性容器数据目录。
+# 写入若干 p2-* 测试资产；在 /tmp 下创建并清理两个一次性容器的数据目录（:8081 / :8082）。
 
 set -uo pipefail
 
@@ -27,6 +28,8 @@ MEILI_CT=${MEILI_CT:-partisync-meilisearch}
 NET=${NET:-partisync_default}
 IMAGE=${IMAGE:-partisync-server:local}
 CAP_DATA=${CAP_DATA:-/tmp/p2-cap-data}
+S8_BASE=${S8_BASE:-http://127.0.0.1:8082}
+S8_DATA=${S8_DATA:-/tmp/p2-s8-data}
 
 WORK=$(mktemp -d /tmp/p2l2.XXXXXX)
 
@@ -39,7 +42,15 @@ cleanup_cap_data() {
   fi
 }
 
-trap 'rm -rf "$WORK"; cleanup_cap_data' EXIT
+# cleanup_s8_data 删除 S8 一次性容器的数据目录（同 cleanup_cap_data：文件由容器内 uid 10001 创建）。
+cleanup_s8_data() {
+  if [ -d "$S8_DATA" ]; then
+    docker run --rm -v "$S8_DATA:/cleanup" "$IMAGE" sh -c 'rm -rf /cleanup/* /cleanup/.[!.]*' >/dev/null 2>&1 || true
+    rmdir "$S8_DATA" >/dev/null 2>&1 || true
+  fi
+}
+
+trap 'rm -rf "$WORK"; cleanup_cap_data; cleanup_s8_data' EXIT
 
 PASSED=0
 FAILED=0
@@ -271,6 +282,63 @@ printf 'INFO  慢速上传状态=%s 用时=%ss（服务端常规读/写超时 15
 check_code "4MiB @100KB/s 慢速上传" 201 "$code"
 check_true "上传耗时 > 35s（超过旧 15s 读超时与 30s 写超时）" \
   "$(python3 -c "import sys;sys.exit(0 if float('${secs:-0}')>35 else 1)" && echo 0 || echo 1)"
+
+# --------------------- S8 解析期失败不留孤儿对象（F6 复审回归）
+say "S8 解析期失败不留孤儿对象（F6 复审回归）"
+cleanup_s8_data
+mkdir -p "$S8_DATA"
+chmod 777 "$S8_DATA"
+docker rm -f p2-s8-test >/dev/null 2>&1 || true
+docker run -d --name p2-s8-test --network "$NET" -p 127.0.0.1:8082:8080 \
+  -e MAX_UPLOAD_BYTES=1048576 -e STORAGE_ROOT=/data/assets -e WEB_DIST= \
+  -v "$S8_DATA:/data" "$IMAGE" >/dev/null
+if wait_code "$S8_BASE/healthz" 200 30; then pass "一次性容器（1MiB 上限）就绪"; else fail "一次性容器未就绪"; fi
+
+# 对照组：合法文件部件（64KiB）、无超限字段 → 201，且对象确实落盘。
+python3 - "$WORK/s8-control.bin" <<'PY'
+import pathlib, sys
+payload = b'C' * (64 * 1024)
+b = b'S8BOUNDARY'
+pathlib.Path(sys.argv[1]).write_bytes(
+    b'--' + b + b'\r\nContent-Disposition: form-data; name="file"; filename="s8-control.txt"\r\n'
+    b'Content-Type: text/plain\r\n\r\n' + payload + b'\r\n--' + b + b'--\r\n')
+PY
+code=$(http POST "$S8_BASE/api/v1/assets/upload" -H "Content-Type: multipart/form-data; boundary=S8BOUNDARY" --data-binary @"$WORK/s8-control.bin")
+check_code "S8 对照组（无超限字段）上传" 201 "$code"
+
+# 实验组：同一形状，但 file 部件之后跟一个使整个请求体超限的字段
+# （请求体上限 = 单文件上限 1MiB + 余量 1MiB，junk 2MiB 必然超限）。
+python3 - "$WORK/s8-exp.bin" <<'PY'
+import pathlib, sys
+payload = b'X' * (64 * 1024)
+junk = b'J' * (2 * 1024 * 1024 + 4096)
+b = b'S8BOUNDARY'
+pathlib.Path(sys.argv[1]).write_bytes(
+    b'--' + b + b'\r\nContent-Disposition: form-data; name="file"; filename="s8-exp.txt"\r\n'
+    b'Content-Type: text/plain\r\n\r\n' + payload + b'\r\n'
+    b'--' + b + b'\r\nContent-Disposition: form-data; name="junk"\r\n\r\n' + junk +
+    b'\r\n--' + b + b'--\r\n')
+PY
+code=$(http POST "$S8_BASE/api/v1/assets/upload" -H "Content-Type: multipart/form-data; boundary=S8BOUNDARY" --data-binary @"$WORK/s8-exp.bin")
+check_code "S8 超限请求（file 部件已落盘后解析失败）" 413 "$code"
+
+exp_sha=$(python3 -c "import hashlib;print(hashlib.sha256(b'X'*(64*1024)).hexdigest())")
+ctl_sha=$(python3 -c "import hashlib;print(hashlib.sha256(b'C'*(64*1024)).hexdigest())")
+if docker exec p2-s8-test sh -c "test -e /data/assets/${exp_sha:0:2}/${exp_sha:2}"; then
+  fail "S8 失败请求的 file 部件对象被清理（残留孤儿 ${exp_sha:0:2}/${exp_sha:2}）"
+else
+  pass "S8 失败请求的 file 部件对象被清理（无孤儿）"
+fi
+if docker exec p2-s8-test sh -c "test -e /data/assets/${ctl_sha:0:2}/${ctl_sha:2}"; then
+  pass "S8 先前成功提交的对象未被误删"
+else
+  fail "S8 先前成功提交的对象被误删"
+fi
+check_eq "S8 存储内残留文件数" 1 "$(docker exec p2-s8-test sh -c 'find /data/assets -type f | wc -l' | tr -d ' ')"
+check_eq "S8 存储 .tmp 残留条目" 0 "$(docker exec p2-s8-test sh -c 'ls -A /data/assets/.tmp | wc -l' | tr -d ' ')"
+
+docker rm -f p2-s8-test >/dev/null 2>&1 || true
+cleanup_s8_data
 
 # ------------------------------------------------------------------- 汇总
 say "汇总"

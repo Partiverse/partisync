@@ -645,29 +645,40 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 
 // saveUploadedFile 流式取出 multipart 的 "file" 部分并落盘（A2-01）。
 // 只读取 file 部分；其余字段按序读尽后丢弃（不驻留内存、不落临时文件）。
+//
+// A2-05（含解析期）：出错时清理**本次请求**已落盘的对象——文件部件可能已经提交，
+// 而后续部件才触发请求体上限或读取错误，此时不清理就会留下无 DB 行的孤儿文件。
+// 去重命中的对象属于更早的请求，不删。
 // 返回的错误由 uploadErrorStatus / uploadErrorMessage 映射为状态码与响应文案。
-func (s *Server) saveUploadedFile(r *http.Request) (*storage.SavedObject, string, error) {
+func (s *Server) saveUploadedFile(r *http.Request) (saved *storage.SavedObject, clientName string, err error) {
+	defer func() {
+		if err == nil || saved == nil || saved.Deduped {
+			return
+		}
+		if dErr := s.content.Discard(saved.RelPath); dErr != nil {
+			log.Printf("upload orphan cleanup failed (path %q): %v", saved.RelPath, dErr)
+		}
+	}()
+
 	mr, err := r.MultipartReader()
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: %v", errUploadNotMultipart, err)
 	}
 
-	var saved *storage.SavedObject
-	clientName := ""
 	for {
-		part, err := mr.NextPart()
-		if errors.Is(err, io.EOF) {
+		part, partErr := mr.NextPart()
+		if errors.Is(partErr, io.EOF) {
 			break
 		}
-		if err != nil {
-			return nil, "", err
+		if partErr != nil {
+			return saved, clientName, partErr
 		}
 
 		// 非文件部分（或重复的 file 部分）：读尽后丢弃，否则会阻塞后续 part 的解析。
 		if part.FormName() != "file" || part.FileName() == "" || saved != nil {
-			if _, err := io.Copy(io.Discard, part); err != nil {
+			if _, copyErr := io.Copy(io.Discard, part); copyErr != nil {
 				_ = part.Close()
-				return nil, "", err
+				return saved, clientName, copyErr
 			}
 			_ = part.Close()
 			continue
@@ -676,12 +687,12 @@ func (s *Server) saveUploadedFile(r *http.Request) (*storage.SavedObject, string
 		clientName = strings.TrimSpace(part.FileName())
 		if clientName == "" {
 			_ = part.Close()
-			return nil, "", errUploadNoFileName
+			return saved, clientName, errUploadNoFileName
 		}
 		saved, err = s.content.Save(part, clientName)
 		_ = part.Close()
 		if err != nil {
-			return nil, "", err
+			return saved, clientName, err
 		}
 	}
 
@@ -726,6 +737,8 @@ func uploadErrorMessage(err error) string {
 		switch {
 		case errors.Is(err, storage.ErrEmptyFile):
 			return "uploaded file is empty"
+		case errors.Is(err, errUploadNotMultipart):
+			return errUploadNotMultipart.Error()
 		case errors.Is(err, errUploadNoFileName):
 			return errUploadNoFileName.Error()
 		default:

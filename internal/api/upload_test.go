@@ -311,6 +311,10 @@ func TestSaveUploadedFileRejectsNonMultipart(t *testing.T) {
 	if status := uploadErrorStatus(err); status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (err %v)", status, err)
 	}
+	// 对客户端可见的文案不得回显包装后的内部错误串。
+	if got := uploadErrorMessage(err); got != errUploadNotMultipart.Error() {
+		t.Fatalf("message = %q, want %q", got, errUploadNotMultipart.Error())
+	}
 }
 
 // A2-06 的口径断言：上传端点的读写预算必须显著大于服务端级常规超时（15s/30s）。
@@ -337,5 +341,91 @@ func TestSaveUploadedFileRejectsBlankFileName(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "must have a name") {
 		t.Fatalf("body = %s, want name-required message", w.Body.String())
+	}
+}
+
+// countFiles 统计存储根（含 .tmp）下的普通文件数量。
+func countFiles(t *testing.T, root string) int {
+	t.Helper()
+	n := 0
+	err := filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return n
+}
+
+// F6 回归（P2 复审发现）：file 部件已提交落盘、随后部件触发请求体上限时，
+// 已落盘对象必须被清理——否则留下无 DB 行的孤儿文件，可被匿名请求反复累积占盘。
+func TestUploadCleansUpObjectWhenBodyCapTripsAfterFilePart(t *testing.T) {
+	dir := t.TempDir()
+	content, err := storage.New(dir, 4) // 单文件上限 4B；请求体上限 = 4B + maxUploadOverheadBytes
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	s := &Server{store: new(store.Store), content: content}
+
+	// build 生成同一 file 部件；withJunk 时追加一个超过请求体上限的普通字段。
+	build := func(withJunk bool) (*bytes.Buffer, string) {
+		t.Helper()
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		part, err := mw.CreateFormFile("file", "victim.txt")
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		if _, err := part.Write([]byte("abcd")); err != nil { // 4B：等于上限，可提交
+			t.Fatalf("write file part: %v", err)
+		}
+		if withJunk {
+			if err := mw.WriteField("junk", strings.Repeat("J", maxUploadOverheadBytes+1024)); err != nil {
+				t.Fatalf("write junk field: %v", err)
+			}
+		}
+		if err := mw.Close(); err != nil {
+			t.Fatalf("close multipart writer: %v", err)
+		}
+		return &buf, mw.FormDataContentType()
+	}
+
+	// 对照组：不带超限字段的同一请求必须真的提交落盘（证明清理发生在"落盘之后"）。
+	controlBody, controlType := build(false)
+	control := httptest.NewRequest(http.MethodPost, "/api/v1/assets/upload", controlBody)
+	control.Header.Set("Content-Type", controlType)
+	saved, _, err := s.saveUploadedFile(control)
+	if err != nil {
+		t.Fatalf("control save: %v", err)
+	}
+	if saved == nil || saved.Deduped {
+		t.Fatalf("control: saved = %+v, want a freshly committed object", saved)
+	}
+	if files := countFiles(t, dir); files != 1 {
+		t.Fatalf("control: files = %d, want 1 (the committed object)", files)
+	}
+	if err := content.Discard(saved.RelPath); err != nil {
+		t.Fatalf("control cleanup: %v", err)
+	}
+	if files := countFiles(t, dir); files != 0 {
+		t.Fatalf("control cleanup left %d files", files)
+	}
+
+	// 实验：同一 file 部件之后跟超限字段 → 413，且存储里不留任何文件。
+	body, contentType := build(true)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/assets/upload", body)
+	r.Header.Set("Content-Type", contentType)
+	w := serveUpload(t, s, r)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (body %s)", w.Code, w.Body.String())
+	}
+	if files := countFiles(t, dir); files != 0 {
+		t.Fatalf("orphan objects left after parse failure: %d files", files)
 	}
 }
