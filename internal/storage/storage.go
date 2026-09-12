@@ -1,0 +1,228 @@
+// Package storage 提供本地内容寻址存储（content-addressed local store）。
+//
+// 安全约束（T6-01 修复的核心）：
+//   - 存储名由服务端生成（sha256 十六进制），**绝不使用客户端文件名作为路径组成部分**；
+//   - 客户端文件名只用于取扩展名（白名单）并作为展示用 name 落库；
+//   - 所有对外暴露的路径解析（Resolve/Open）都校验最终绝对路径位于 Root 之内，
+//     因此 `..`、绝对路径、符号链接指向 Root 之外都会被拒绝。
+//
+// 写入流程：流式写入 Root/.tmp 下的临时文件，同时计算 SHA256；校验大小上限与扩展名白名单后，
+// 按 sha256 归属到最终路径（Root/<前2位>/<其余62位>）。内容已存在则不写新副本（去重）。
+package storage
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const (
+	// DefaultMaxBytes 单文件默认上限：100 MiB。
+	DefaultMaxBytes = 100 << 20
+	// sniffPeekBytes 内容嗅探与图片尺寸探测的读取前缀大小。
+	sniffPeekBytes = 64 << 10
+	tmpDirName     = ".tmp"
+)
+
+// 可预期的调用方错误（handler 依据这些错误返回 4xx）。
+var (
+	ErrEmptyFile       = errors.New("storage: empty file")
+	ErrTooLarge        = errors.New("storage: file exceeds maximum size")
+	ErrUnsupportedType = errors.New("storage: unsupported file extension")
+	ErrOutsideRoot     = errors.New("storage: path escapes storage root")
+)
+
+// AllowedExtensions 首版扩展名白名单（图像 + 文档），值为默认 MIME（最终以内容嗅探为准）。
+var AllowedExtensions = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+	".pdf":  "application/pdf",
+	".txt":  "text/plain",
+	".md":   "text/markdown",
+	".csv":  "text/csv",
+	".json": "application/json",
+}
+
+// Store 本地内容寻址存储。
+type Store struct {
+	root     string
+	maxBytes int64
+}
+
+// New 创建（必要时初始化）存储根目录。
+func New(root string, maxBytes int64) (*Store, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, errors.New("storage: empty root")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("storage: resolve root: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(abs, tmpDirName), 0o755); err != nil {
+		return nil, fmt.Errorf("storage: init root: %w", err)
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	return &Store{root: abs, maxBytes: maxBytes}, nil
+}
+
+// Root 返回存储根的绝对路径。
+func (s *Store) Root() string { return s.root }
+
+// MaxBytes 返回单文件上限。
+func (s *Store) MaxBytes() int64 { return s.maxBytes }
+
+// SavedObject 一次落盘的结果。
+type SavedObject struct {
+	SHA256         string
+	SizeBytes      int64
+	MimeType       string // 内容嗅探结果，嗅探失败时回退为白名单默认值
+	Ext            string
+	RelPath        string // 相对 Root 的路径，写入 assets.path
+	Width          int    // 图片宽（非图片/解码失败为 0）
+	Height         int    // 图片高
+	ContentSniffed bool
+	Deduped        bool // true 表示该内容此前已存在，本次未写入新副本
+}
+
+// ExtOf 返回客户端文件名的规范化扩展名（小写，含点）；无扩展名返回空串。
+func ExtOf(clientName string) string {
+	return strings.ToLower(filepath.Ext(filepath.Base(clientName)))
+}
+
+// Save 流式接收 r 并落盘，返回内容寻址结果。
+// 调用方负责关闭 r；Save 不会读取超过 maxBytes+1 字节。
+func (s *Store) Save(r io.Reader, clientName string) (*SavedObject, error) {
+	ext := ExtOf(clientName)
+	if _, ok := AllowedExtensions[ext]; !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnsupportedType, ext)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Join(s.root, tmpDirName), "upload-*")
+	if err != nil {
+		return nil, fmt.Errorf("storage: create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	br := bufio.NewReaderSize(r, sniffPeekBytes)
+	head, _ := br.Peek(sniffPeekBytes)
+
+	hasher := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(tmp, hasher), io.LimitReader(br, s.maxBytes+1))
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		return nil, fmt.Errorf("storage: write temp: %w", copyErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("storage: close temp: %w", closeErr)
+	}
+	if n == 0 {
+		return nil, ErrEmptyFile
+	}
+	if n > s.maxBytes {
+		return nil, fmt.Errorf("%w: limit %d bytes", ErrTooLarge, s.maxBytes)
+	}
+
+	sum := hex.EncodeToString(hasher.Sum(nil))
+	rel := filepath.Join(sum[:2], sum[2:])
+	finalPath := filepath.Join(s.root, rel)
+
+	obj := &SavedObject{
+		SHA256:    sum,
+		SizeBytes: n,
+		Ext:       ext,
+		RelPath:   filepath.ToSlash(rel),
+	}
+	obj.MimeType, obj.ContentSniffed = sniffMime(head, AllowedExtensions[ext])
+	obj.Width, obj.Height = imageSize(head)
+
+	if _, statErr := os.Stat(finalPath); statErr == nil {
+		// 内容已存在：丢弃临时文件，不重复占用磁盘。
+		obj.Deduped = true
+		return obj, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+		return nil, fmt.Errorf("storage: create shard dir: %w", err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return nil, fmt.Errorf("storage: commit object: %w", err)
+	}
+	committed = true
+	return obj, nil
+}
+
+// Resolve 将相对路径解析为 Root 内的绝对路径；越界返回 ErrOutsideRoot。
+// relPath 为空或未找到对象时返回 os.ErrNotExist 包装错误。
+func (s *Store) Resolve(relPath string) (string, error) {
+	if strings.TrimSpace(relPath) == "" {
+		return "", fmt.Errorf("%w: empty path", os.ErrNotExist)
+	}
+	// 拒绝绝对路径与任何形式的父目录逃逸（Clean 后仍以 .. 开头即非法）。
+	cleaned := filepath.Clean(filepath.FromSlash(relPath))
+	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: %q", ErrOutsideRoot, relPath)
+	}
+	abs := filepath.Join(s.root, cleaned)
+	// filepath.Join 已 Clean；再做一次前缀校验，防御后续改动引入的绕过。
+	rootPrefix := s.root + string(filepath.Separator)
+	if abs != s.root && !strings.HasPrefix(abs, rootPrefix) {
+		return "", fmt.Errorf("%w: %q", ErrOutsideRoot, relPath)
+	}
+	return abs, nil
+}
+
+// Open 打开存储中的对象（供后续下载/预览使用）。符号链接指向 Root 之外会被拒绝。
+func (s *Store) Open(relPath string) (*os.File, error) {
+	abs, err := s.Resolve(relPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, err
+	}
+	realPath, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	rootPrefix := s.root + string(filepath.Separator)
+	if realPath != s.root && !strings.HasPrefix(realPath, rootPrefix) {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: symlink %q", ErrOutsideRoot, relPath)
+	}
+	return f, nil
+}
+
+// sniffMime 嗅探前缀内容类型；无法判定时回退到扩展名默认值。
+func sniffMime(head []byte, fallback string) (string, bool) {
+	if len(head) == 0 {
+		return fallback, false
+	}
+	detected := http.DetectContentType(head)
+	if i := strings.IndexByte(detected, ';'); i >= 0 {
+		detected = strings.TrimSpace(detected[:i])
+	}
+	if detected == "" || detected == "application/octet-stream" {
+		return fallback, false
+	}
+	return detected, true
+}

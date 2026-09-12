@@ -1,0 +1,12 @@
+# 构建上下文瘦身：仅 go.mod/go.sum/cmd/internal 参与镜像构建。
+.git
+.gitignore
+docs
+playground/node_modules
+# playground/dist 需随上下文进入镜像（WEB_DIST 静态托管）
+**/*.log
+server-test
+server-test.log
+server-t4.log
+scripts
+.agent-teams

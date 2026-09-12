@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: partisync-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: partisync
+      POSTGRES_PASSWORD: partisync_dev_password
+      POSTGRES_DB: partisync
+    ports:
+      # 仅绑定环回接口，避免把数据库暴露到局域网/公网（T6-08）。
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U partisync -d partisync"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.8
+    container_name: partisync-meilisearch
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: "partisync_master_key_for_dev_only_32_chars_long"
+      MEILI_ENV: "development"
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "127.0.0.1:7700:7700"
+    volumes:
+      - meili_data:/meili_data
+    healthcheck:
+      # 必须用 127.0.0.1：容器内 localhost 会解析出 ::1，而 Meili 只监听 IPv4，
+      # 用 localhost 会导致健康检查永久假阴性（T6-06）。
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:7700/health | grep -q 'available' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: partisync-server:local
+    container_name: partisync-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+    environment:
+      ADDR: ":8080"
+      PG_DSN: "postgres://partisync:partisync_dev_password@postgres:5432/partisync?sslmode=disable"
+      MEILI_URL: "http://meilisearch:7700"
+      MEILI_KEY: "partisync_master_key_for_dev_only_32_chars_long"
+      STORAGE_ROOT: "/data/assets"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - asset_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep -q 'ok' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  meili_data:
+  asset_data:

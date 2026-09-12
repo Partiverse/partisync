@@ -1,0 +1,31 @@
+# --- Build artifacts / binaries ---
+/server-test
+/cmd/bench/bench
+*.exe
+*.test
+
+# --- Runtime logs ---
+*.log
+
+# --- Node / frontend ---
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# --- Editors / OS ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- Local secrets & env ---
+.env
+.env.*
+!.env.example
+*.local
+.npmrc.local
+
+# --- Local agent-team coordination data ---
+.agent-teams/
