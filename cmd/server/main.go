@@ -22,14 +22,15 @@ import (
 )
 
 const (
-	defaultPGDSN  = "postgres://partisync:partisync_dev_password@localhost:5432/partisync?sslmode=disable"
-	defaultMeili  = "http://localhost:7700"
-	defaultMeiliK = "partisync_master_key_for_dev_only_32_chars_long"
-	defaultAddr   = ":8080"
-	defaultStore  = "./data/assets"
-	writeTimeout  = 30 * time.Second
-	readTimeout   = 15 * time.Second
-	idleTimeout   = 60 * time.Second
+	defaultPGDSN      = "postgres://partisync:partisync_dev_password@localhost:5432/partisync?sslmode=disable"
+	defaultMeili      = "http://localhost:7700"
+	defaultMeiliK     = "partisync_master_key_for_dev_only_32_chars_long"
+	defaultAddr       = ":8080"
+	defaultStore      = "./data/assets"
+	readTimeout       = 15 * time.Second // 常规请求的读期限（含请求体）；上传端点自行放宽（见 api 包 A2-06）
+	readHeaderTimeout = 15 * time.Second // 请求头读期限：慢速攻击防线
+	writeTimeout      = 30 * time.Second
+	idleTimeout       = 60 * time.Second
 )
 
 // getenv 返回环境变量，空则回退默认值。
@@ -68,6 +69,20 @@ func uploadLimitFromEnv() int64 {
 	return n
 }
 
+// newHTTPServer 构造 HTTP 服务；超时口径集中在此处，便于单测断言。
+// 服务端级超时对**常规请求**收紧（15s/30s）；大文件慢速上传由上传端点用
+// ResponseController 按需放宽本次请求的读写期限（A2-06，见 internal/api）。
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("[partisync] ")
@@ -95,21 +110,17 @@ func main() {
 
 	srv := api.NewServer(st, meili, content)
 	rootHandler := http.Handler(srv.NewServeMux())
-	// 前端静态托管（WEB_DIST 指向 playground/dist 时启用）；/api 路由优先。
+	// 前端静态托管（WEB_DIST 指向 playground/dist 时启用）；/api 与探针路由优先。
 	if webDist := getenv("WEB_DIST", ""); webDist != "" {
+		apiMux := srv.NewServeMux()
 		mux := http.NewServeMux()
-		mux.Handle("/api/", srv.NewServeMux())
-		mux.Handle("/healthz", srv.NewServeMux())
+		mux.Handle("/api/", apiMux)
+		mux.Handle("/healthz", apiMux)
+		mux.Handle("/readyz", apiMux)
 		mux.Handle("/", spaHandler(webDist))
 		rootHandler = mux
 	}
-	httpSrv := &http.Server{
-		Addr:         addr,
-		Handler:      rootHandler,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-		IdleTimeout:  idleTimeout,
-	}
+	httpSrv := newHTTPServer(addr, rootHandler)
 
 	// 创建共享 context 以协调优雅停机
 	ctx, cancel := context.WithCancel(context.Background())

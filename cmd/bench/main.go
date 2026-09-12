@@ -2,10 +2,11 @@
 // partisync 1M asset benchmark: batch-index to MeiliSearch then measure search p95.
 //
 // Usage: go run ./cmd/bench --meili-url=http://localhost:7700
-//                             --meili-key=partisync_master_key_for_dev_only_32_chars_long
-//                             --count=1000000
-//                             --concurrency=50
-//                             --requests=5000
+//
+//	--meili-key=partisync_master_key_for_dev_only_32_chars_long
+//	--count=1000000
+//	--concurrency=50
+//	--requests=5000
 package main
 
 import (
@@ -230,7 +231,9 @@ func indexBatch(cfg config, start, end int) (int64, error) {
 	}
 
 	body := bytes.NewReader(buf.Bytes())
-	var result struct{ TaskUID int64 `json:"taskUid"` }
+	var result struct {
+		TaskUID int64 `json:"taskUid"`
+	}
 	b, code, err := doReq(cfg, "POST", "/indexes/assets/documents", body, "application/x-ndjson")
 	if err != nil {
 		return 0, err
@@ -245,7 +248,9 @@ func indexBatch(cfg config, start, end int) (int64, error) {
 func waitForTask(cfg config, uid int64, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		var result struct{ Status string `json:"status"` }
+		var result struct {
+			Status string `json:"status"`
+		}
 		b, _, err := doReq(cfg, "GET", fmt.Sprintf("/tasks/%d", uid), nil, "")
 		if err != nil {
 			return err

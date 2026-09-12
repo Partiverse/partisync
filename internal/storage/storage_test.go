@@ -276,3 +276,46 @@ func TestExtOf(t *testing.T) {
 		}
 	}
 }
+
+// Discard（A2-05）：删除落盘对象；对象不存在视为成功（幂等）；越界路径必须拒绝。
+func TestDiscardRemovesObjectIdempotently(t *testing.T) {
+	s := newTestStore(t, 0)
+	obj, err := s.Save(bytes.NewReader(makePNG(t, 4, 4)), "photo.png")
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if got := countFiles(t, s.Root()); got != 1 {
+		t.Fatalf("files after save = %d, want 1", got)
+	}
+
+	if err := s.Discard(obj.RelPath); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+	if got := countFiles(t, s.Root()); got != 0 {
+		t.Fatalf("files after discard = %d, want 0", got)
+	}
+	if err := s.Discard(obj.RelPath); err != nil {
+		t.Fatalf("second Discard must be idempotent, got %v", err)
+	}
+
+	if err := s.Discard("../../etc/passwd"); !errors.Is(err, ErrOutsideRoot) {
+		t.Fatalf("Discard(escape) = %v, want ErrOutsideRoot", err)
+	}
+	if err := s.Discard(""); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Discard(empty) = %v, want os.ErrNotExist", err)
+	}
+}
+
+// Healthy（A2-02）：工作目录缺失即视为存储未就绪。
+func TestHealthyDetectsMissingTmpDir(t *testing.T) {
+	s := newTestStore(t, 0)
+	if err := s.Healthy(); err != nil {
+		t.Fatalf("Healthy on fresh store = %v, want nil", err)
+	}
+	if err := os.RemoveAll(filepath.Join(s.Root(), ".tmp")); err != nil {
+		t.Fatalf("remove .tmp: %v", err)
+	}
+	if err := s.Healthy(); err == nil {
+		t.Fatalf("Healthy = nil, want error after .tmp removal")
+	}
+}

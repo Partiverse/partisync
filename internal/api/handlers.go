@@ -61,6 +61,7 @@ func NewServer(st *store.Store, meili *search.Client, content *storage.Store) *S
 func (s *Server) NewServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("POST /api/v1/assets", s.handleCreateAsset)
 	mux.HandleFunc("POST /api/v1/assets/upload", s.handleUploadAsset)
 	mux.HandleFunc("GET /api/v1/assets", s.handleListAssets)
@@ -88,9 +89,58 @@ type createAssetRequest struct {
 	Metadata     json.RawMessage `json:"metadata"`
 }
 
-// handleHealth 存活探针。
+// handleHealth 存活探针（liveness：进程活着即 200）。
+// A2-02：依赖可达性由 /readyz 承担，二者分离——依赖故障不应触发进程重启。
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleReady 就绪探针（readiness）：检查 PG/Meili/存储根可达。
+// 依赖故障返回 503（compose 可据此摘除流量，但不重启进程）。
+// meili 为 nil（检索降级模式）或 storage 为 nil 时不视为未就绪。
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	type dep struct {
+		Name string `json:"name"`
+		OK   bool   `json:"ok"`
+		Err  string `json:"error,omitempty"`
+	}
+	deps := []dep{}
+	ready := true
+
+	if s.store != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if _, err := s.store.CountAssets(ctx); err != nil {
+			deps = append(deps, dep{Name: "postgres", OK: false, Err: err.Error()})
+			ready = false
+		} else {
+			deps = append(deps, dep{Name: "postgres", OK: true})
+		}
+	}
+	if s.meili != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if err := s.meili.Health(ctx); err != nil {
+			deps = append(deps, dep{Name: "meilisearch", OK: false, Err: err.Error()})
+			ready = false
+		} else {
+			deps = append(deps, dep{Name: "meilisearch", OK: true})
+		}
+	}
+	if s.content != nil {
+		if err := s.content.Healthy(); err != nil {
+			deps = append(deps, dep{Name: "storage", OK: false, Err: err.Error()})
+			ready = false
+		} else {
+			deps = append(deps, dep{Name: "storage", OK: true})
+		}
+	}
+
+	status := http.StatusOK
+	if !ready {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]any{"ready": ready, "dependencies": deps})
 }
 
 // handleCreateAsset 写入资产元数据并同步 Meilisearch。
@@ -467,14 +517,41 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// maxUploadBytes 单次上传请求体上限（文件上限 + 少量 multipart 开销）。
-const maxUploadBytes = storage.DefaultMaxBytes + (1 << 20)
+// maxUploadOverheadBytes 请求体上限相对单文件上限的余量（multipart 边界/头部/其余字段）。
+// A2-03：请求体上限不再硬编码 storage.DefaultMaxBytes，而是 MaxBytes()+本余量，
+// 使 MAX_UPLOAD_BYTES 调小后真实生效。
+const maxUploadOverheadBytes = 1 << 20
 
 // maxTagLen 与 schema 中 tags.name VARCHAR(128) 对齐。
 const maxTagLen = 128
 
-// maxUploadFieldMemory 解析 multipart 时允许驻留内存的字节数，超出部分落临时文件。
-const maxUploadFieldMemory = 8 << 20
+// 上传端点的时间预算（A2-06）。服务端级 ReadTimeout/WriteTimeout 只为常规请求设定
+// （15s/30s），大文件慢速上传必须由本端点显式放宽本次请求的期限，否则：
+//   - 读期限 15s 会在慢速上传中途掐断请求（旧实现表现为误导性的 400）；
+//   - 写期限 30s 从"读完请求头"起算，同样会在长上传时提前掐断连接。
+const (
+	// uploadReadBudget 请求体读取总预算：约 100MiB @ 300KB/s。
+	uploadReadBudget = 5 * time.Minute
+	// uploadWriteBudget 响应写期限：必须覆盖"长读 + 常规写"。
+	uploadWriteBudget = uploadReadBudget + 30*time.Second
+)
+
+// allowSlowUpload 放宽本次请求的读/写期限，使大文件慢速上传不被服务端级超时截断。
+// 不支持该控制的 ResponseWriter（如测试用 recorder）会返回错误，忽略即可——
+// 此时仍有服务端级超时兜底，不影响安全性。
+func allowSlowUpload(w http.ResponseWriter) {
+	rc := http.NewResponseController(w)
+	now := time.Now()
+	_ = rc.SetReadDeadline(now.Add(uploadReadBudget))
+	_ = rc.SetWriteDeadline(now.Add(uploadWriteBudget))
+}
+
+// 上传解析的可预期错误（由 handler 映射为 4xx）。
+var (
+	errUploadNotMultipart = errors.New("request is not multipart/form-data")
+	errUploadNoFilePart   = errors.New(`multipart part "file" is required`)
+	errUploadNoFileName   = errors.New("uploaded file must have a name")
+)
 
 // handleUploadAsset 接收 multipart/form-data 的真实文件字节：
 // 流式落盘（内容寻址 + SHA256 去重）→ 元数据入库 → 同步 Meilisearch。
@@ -485,50 +562,17 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
-	if err := r.ParseMultipartForm(maxUploadFieldMemory); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, "upload exceeds maximum request size")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid multipart form")
-		return
-	}
-	defer func() {
-		if r.MultipartForm != nil {
-			_ = r.MultipartForm.RemoveAll()
-		}
-	}()
+	// A2-06：放宽本次请求的读写期限，慢速大文件上传不会被服务端级 15s/30s 截断。
+	allowSlowUpload(w)
 
-	file, hdr, err := r.FormFile("file")
+	// A2-03：请求体上限 = 配置的单文件上限 + multipart 余量。
+	r.Body = http.MaxBytesReader(w, r.Body, s.content.MaxBytes()+maxUploadOverheadBytes)
+
+	// A2-01：流式解析 multipart，文件部分直接流进内容寻址存储（资产卷内 .tmp → 终路径），
+	// 不经 ParseMultipartForm，因而不产生容器 /tmp 副本、不双写、不受宿主 docker 层配额影响。
+	saved, clientName, err := s.saveUploadedFile(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, `multipart part "file" is required`)
-		return
-	}
-	defer func() { _ = file.Close() }()
-
-	clientName := strings.TrimSpace(hdr.Filename)
-	if clientName == "" {
-		writeError(w, http.StatusBadRequest, "uploaded file must have a name")
-		return
-	}
-
-	saved, err := s.content.Save(file, clientName)
-	switch {
-	case errors.Is(err, storage.ErrUnsupportedType):
-		writeError(w, http.StatusUnsupportedMediaType,
-			"unsupported file extension (allowed: png, jpg, jpeg, gif, webp, pdf, txt, md, csv, json)")
-		return
-	case errors.Is(err, storage.ErrTooLarge):
-		writeError(w, http.StatusRequestEntityTooLarge, "file exceeds maximum size")
-		return
-	case errors.Is(err, storage.ErrEmptyFile):
-		writeError(w, http.StatusBadRequest, "uploaded file is empty")
-		return
-	case err != nil:
-		log.Printf("upload save failed (client name %q): %v", clientName, err)
-		writeError(w, http.StatusInternalServerError, "failed to store file")
+		writeError(w, uploadErrorStatus(err), uploadErrorMessage(err))
 		return
 	}
 
@@ -548,6 +592,12 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 	inserted, err := s.store.InsertAsset(ctx, asset)
 	if err != nil {
 		log.Printf("upload insert failed (sha256 %s): %v", saved.SHA256, err)
+		// A2-05：入库失败时删除刚落盘的孤儿文件（去重命中的对象不属于本次请求，不删）。
+		if !saved.Deduped {
+			if dErr := s.content.Discard(saved.RelPath); dErr != nil {
+				log.Printf("upload orphan cleanup failed (path %q): %v", saved.RelPath, dErr)
+			}
+		}
 		writeError(w, http.StatusInternalServerError, "failed to store asset")
 		return
 	}
@@ -574,6 +624,12 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 	created, err := s.store.GetAssetBySHA256(ctx, saved.SHA256)
 	if err != nil || created == nil {
 		log.Printf("upload readback created failed: %v", err)
+		// A2-05：回读失败同样清理孤儿文件。
+		if !saved.Deduped {
+			if dErr := s.content.Discard(saved.RelPath); dErr != nil {
+				log.Printf("upload orphan cleanup failed (path %q): %v", saved.RelPath, dErr)
+			}
+		}
 		writeError(w, http.StatusInternalServerError, "failed to load created asset")
 		return
 	}
@@ -585,6 +641,100 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// saveUploadedFile 流式取出 multipart 的 "file" 部分并落盘（A2-01）。
+// 只读取 file 部分；其余字段按序读尽后丢弃（不驻留内存、不落临时文件）。
+// 返回的错误由 uploadErrorStatus / uploadErrorMessage 映射为状态码与响应文案。
+func (s *Server) saveUploadedFile(r *http.Request) (*storage.SavedObject, string, error) {
+	mr, err := r.MultipartReader()
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: %v", errUploadNotMultipart, err)
+	}
+
+	var saved *storage.SavedObject
+	clientName := ""
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, "", err
+		}
+
+		// 非文件部分（或重复的 file 部分）：读尽后丢弃，否则会阻塞后续 part 的解析。
+		if part.FormName() != "file" || part.FileName() == "" || saved != nil {
+			if _, err := io.Copy(io.Discard, part); err != nil {
+				_ = part.Close()
+				return nil, "", err
+			}
+			_ = part.Close()
+			continue
+		}
+
+		clientName = strings.TrimSpace(part.FileName())
+		if clientName == "" {
+			_ = part.Close()
+			return nil, "", errUploadNoFileName
+		}
+		saved, err = s.content.Save(part, clientName)
+		_ = part.Close()
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	if saved == nil {
+		return nil, "", errUploadNoFilePart
+	}
+	return saved, clientName, nil
+}
+
+// uploadErrorStatus 把上传解析/落盘错误映射为 HTTP 状态码。
+func uploadErrorStatus(err error) int {
+	var maxErr *http.MaxBytesError
+	switch {
+	case errors.As(err, &maxErr):
+		return http.StatusRequestEntityTooLarge
+	case errors.Is(err, storage.ErrUnsupportedType):
+		return http.StatusUnsupportedMediaType
+	case errors.Is(err, storage.ErrTooLarge):
+		return http.StatusRequestEntityTooLarge
+	case errors.Is(err, storage.ErrEmptyFile):
+		return http.StatusBadRequest
+	case errors.Is(err, errUploadNotMultipart),
+		errors.Is(err, errUploadNoFilePart),
+		errors.Is(err, errUploadNoFileName):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// uploadErrorMessage 返回对客户端可见的错误文案；非预期错误只记日志、不泄露内部细节。
+func uploadErrorMessage(err error) string {
+	switch uploadErrorStatus(err) {
+	case http.StatusRequestEntityTooLarge:
+		if errors.Is(err, storage.ErrTooLarge) {
+			return "file exceeds maximum size"
+		}
+		return "upload exceeds maximum request size"
+	case http.StatusUnsupportedMediaType:
+		return "unsupported file extension (allowed: png, jpg, jpeg, gif, webp, pdf, txt, md, csv, json)"
+	case http.StatusBadRequest:
+		switch {
+		case errors.Is(err, storage.ErrEmptyFile):
+			return "uploaded file is empty"
+		case errors.Is(err, errUploadNoFileName):
+			return errUploadNoFileName.Error()
+		default:
+			return err.Error()
+		}
+	default:
+		log.Printf("upload save failed: %v", err)
+		return "failed to store file"
+	}
 }
 
 // displayName 由客户端文件名生成展示用名称：去目录成分、去控制字符、按 rune 截断到列上限。
@@ -693,8 +843,25 @@ func (s *Server) handlePreviewAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = f.Close() }()
 
+	// A2-04：内容-类型强制校验。预览按 DB 中的 mime 内联返回文件；若伪装成
+	// image/png 的 HTML/JS 入库，此处嗅探不一致即拒绝，阻断存储型 XSS。
+	head := make([]byte, storage.SniffPeekBytes)
+	n, _ := io.ReadFull(f, head)
+	head = head[:n]
+	if !storage.MatchedContentType(head, asset.MimeType) {
+		log.Printf("preview rejected (asset %s): content does not match declared mime %s", asset.ID, asset.MimeType)
+		writeError(w, http.StatusUnsupportedMediaType, "content does not match declared mime type")
+		return
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		log.Printf("preview seek failed (asset %s): %v", asset.ID, err)
+		writeError(w, http.StatusInternalServerError, "failed to read asset content")
+		return
+	}
+
 	w.Header().Set("Content-Type", asset.MimeType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'none'; sandbox")
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", asset.Name))
 	}

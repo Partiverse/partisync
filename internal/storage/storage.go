@@ -28,6 +28,8 @@ const (
 	DefaultMaxBytes = 100 << 20
 	// sniffPeekBytes 内容嗅探与图片尺寸探测的读取前缀大小。
 	sniffPeekBytes = 64 << 10
+	// SniffPeekBytes 对外暴露的嗅探前缀大小（预览端点内容校验用，A2-04）。
+	SniffPeekBytes = sniffPeekBytes
 	tmpDirName     = ".tmp"
 )
 
@@ -79,6 +81,28 @@ func New(root string, maxBytes int64) (*Store, error) {
 
 // Root 返回存储根的绝对路径。
 func (s *Store) Root() string { return s.root }
+
+// Healthy 检查存储根可达（readiness 探针用，A2-02）。
+func (s *Store) Healthy() error {
+	if _, err := os.Stat(filepath.Join(s.root, tmpDirName)); err != nil {
+		return fmt.Errorf("storage root %q not writable-ready: %w", s.root, err)
+	}
+	return nil
+}
+
+// Discard 删除已落盘的对象（A2-05：入库失败时清理孤儿文件，防磁盘泄漏）。
+// relPath 必须是 Save 返回的相对路径（会再次经过 Resolve 的越界校验）；
+// 对象不存在视为成功（幂等）。
+func (s *Store) Discard(relPath string) error {
+	abs, err := s.Resolve(relPath)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("storage: discard object: %w", err)
+	}
+	return nil
+}
 
 // MaxBytes 返回单文件上限。
 func (s *Store) MaxBytes() int64 { return s.maxBytes }
@@ -212,15 +236,20 @@ func (s *Store) Open(relPath string) (*os.File, error) {
 	return f, nil
 }
 
+// normalizeMime 去掉 MIME 参数（如 "; charset=utf-8"）并裁剪空白，便于比较。
+func normalizeMime(mime string) string {
+	if i := strings.IndexByte(mime, ';'); i >= 0 {
+		mime = mime[:i]
+	}
+	return strings.TrimSpace(mime)
+}
+
 // sniffMime 嗅探前缀内容类型；无法判定时回退到扩展名默认值。
 func sniffMime(head []byte, fallback string) (string, bool) {
 	if len(head) == 0 {
 		return fallback, false
 	}
-	detected := http.DetectContentType(head)
-	if i := strings.IndexByte(detected, ';'); i >= 0 {
-		detected = strings.TrimSpace(detected[:i])
-	}
+	detected := normalizeMime(http.DetectContentType(head))
 	if detected == "" || detected == "application/octet-stream" {
 		return fallback, false
 	}

@@ -1,0 +1,88 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "1.1 列表渲染非空",
+      "ok": true,
+      "detail": "cards=24"
+    },
+    {
+      "name": "2.1 上传/去重提示可见",
+      "ok": true,
+      "detail": "notice shown"
+    },
+    {
+      "name": "3.1 搜索命中上传资产",
+      "ok": true,
+      "detail": "cards=1"
+    },
+    {
+      "name": "4.1 预览图加载成功",
+      "ok": true,
+      "detail": "{\"found\":true,\"status\":200,\"bytes\":82,\"ok\":true}"
+    },
+    {
+      "name": "5.1 人工标签写入并展示",
+      "ok": true,
+      "detail": "badge visible"
+    },
+    {
+      "name": "6.1 标注任务完成",
+      "ok": true,
+      "detail": "polled 20s, completed=true"
+    },
+    {
+      "name": "7.1 确认成功提示可见",
+      "ok": true,
+      "detail": "confirm notice"
+    },
+    {
+      "name": "7.2 AI 标签写入并展示",
+      "ok": true,
+      "detail": "ai badges=3"
+    }
+  ],
+  "failed": [],
+  "consoleErrors": [],
+  "badResponses": [],
+  "steps": [
+    {
+      "step": "1-冷启动列表",
+      "shot": "docs/verification/p2-hardening/01-list.png"
+    },
+    {
+      "step": "2-上传文件",
+      "file": "l3-mcd-1789232777190.png",
+      "shot": "docs/verification/p2-hardening/02-upload.png"
+    },
+    {
+      "step": "3-搜索命中",
+      "cardCount": 1,
+      "shot": "docs/verification/p2-hardening/03-search-hit.png"
+    },
+    {
+      "step": "4-预览",
+      "imgStatus": {
+        "found": true,
+        "status": 200,
+        "bytes": 82,
+        "ok": true
+      },
+      "shot": "docs/verification/p2-hardening/04-preview.png"
+    },
+    {
+      "step": "5-人工标签",
+      "shot": "docs/verification/p2-hardening/05-human-tag.png"
+    },
+    {
+      "step": "6-慢标注任务",
+      "completed": true,
+      "shot": "docs/verification/p2-hardening/06-job-completed.png"
+    },
+    {
+      "step": "7-人工确认AI建议",
+      "aiBadges": 3,
+      "shot": "docs/verification/p2-hardening/07-confirmed.png"
+    }
+  ]
+}

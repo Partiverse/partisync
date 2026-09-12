@@ -175,7 +175,7 @@ SESSION.md §5 的 MCD 闭环为「自托管启动 → 上传/导入 → 元数�
 | C2-8 medium（单测零断言力） | **已修** | 新增 8 个有断言力的用例（断言真实请求体/响应键） |
 | C2-5 high（`maxTotalHits=1000` 深分页硬墙） | **打开** | 需权衡内存后决策，未动 |
 | C2-7 / C2-9 | **打开** | 属新增 UI 面，未获批不动 |
-| A2-01…A2-06、B-01…B-06 | **打开** | 其中 B-01/B-02/B-06 要求修正证据文档口径 |
+| A2-01…A2-06、B-01…B-06 | **A2 已修（见 §12），B 打开** | 其中 B-01/B-02/B-06 要求修正证据文档口径 |
 
 **C2-6 的精确化（补充审计当时未能区分的细节）**：Meili 命中缺字段**只发生在 App 写入的文档**（`UpsertAssetDocument` 仅索引 6 个字段）；压测语料 `bench-*` 文档由生成器写入了 `path/created_at/tags/owner/description`，因此**同一缺陷在两类文档来源上表现不一致**——审计时对 `bench-*` 文档取样会看不到 `Invalid Date`。修复后用 App 上传资产专门回归（卡片曾渲染 `Invalid Date`、详情路径为空，修复后为 `—` 与真实内容寻址路径）。
 
@@ -212,4 +212,22 @@ SESSION.md §5 的 MCD 闭环为「自托管启动 → 上传/导入 → 元数�
 
 **门禁更新**: T6″ 对 C2-1/C2-2/C2-3/C2-4/C2-6 的修复给出 **pass**；**C2-5 仍打开**，故 T6′ 的门禁依旧不放行（`verdict=fail` 的原始裁决维持，第 8 节不变）。
 
+---
 
+## 12. P2 加固批（A2-01…A2-06）处置状态（2026-09-13 追加，实施者自证）
+
+> 本节为**追加状态**，不修改第 3/4/8/10/11 节中审计与复核当时的原始裁决与证据。
+
+| finding | 状态 | 机制与证据 |
+|---|---|---|
+| A2-01（multipart 大文件先落容器 `/tmp`） | **已修** | `ParseMultipartForm` → `MultipartReader` 流式解析，文件部分直接进 `storage.Save`（写进资产卷内）。L2 实测 12MiB 上传后容器可写层 `delta=0 bytes`、`/tmp` 条目 0；反向实验证明旧实现必然落 `multipart-*` 12,582,912 bytes |
+| A2-02（`/healthz` 纯 liveness） | **已修** | 新增 `GET /readyz`：PG/Meili/存储逐项 + 任一不可达 503；`/healthz` 保持纯存活（依赖故障不触发重启）。L2 实测 PG、Meili 双向停机-恢复全部断言通过 |
+| A2-03（请求体上限硬编码） | **已修** | 上限改为 `store.MaxBytes() + 1MiB`。L2 一次性容器 `MAX_UPLOAD_BYTES=1MiB`：2MiB → 413、512KiB → 201 |
+| A2-04（只约束后缀、按声明 MIME 内联返回） | **已修** | 预览前 `MatchedContentType` 核对内容与声明（不一致 → 415）+ `Content-Security-Policy: … sandbox`。L2 以元数据端点构造「HTML 字节声明为 `image/png`」→ 415，真实 `text/html` 资产 → 200。**并修掉初版逐字比较导致的 md/csv/json 误拒**（改为文本家族收敛判定） |
+| A2-05（失败留孤儿文件） | **已修** | 入库/回读失败路径调用 `storage.Discard`（幂等、经越界校验；去重命中对象不删）。L2 停机 PG 上传 → 500 且资产卷内无该 sha 对象 |
+| A2-06（`ReadTimeout=15s` 截断慢上传） | **已修** | 服务端级超时保持严格（读 15s / 头 15s / 写 30s），上传端点用 `http.ResponseController` 放宽本次请求读 5min、写 5min+30s——**同时解除 `WriteTimeout=30s` 这道第二墙**。L2 实测 4MiB @100KB/s = 40.97s → 201 |
+| A2-07…A2-09（info） | **打开** | 上传端点无认证；镜像 tag 未按 digest 固定；不在本批范围 |
+
+**证据**：`docs/evidence/l2-integration-p2-hardening.md`（L1 全绿 + L2 53/53 PASS + L3 回归 8/8 + 反向验证）；任务卡 `docs/P2-HARDENING-TASK-CARD.md`；L2 脚本 `scripts/l2-p2-hardening.sh`。
+
+**独立性声明**：本批修复与验证均由**主 Agent（实施者，strong 档）**完成，**不构成独立复审**（任务卡 AC-11 未执行）。第 8 节的门禁判定与第 11 节 T6″ 结论不因本节改变；C2-5 虽已修（`docs/evidence/l3-mcd-acceptance.md`），其独立复审同样未执行。

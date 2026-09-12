@@ -16,16 +16,16 @@ import (
 
 // Config 控制 Worker 行为。
 type Config struct {
-	PollInterval        time.Duration
-	LeaseTimeout       time.Duration
-	MaxRetries         int
+	PollInterval           time.Duration
+	LeaseTimeout           time.Duration
+	MaxRetries             int
 	MockAnnotateDelayRange [2]time.Duration
 }
 
 var DefaultConfig = Config{
-	PollInterval:        2 * time.Second,
-	LeaseTimeout:       5 * time.Minute,
-	MaxRetries:         3,
+	PollInterval:           2 * time.Second,
+	LeaseTimeout:           5 * time.Minute,
+	MaxRetries:             3,
 	MockAnnotateDelayRange: [2]time.Duration{100 * time.Millisecond, 500 * time.Millisecond},
 }
 

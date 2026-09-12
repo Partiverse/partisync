@@ -169,6 +169,26 @@ func (c *Client) Search(ctx context.Context, q string, limit, offset int, opts .
 	return resp.Hits, resp.EstimatedTotalHits, nil
 }
 
+// Health 检查 Meilisearch 可达性（readiness 探针用，A2-02）。
+func (c *Client) Health(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	raw, err := c.do(ctx, http.MethodGet, "/health", nil)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return fmt.Errorf("decode health: %w", err)
+	}
+	if resp.Status != "available" {
+		return fmt.Errorf("meilisearch status %q", resp.Status)
+	}
+	return nil
+}
+
 // do 发送 JSON 请求并返回响应体。非 2xx 返回含状态码与响应片的错误；
 // 409（资源已存在）视为幂等成功。
 func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte, error) {
