@@ -19,11 +19,11 @@ import (
 
 // WebDAVConfig WebDAV 连接配置。
 type WebDAVConfig struct {
-	URL        string // e.g. "https://nas.example.com/webdav/"
+	URL        string        // e.g. "https://nas.example.com/webdav/"
 	Username   string
 	Password   string
-	RemotePath string // e.g. "/documents"
-	Timeout    time.Duration
+	RemotePath string        // e.g. "/documents"
+	Timeout    time.Duration // 0 表示 DefaultTimeout
 }
 
 // DefaultTimeout 默认超时。
@@ -37,35 +37,15 @@ type FileInfo struct {
 	MimeType string
 }
 
-// WebDAVClient WebDAV 客户端，使用标准库实现。
+// WebDAVClient WebDAV 客户端。
 type WebDAVClient struct {
-	config   WebDAVConfig
-	client   *http.Client
-	baseURL  *url.URL
-}
-
-// propfindResponse WebDAV PROPFIND 响应。
-type propfindResponse struct {
-	XMLName xml.Name `xml:"DAV:response"`
-	Href   string   `xml:"href"`
-	Stat   stat     `xml:"propstat>prop"`
-}
-
-type stat struct {
-	GetContentLength int64  `xml:"getcontentlength"`
-	GetContentType   string `xml:"getcontenttype"`
-	GetLastModified  string `xml:"getlastmodified"`
-	DisplayName      string `xml:"displayname"`
-	IsCollection     string `xml:"iscollection"`
-}
-
-// multistatus WebDAV 多状态响应。
-type multistatus struct {
-	XMLName   xml.Name         `xml:"DAV:multistatus"`
-	Responses []propfindResponse `xml:"response"`
+	config  WebDAVConfig
+	client  *http.Client
+	baseURL *url.URL
 }
 
 // propfindRequest PROPFIND 请求体。
+// xmlns="DAV:" 是必需的——123pan 等服务器在没有命名空间时返回 404。
 const propfindBody = `<?xml version="1.0" encoding="utf-8"?>
 <propfind xmlns="DAV:">
   <prop>
@@ -73,9 +53,40 @@ const propfindBody = `<?xml version="1.0" encoding="utf-8"?>
     <getcontenttype/>
     <getlastmodified/>
     <displayname/>
+    <resourcetype/>
     <iscollection/>
   </prop>
 </propfind>`
+
+// —— XML 解析结构（无命名空间前缀，兼容所有 WebDAV 服务器）——
+// Go 的 encoding/xml 按 Local Name 匹配，xml:"href" 可以匹配
+// <d:href>、<DAV:href>、<href> 等任何前缀。
+
+// multistatus PROPFIND 响应最外层。
+type multistatus struct {
+	Responses []response `xml:"response"`
+}
+
+// response 单个资源条目。
+type response struct {
+	Href      string       `xml:"href"`
+	Propstats []propstat   `xml:"propstat"`
+}
+
+// propstat 属性状态块（可能有多个：200 OK + 404 Not Found）。
+type propstat struct {
+	Prop   prop   `xml:"prop"`
+	Status string `xml:"status"`
+}
+
+// prop 属性集合。
+type prop struct {
+	ContentLength int64  `xml:"getcontentlength"`
+	ContentType   string `xml:"getcontenttype"`
+	LastModified  string `xml:"getlastmodified"`
+	DisplayName   string `xml:"displayname"`
+	IsCollection  string `xml:"iscollection"` // Microsoft 扩展: "1"/"t"=目录，"0"/"f"=文件
+}
 
 // NewWebDAVClient 创建 WebDAV 客户端。
 func NewWebDAVClient(cfg WebDAVConfig) (*WebDAVClient, error) {
@@ -86,33 +97,42 @@ func NewWebDAVClient(cfg WebDAVConfig) (*WebDAVClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse webdav url: %w", err)
 	}
-	// 确保 base path 以 / 结尾
 	base.Path = strings.TrimSuffix(base.Path, "/") + "/"
-
 	return &WebDAVClient{
 		config:  cfg,
-		client: &http.Client{
-			Timeout: cfg.Timeout,
-		},
+		client:  &http.Client{Timeout: cfg.Timeout},
 		baseURL: base,
 	}, nil
 }
 
-// listFiles 列出 RemotePath 下的所有文件（递归 depth=infinity）。
-// 返回文件路径（相对于 RemotePath）列表和错误。
+// listFiles 列出 RemotePath 下的所有文件（递归）。
+// 策略：优先 Depth:infinity，失败则降级 Depth:1 手动递归。
 func (c *WebDAVClient) ListFiles(ctx context.Context) ([]FileInfo, error) {
-	targetPath := strings.TrimSuffix(c.config.RemotePath, "/")
+	targetPath := c.config.RemotePath
 	if targetPath == "" {
 		targetPath = "/"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.fullURL(targetPath), strings.NewReader(propfindBody))
+	// 先尝试 Depth:infinity
+	files, err := c.listAtDepth(ctx, targetPath, "infinity")
+	if err == nil {
+		return files, nil
+	}
+
+	// 降级：Depth:1 + 手动递归
+	seenDirs := make(map[string]bool)
+	return c.listRecursive(ctx, targetPath, seenDirs)
+}
+
+// listAtDepth 发送指定 Depth 的 PROPFIND 请求并解析。
+func (c *WebDAVClient) listAtDepth(ctx context.Context, remotePath, depth string) ([]FileInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.fullURL(remotePath), strings.NewReader(propfindBody))
 	if err != nil {
 		return nil, fmt.Errorf("create propfind request: %w", err)
 	}
 	c.setAuth(req)
 	req.Header.Set("Content-Type", "application/xml")
-	req.Header.Set("Depth", "infinity")
+	req.Header.Set("Depth", depth)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -125,41 +145,364 @@ func (c *WebDAVClient) ListFiles(ctx context.Context) ([]FileInfo, error) {
 		return nil, fmt.Errorf("propfind status %d: %s", resp.StatusCode, string(body))
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	return c.parseMultistatus(body, remotePath)
+}
+
+// parseMultistatus 解析 PROPFIND 响应体。
+func (c *WebDAVClient) parseMultistatus(body []byte, remotePath string) ([]FileInfo, error) {
 	var ms multistatus
-	if err := xml.NewDecoder(resp.Body).Decode(&ms); err != nil {
+	if err := xml.Unmarshal(body, &ms); err != nil {
 		return nil, fmt.Errorf("decode multistatus: %w", err)
 	}
 
 	var files []FileInfo
-	remoteBase := path.Clean(c.config.RemotePath)
-	if !strings.HasPrefix(remoteBase, "/") {
-		remoteBase = "/" + remoteBase
-	}
-	remoteBase = strings.TrimSuffix(remoteBase, "/") + "/"
+	remoteBase := c.normalizeRemoteBase(remotePath)
 
 	for _, r := range ms.Responses {
-		// 跳过目录（iscollection=1）
-		if r.Stat.IsCollection == "1" || r.Stat.IsCollection == "t" {
+		href := c.parseHref(r.Href)
+		if href == "" {
 			continue
 		}
-		// 解码 href
-		href, err := url.PathUnescape(r.Href)
-		if err != nil {
+
+		// 找到第一个 200 OK 的 propstat
+		var p prop
+		var statusOK bool
+		for _, ps := range r.Propstats {
+			if strings.Contains(ps.Status, "200") || strings.Contains(ps.Status, "OK") {
+				p = ps.Prop
+				statusOK = true
+				break
+			}
+		}
+		if !statusOK {
 			continue
 		}
-		// 计算相对路径
-		rel, err := c.relativePath(href)
-		if err != nil || rel == "" {
+
+		// 判断目录：优先 iscollection 字段（Microsoft 扩展）
+		// 其次检测 resourcetype XML 中是否包含 <collection> 子元素
+		isDir := c.isDirectoryFromProp(p, r.Href, body)
+
+		if isDir {
 			continue
 		}
+
+		rel := c.relativePath(href, remoteBase)
+		if rel == "" || rel == "." {
+			continue
+		}
+		rel = strings.TrimPrefix(rel, "/")
+
+		mimeType := p.ContentType
+		if mimeType == "" {
+			mimeType = MimeTypeFromName(path.Base(href))
+		}
+
 		files = append(files, FileInfo{
 			Path:     rel,
 			Name:     path.Base(href),
-			Size:     r.Stat.GetContentLength,
-			MimeType: r.Stat.GetContentType,
+			Size:     p.ContentLength,
+			MimeType: mimeType,
 		})
 	}
 	return files, nil
+}
+
+// isDirectoryFromProp 判断是否目录。
+// 1. iscollection 字段（Microsoft 扩展）："1"/"t" = 目录
+// 2. resourcetype XML 中是否包含 <collection> 子元素（标准 WebDAV）
+func (c *WebDAVClient) isDirectoryFromProp(p prop, href string, body []byte) bool {
+	switch strings.ToLower(p.IsCollection) {
+	case "1", "true", "t":
+		return true
+	case "0", "false", "f":
+		return false
+	}
+
+	// iscollection 未知，检测 resourcetype XML 中是否有 <collection> 子元素
+	return c.hasCollectionChild(href, body)
+}
+
+// hasCollectionChild 在响应体中找到指定 href 的 <resourcetype> 块，
+// 检测其中是否包含 <collection> 子元素。
+func (c *WebDAVClient) hasCollectionChild(href string, body []byte) bool {
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	var curHref string
+	inResType := false
+	depth := 0
+	var tokenDepth int
+
+	for {
+		token, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		switch tok := token.(type) {
+		case xml.StartElement:
+			local := strings.ToLower(tok.Name.Local)
+			depth++
+			if depth == 1 && local == "response" {
+				curHref = ""
+			}
+			if depth == 2 && local == "href" {
+				var hv string
+				if err := dec.DecodeElement(&hv, &tok); err == nil {
+					curHref = c.parseHref(hv)
+				}
+				depth--
+				continue
+			}
+			if curHref == c.parseHref(href) {
+				if local == "resourcetype" {
+					inResType = true
+					tokenDepth = depth
+				}
+			}
+		case xml.EndElement:
+			if inResType && depth == tokenDepth {
+				inResType = false
+			}
+			depth--
+		}
+	}
+	return false
+}
+
+// listRecursive 递归列出目录（Depth:1 手动递归模式）。
+func (c *WebDAVClient) listRecursive(ctx context.Context, remotePath string, seenDirs map[string]bool) ([]FileInfo, error) {
+	if seenDirs[remotePath] {
+		return nil, nil
+	}
+	seenDirs[remotePath] = true
+
+	// 获取当前目录的所有条目（含目录）
+	entries, err := c.listAllAtDepth(ctx, remotePath, "1")
+	if err != nil {
+		return nil, err
+	}
+
+	var allFiles []FileInfo
+	var subDirs []string
+
+	for _, e := range entries {
+		if e.IsDir {
+			subDirs = append(subDirs, e.Href)
+		} else {
+			allFiles = append(allFiles, e.FileInfo)
+		}
+	}
+
+	for _, dir := range subDirs {
+		dirFiles, err := c.listRecursive(ctx, dir, seenDirs)
+		if err != nil {
+			continue
+		}
+		allFiles = append(allFiles, dirFiles...)
+	}
+	return allFiles, nil
+}
+
+// listEntry 单个条目（含是否目录的判断）。
+type listEntry struct {
+	FileInfo
+	Href   string
+	IsDir  bool
+}
+
+// listAllAtDepth 列出指定路径下所有条目（含文件/目录分类）。
+func (c *WebDAVClient) listAllAtDepth(ctx context.Context, remotePath, depth string) ([]listEntry, error) {
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.fullURL(remotePath), strings.NewReader(propfindBody))
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", depth)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMultiStatus {
+		return nil, fmt.Errorf("propfind status %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	var ms multistatus
+	if err := xml.Unmarshal(body, &ms); err != nil {
+		return nil, err
+	}
+
+	remoteBase := c.normalizeRemoteBase(remotePath)
+	var entries []listEntry
+
+	for _, r := range ms.Responses {
+		href := c.parseHref(r.Href)
+		if href == "" {
+			continue
+		}
+
+		var p prop
+		var statusOK bool
+		for _, ps := range r.Propstats {
+			if strings.Contains(ps.Status, "200") || strings.Contains(ps.Status, "OK") {
+				p = ps.Prop
+				statusOK = true
+				break
+			}
+		}
+		if !statusOK {
+			continue
+		}
+
+		isDir := false
+		switch strings.ToLower(p.IsCollection) {
+		case "1", "true", "t":
+			isDir = true
+		case "0", "false", "f":
+			isDir = false
+		default:
+			isDir = c.hasCollectionChild(href, body)
+		}
+
+		rel := c.relativePath(href, remoteBase)
+		if rel == "" || rel == "." {
+			continue
+		}
+		rel = strings.TrimPrefix(rel, "/")
+
+		mimeType := p.ContentType
+		if mimeType == "" && !isDir {
+			mimeType = MimeTypeFromName(path.Base(href))
+		}
+
+		entries = append(entries, listEntry{
+			FileInfo: FileInfo{
+				Path:     rel,
+				Name:     path.Base(href),
+				Size:     p.ContentLength,
+				MimeType: mimeType,
+			},
+			Href:  rel,
+			IsDir: isDir,
+		})
+	}
+	return entries, nil
+}
+
+// listDirectDirs 列出指定路径下的直接子目录。
+func (c *WebDAVClient) listDirectDirs(ctx context.Context, remotePath string) ([]string, error) {
+	entries, err := c.listAllAtDepth(ctx, remotePath, "1")
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir {
+			dirs = append(dirs, e.Href)
+		}
+	}
+	return dirs, nil
+}
+
+// parseHref 解析 href，处理 URL 编码和 XML 实体编码。
+func (c *WebDAVClient) parseHref(href string) string {
+	href = xmlEntityDecode(href)
+	href, _ = url.PathUnescape(href)
+	if idx := strings.IndexAny(href, "?#"); idx != -1 {
+		href = href[:idx]
+	}
+	return strings.TrimSpace(href)
+}
+
+// xmlEntityDecode 解码 XML 实体。
+func xmlEntityDecode(s string) string {
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&quot;", `"`)
+	s = strings.ReplaceAll(s, "&apos;", `'`)
+	s = strings.ReplaceAll(s, "&#x2F;", "/")
+	return s
+}
+
+// normalizeRemoteBase 返回规范化后的 RemotePath 基路径（以 / 结尾）。
+func (c *WebDAVClient) normalizeRemoteBase(remotePath string) string {
+	base := strings.TrimSuffix(remotePath, "/")
+	if !strings.HasPrefix(base, "/") {
+		base = "/" + base
+	}
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	return base
+}
+
+// relativePath 计算 href 相对于 remoteBase 的路径。
+func (c *WebDAVClient) relativePath(href, remoteBase string) string {
+	// 移除 URL 中的 scheme://host 部分
+	if idx := strings.Index(href, "://"); idx != -1 {
+		if pathIdx := strings.Index(href[idx+3:], "/"); pathIdx != -1 {
+			href = "/" + href[idx+3+pathIdx:]
+		}
+	}
+	rel := strings.TrimPrefix(href, remoteBase)
+	rel = strings.TrimPrefix(rel, c.config.RemotePath)
+	rel = strings.TrimPrefix(rel, "/")
+	return rel
+}
+
+// fullURL 拼接完整 URL。
+func (c *WebDAVClient) fullURL(p string) string {
+	u := *c.baseURL
+	if p == "/" {
+		return u.String()
+	}
+	u.Path = path.Join(u.Path, p)
+	return u.String()
+}
+
+// setAuth 设置 Basic Auth。
+func (c *WebDAVClient) setAuth(req *http.Request) {
+	if c.config.Username != "" {
+		req.SetBasicAuth(c.config.Username, c.config.Password)
+	}
+}
+
+// Probe 连接探针：尝试 PROPFIND RemotePath，返回是否可达。
+func (c *WebDAVClient) Probe(ctx context.Context) error {
+	remotePath := c.config.RemotePath
+	if remotePath == "" {
+		remotePath = "/"
+	}
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.fullURL(remotePath), strings.NewReader(propfindBody))
+	if err != nil {
+		return err
+	}
+	c.setAuth(req)
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", "0")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// 接受 207 (MultiStatus) 或 2xx
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("probe status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // DownloadToTemp 下载远程文件到系统临时目录，返回本地路径。
@@ -182,7 +525,6 @@ func (c *WebDAVClient) DownloadToTemp(ctx context.Context, relPath string) (stri
 		return "", fmt.Errorf("get status %d: %s", resp.StatusCode, string(body))
 	}
 
-	// 写到临时文件
 	tmp, err := os.CreateTemp("", "webdav-*")
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
@@ -197,68 +539,7 @@ func (c *WebDAVClient) DownloadToTemp(ctx context.Context, relPath string) (stri
 	return tmpPath, nil
 }
 
-// fullURL 拼接完整 URL。
-func (c *WebDAVClient) fullURL(p string) string {
-	u := *c.baseURL
-	u.Path = path.Join(u.Path, p)
-	return u.String()
-}
-
-// relativePath 计算 href 相对于 RemotePath 的路径。
-func (c *WebDAVClient) relativePath(href string) (string, error) {
-	base := c.baseURL.Path
-	if !strings.HasSuffix(base, "/") {
-		base += "/"
-	}
-	// href 可能以 /dav/ 或类似路径开头
-	remoteBase := strings.TrimSuffix(c.config.RemotePath, "/")
-	if !strings.HasPrefix(remoteBase, "/") {
-		remoteBase = "/" + remoteBase
-	}
-
-	// 尝试直接去除 base
-	if strings.HasPrefix(href, base) {
-		rel := strings.TrimPrefix(href, base)
-		rel = strings.TrimPrefix(rel, remoteBase)
-		rel = strings.TrimPrefix(rel, "/")
-		return rel, nil
-	}
-	// href 是绝对路径，尝试直接裁剪 RemotePath
-	if strings.HasPrefix(href, remoteBase) {
-		return strings.TrimPrefix(href, remoteBase), nil
-	}
-	return "", fmt.Errorf("href %q not under remote path %q", href, c.config.RemotePath)
-}
-
-// setAuth 设置 Basic Auth。
-func (c *WebDAVClient) setAuth(req *http.Request) {
-	if c.config.Username != "" {
-		req.SetBasicAuth(c.config.Username, c.config.Password)
-	}
-}
-
-// Probe 连接探针：尝试 PROPFIND 根目录，返回是否可达。
-func (c *WebDAVClient) Probe(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.fullURL("/"), strings.NewReader(propfindBody))
-	if err != nil {
-		return err
-	}
-	c.setAuth(req)
-	req.Header.Set("Content-Type", "application/xml")
-	req.Header.Set("Depth", "0")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("probe status %d", resp.StatusCode)
-	}
-	return nil
-}
-
-// mimeTypeFromName 根据文件扩展名推断 MIME 类型。
+// MimeTypeFromName 根据文件扩展名推断 MIME 类型。
 func MimeTypeFromName(name string) string {
 	ext := strings.ToLower(path.Ext(name))
 	switch ext {
@@ -291,6 +572,22 @@ func MimeTypeFromName(name string) string {
 	}
 }
 
+// ResourceType 从 MIME 类型推断资源类型。
+func ResourceType(mime string) string {
+	switch {
+	case strings.HasPrefix(mime, "image/"):
+		return "image"
+	case strings.HasPrefix(mime, "video/"):
+		return "video"
+	case strings.HasPrefix(mime, "audio/"):
+		return "audio"
+	case strings.HasPrefix(mime, "text/"), mime == "application/pdf", mime == "application/json":
+		return "document"
+	default:
+		return "document"
+	}
+}
+
 // FilterByTypes 过滤出指定资源类型的文件。
 func FilterByTypes(files []FileInfo, types []string) []FileInfo {
 	if len(types) == 0 {
@@ -302,74 +599,9 @@ func FilterByTypes(files []FileInfo, types []string) []FileInfo {
 		typeSet[t] = true
 	}
 	for _, f := range files {
-		rt := ResourceType(f.MimeType)
-		if typeSet[rt] {
+		if typeSet[ResourceType(f.MimeType)] {
 			keep = append(keep, f)
 		}
 	}
 	return keep
-}
-
-// ResourceType 从 MIME 类型推断 ResourceType。
-func ResourceType(mime string) string {
-	if strings.HasPrefix(mime, "image/") {
-		return "image"
-	}
-	if strings.HasPrefix(mime, "video/") {
-		return "video"
-	}
-	if strings.HasPrefix(mime, "audio/") {
-		return "audio"
-	}
-	if strings.HasPrefix(mime, "text/") || mime == "application/pdf" || mime == "application/json" {
-		return "document"
-	}
-	return "document"
-}
-
-// parseGetContentType 解析 Content-Type header，提取 MIME 类型。
-func parseGetContentType(ct string) string {
-	ct = strings.TrimSpace(ct)
-	if idx := strings.Index(ct, ";"); idx != -1 {
-		ct = strings.TrimSpace(ct[:idx])
-	}
-	return strings.ToLower(ct)
-}
-
-// —— 以下是 io.Copy 需要的 reader wrapper，避免导入 io ——
-
-// readCloser 组合 io.Reader 和 io.Closer。
-type readCloser struct {
-	io.Reader
-	io.Closer
-}
-
-// —— WebDAVError 错误类型 ——
-
-// WebDAVError WebDAV 操作错误。
-type WebDAVError struct {
-	Op  string
-	URL string
-	Err error
-}
-
-func (e *WebDAVError) Error() string {
-	return fmt.Sprintf("webdav %s %s: %v", e.Op, e.URL, e.Err)
-}
-
-func (e *WebDAVError) Unwrap() error { return e.Err }
-
-// parsePropfindHref 从 propfind response 中解析 href，处理 XML 编码。
-func parsePropfindHref(href string) string {
-	// href 可能被 XML 实体编码
-	href = strings.ReplaceAll(href, "&amp;", "&")
-	href = strings.ReplaceAll(href, "&lt;", "<")
-	href = strings.ReplaceAll(href, "&gt;", ">")
-	href = strings.ReplaceAll(href, "&quot;", `"`)
-	return href
-}
-
-// propfindRequest 创建指定深度的 PROPFIND 请求。
-func propfindRequest(depth string) *bytes.Buffer {
-	return bytes.NewBufferString(propfindBody)
 }
