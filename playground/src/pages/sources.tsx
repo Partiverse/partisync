@@ -28,9 +28,10 @@ function formatDate(iso: string | undefined): string {
   })
 }
 
-function SourceCard({ source, onDelete }: {
+function SourceCard({ source, onDelete, onEdit }: {
   source: DataSource
   onDelete: (id: string) => void
+  onEdit: (source: DataSource) => void
 }) {
   const [scanning, setScanning] = useState(false)
   const [pollingJob, setPollingJob] = useState<ScanJob | null>(null)
@@ -89,6 +90,13 @@ function SourceCard({ source, onDelete }: {
           <Button
             size="sm"
             variant="ghost"
+            onClick={() => onEdit(source)}
+          >
+            编辑
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
             onClick={() => onDelete(source.id)}
           >
             删除
@@ -135,6 +143,14 @@ export function DataSourcesPage() {
   const [password, setPassword] = useState("")
   const [remotePath, setRemotePath] = useState("/")
   const [saving, setSaving] = useState(false)
+  // 编辑相关
+  const [showEdit, setShowEdit] = useState(false)
+  const [editingId, setEditingId] = useState("")
+  const [editName, setEditName] = useState("")
+  const [editUrl, setEditUrl] = useState("")
+  const [editUsername, setEditUsername] = useState("")
+  const [editPassword, setEditPassword] = useState("")
+  const [editRemotePath, setEditRemotePath] = useState("/")
 
   const fetchSources = useCallback(async () => {
     try {
@@ -185,6 +201,36 @@ export function DataSourcesPage() {
     }
   }
 
+  const handleEdit = (source: DataSource) => {
+    setEditingId(source.id)
+    setEditName(source.name)
+    setEditUrl(source.url ?? "")
+    setEditUsername(source.username ?? "")
+    setEditPassword("") // 不回填密码
+    setEditRemotePath(source.remote_path ?? "/")
+    setShowEdit(true)
+  }
+
+  const handleUpdate = async () => {
+    if (!editName || !editUrl) {
+      toast.error("名称和 URL 不能为空")
+      return
+    }
+    setSaving(true)
+    try {
+      const body: Record<string, string> = { name: editName, url: editUrl, username: editUsername, remote_path: editRemotePath }
+      if (editPassword) body.password = editPassword
+      await api.updateSource(editingId, body)
+      toast.success("数据源已更新")
+      setShowEdit(false)
+      fetchSources()
+    } catch {
+      toast.error("更新失败")
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-2xl">
       <div className="flex items-center justify-between">
@@ -212,6 +258,7 @@ export function DataSourcesPage() {
               key={s.id}
               source={s}
               onDelete={handleDelete}
+              onEdit={handleEdit}
             />
           ))}
         </div>
@@ -275,6 +322,68 @@ export function DataSourcesPage() {
               </Button>
               <Button onClick={handleAdd} disabled={saving}>
                 {saving ? "创建中…" : "创建"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showEdit} onOpenChange={setShowEdit}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>编辑数据源</DialogTitle>
+            <DialogDescription>修改数据源配置。留空密码表示不修改。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>显示名称</Label>
+              <Input
+                placeholder="我的 NAS"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>WebDAV URL</Label>
+              <Input
+                placeholder="https://nas.example.com/webdav/"
+                value={editUrl}
+                onChange={(e) => setEditUrl(e.target.value)}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>用户名</Label>
+                <Input
+                  placeholder="user"
+                  value={editUsername}
+                  onChange={(e) => setEditUsername(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>密码（留空不修改）</Label>
+                <Input
+                  type="password"
+                  placeholder="••••••"
+                  value={editPassword}
+                  onChange={(e) => setEditPassword(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>远程路径</Label>
+              <Input
+                placeholder="/documents"
+                value={editRemotePath}
+                onChange={(e) => setEditRemotePath(e.target.value)}
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" onClick={() => setShowEdit(false)}>
+                取消
+              </Button>
+              <Button onClick={handleUpdate} disabled={saving}>
+                {saving ? "更新中…" : "保存"}
               </Button>
             </div>
           </div>

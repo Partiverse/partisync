@@ -82,6 +82,7 @@ func (s *Server) NewServeMux() *http.ServeMux {
 	// 数据源
 	mux.HandleFunc("GET /api/v1/sources", s.handleListSources)
 	mux.HandleFunc("POST /api/v1/sources", s.handleCreateSource)
+	mux.HandleFunc("PATCH /api/v1/sources/{id}", s.handleUpdateSource)
 	mux.HandleFunc("DELETE /api/v1/sources/{id}", s.handleDeleteSource)
 	mux.HandleFunc("POST /api/v1/sources/{id}/scan", s.handleScanSource)
 	mux.HandleFunc("GET /api/v1/source-jobs/{id}", s.handleGetScanJob)
@@ -1259,6 +1260,36 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"source": ds})
+}
+
+// handleUpdateSource 更新数据源。
+func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, "invalid source id")
+		return
+	}
+	ctx := r.Context()
+	var req models.UpdateDataSource
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// 验证：type 不可更改
+	if err := s.store.UpdateDataSource(ctx, id, &req); err != nil {
+		log.Printf("update datasource %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to update source")
+		return
+	}
+
+	// 重新读取完整数据源返回给前端
+	ds, err := s.store.GetDataSource(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to fetch updated source")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"source": ds})
 }
 
 // handleDeleteSource 删除数据源。

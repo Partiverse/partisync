@@ -523,6 +523,57 @@ RETURNING id, created_at`
 	return s.db.QueryRowContext(ctx, q, ds.Name, ds.Type, ds.Config).Scan(&ds.ID, &ds.CreatedAt)
 }
 
+// UpdateDataSource 按 ID 更新数据源字段（只更新提供的字段）。
+// 如果 password 为空字符串表示不修改密码（config 中的 password 保持不变）。
+func (s *Store) UpdateDataSource(ctx context.Context, id string, req *models.UpdateDataSource) error {
+	// 先读取现有配置
+	ds, err := s.GetDataSource(ctx, id)
+	if err != nil {
+		return err
+	}
+	if ds == nil {
+		return fmt.Errorf("datasource not found")
+	}
+
+	// 解析现有 config
+	var cfg map[string]string
+	if len(ds.Config) > 0 {
+		_ = json.Unmarshal(ds.Config, &cfg)
+	}
+
+	// 应用更新
+	if req.Name != nil {
+		ds.Name = *req.Name
+	}
+	if req.URL != nil {
+		cfg["url"] = *req.URL
+		ds.URL = *req.URL
+	}
+	if req.Username != nil {
+		cfg["username"] = *req.Username
+		ds.Username = *req.Username
+	}
+	if req.Password != nil && *req.Password != "" {
+		cfg["password"] = *req.Password
+	}
+	if req.RemotePath != nil {
+		cfg["remote_path"] = *req.RemotePath
+		ds.RemotePath = *req.RemotePath
+	}
+
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	const q = `UPDATE data_sources SET name=$1, config=$2 WHERE id=$3`
+	_, err = s.db.ExecContext(ctx, q, ds.Name, cfgJSON, id)
+	if err != nil {
+		return fmt.Errorf("update datasource: %w", err)
+	}
+	return nil
+}
+
 // GetDataSource 按 ID 查询；未找到返回 (nil, nil)。
 func (s *Store) GetDataSource(ctx context.Context, id string) (*models.DataSource, error) {
 	const q = "SELECT " + dataSourceColumns + " FROM data_sources WHERE id = $1"

@@ -110,6 +110,15 @@ type CreateDataSource struct {
 	RemotePath string `json:"remote_path"`
 }
 
+// UpdateDataSource 更新数据源的请求体（所有字段可选）。
+type UpdateDataSource struct {
+	Name       *string `json:"name,omitempty"`
+	URL        *string `json:"url,omitempty"`
+	Username   *string `json:"username,omitempty"`
+	Password   *string `json:"password,omitempty"` // 空字符串表示不修改密码
+	RemotePath *string `json:"remote_path,omitempty"`
+}
+
 // ScanRequest 扫描请求。
 type ScanRequest struct {
 	Recursive *bool    `json:"recursive"` // default true

@@ -256,6 +256,13 @@ export const api = {
       if (!r.ok && r.status !== 204) throw new Error('delete failed')
     }),
 
+  updateSource: (id: string, body: { name?: string; url?: string; username?: string; password?: string; remote_path?: string }): Promise<{ source: DataSource }> =>
+    fetch(`/api/v1/sources/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => r.json() as Promise<{ source: DataSource }>),
+
   scanSource: (id: string): Promise<{ job: ScanJob }> =>
     fetch(`/api/v1/sources/${id}/scan`, { method: 'POST' }).then((r) => r.json() as Promise<{ job: ScanJob }>),
 
