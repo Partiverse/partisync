@@ -1370,7 +1370,7 @@ func (s *Server) runSourceScan(jobID, sourceID string, configJSON json.RawMessag
 		Username:   cfg["username"],
 		Password:   cfg["password"],
 		RemotePath: cfg["remote_path"],
-		Timeout:    30 * time.Second,
+		Timeout:    5 * time.Minute, // 大目录扫描需要较长的单请求超时
 	}
 
 	client, err := connector.NewWebDAVClient(webdavCfg)

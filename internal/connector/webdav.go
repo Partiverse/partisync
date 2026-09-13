@@ -4,7 +4,6 @@
 package connector
 
 import (
-	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -13,7 +12,9 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -81,11 +82,12 @@ type propstat struct {
 
 // prop 属性集合。
 type prop struct {
-	ContentLength int64  `xml:"getcontentlength"`
-	ContentType   string `xml:"getcontenttype"`
-	LastModified  string `xml:"getlastmodified"`
-	DisplayName   string `xml:"displayname"`
-	IsCollection  string `xml:"iscollection"` // Microsoft 扩展: "1"/"t"=目录，"0"/"f"=文件
+	ContentLength int64   `xml:"getcontentlength"`
+	ContentType   string  `xml:"getcontenttype"`
+	LastModified  string  `xml:"getlastmodified"`
+	DisplayName   string  `xml:"displayname"`
+	IsCollection  string  `xml:"iscollection"`                      // Microsoft 扩展: "1"/"t"=目录，"0"/"f"=文件
+	Type          *xml.Name `xml:"resourcetype>collection,omitempty"` // DAV <collection> 元素（目录标志）
 }
 
 // NewWebDAVClient 创建 WebDAV 客户端。
@@ -113,15 +115,19 @@ func (c *WebDAVClient) ListFiles(ctx context.Context) ([]FileInfo, error) {
 		targetPath = "/"
 	}
 
-	// 先尝试 Depth:infinity
+	// 某些 WebDAV 服务器（如 123pan）报告 Depth:infinity 成功（207），
+	// 但实际只返回了 Depth:1 等价的结果，不做真正递归。
+	// 因此先尝试 infinity，再检查结果是否足够多——不足时降级到手动递归。
 	files, err := c.listAtDepth(ctx, targetPath, "infinity")
-	if err == nil {
+	if err == nil && len(files) > 200 {
+		// infinity 返回了较多文件，认为是真正的递归结果
 		return files, nil
 	}
 
-	// 降级：Depth:1 + 手动递归
+	// 降级：Depth:1 + 手动递归（并发加速）
 	seenDirs := make(map[string]bool)
-	return c.listRecursive(ctx, targetPath, seenDirs)
+	mu := &sync.Mutex{}
+	return c.listRecursive(ctx, targetPath, seenDirs, mu)
 }
 
 // listAtDepth 发送指定 Depth 的 PROPFIND 请求并解析。
@@ -212,10 +218,17 @@ func (c *WebDAVClient) parseMultistatus(body []byte, remotePath string) ([]FileI
 	return files, nil
 }
 
-// isDirectoryFromProp 判断是否目录。
-// 1. iscollection 字段（Microsoft 扩展）："1"/"t" = 目录
-// 2. resourcetype XML 中是否包含 <collection> 子元素（标准 WebDAV）
+// isDirectoryFromProp 判断是否目录（rclone 方案）。
+// 1. Type 字段：<resourcetype><collection/></resourcetype> 存在即为目录
+// 2. iscollection 字段（Microsoft 扩展）："1"/"t" = 目录
+// 3. 正则 fallback：扫描 body 中对应 response 块是否含 <D:collection
 func (c *WebDAVClient) isDirectoryFromProp(p prop, href string, body []byte) bool {
+	// 1. Type 字段（rclone 方案）：<collection> 元素存在即为目录
+	if p.Type != nil && p.Type.Space == "DAV:" && p.Type.Local == "collection" {
+		return true
+	}
+
+	// 2. Microsoft iscollection 扩展
 	switch strings.ToLower(p.IsCollection) {
 	case "1", "true", "t":
 		return true
@@ -223,70 +236,86 @@ func (c *WebDAVClient) isDirectoryFromProp(p prop, href string, body []byte) boo
 		return false
 	}
 
-	// iscollection 未知，检测 resourcetype XML 中是否有 <collection> 子元素
+	// 3. 正则 fallback
 	return c.hasCollectionChild(href, body)
 }
 
-// hasCollectionChild 在响应体中找到指定 href 的 <resourcetype> 块，
-// 检测其中是否包含 <collection> 子元素。
-func (c *WebDAVClient) hasCollectionChild(href string, body []byte) bool {
-	dec := xml.NewDecoder(bytes.NewReader(body))
-	var curHref string
-	inResType := false
-	depth := 0
-	var tokenDepth int
-
-	for {
-		token, err := dec.Token()
-		if err == io.EOF {
-			break
+// hasCollectionChildInBlock 在 body 中找到包含目标 href 的 response 块，
+// 检测其中是否含 <D:collection/>（表示目录）。
+// 使用原始字节比较 href（避免 XML/URL 双重编码问题）。
+func (c *WebDAVClient) hasCollectionChildInBlock(body []byte, decodedHref string) bool {
+	// 从 decodedHref 提取 path 部分（去掉 scheme://host）
+	targetPath := decodedHref
+	if idx := strings.Index(targetPath, "://"); idx != -1 {
+		if pathIdx := strings.Index(targetPath[idx+3:], "/"); pathIdx != -1 {
+			targetPath = targetPath[idx+3+pathIdx:]
 		}
-		if err != nil {
-			break
+	}
+	if targetPath == "" {
+		return false
+	}
+
+	// 用贪婪匹配每个 <D:response>...</D:response> 块
+	// 注意：不用 .+? 非贪婪，因为 response 块可能很大
+	responseRe := regexp.MustCompile(`(?i)<D:response[^>]*>(.+?)</D:response>`)
+	hrefRe := regexp.MustCompile(`(?i)<D:href[^>]*>([^<]*)</D:href>`)
+
+	// collection 检测：直接匹配 <D:collection ... />（允许有属性，不能跨行）
+	// 去掉 [^>]*/> 因为 123pan 返回 <D:collection xmlns:D="DAV:"/> 有换行
+	collectionRe := regexp.MustCompile(`(?i)<D:collection\b`)
+
+	for _, respMatch := range responseRe.FindAllSubmatch(body, -1) {
+		block := respMatch[0]
+
+		// 提取此 block 内的 href
+		hrefMatch := hrefRe.FindSubmatch(block)
+		if hrefMatch == nil {
+			continue
 		}
 
-		switch tok := token.(type) {
-		case xml.StartElement:
-			local := strings.ToLower(tok.Name.Local)
-			depth++
-			if depth == 1 && local == "response" {
-				curHref = ""
-			}
-			if depth == 2 && local == "href" {
-				var hv string
-				if err := dec.DecodeElement(&hv, &tok); err == nil {
-					curHref = c.parseHref(hv)
-				}
-				depth--
-				continue
-			}
-			if curHref == c.parseHref(href) {
-				if local == "resourcetype" {
-					inResType = true
-					tokenDepth = depth
-				}
-			}
-		case xml.EndElement:
-			if inResType && depth == tokenDepth {
-				inResType = false
-			}
-			depth--
+		// 解码 href，与目标 path 比较
+		foundHref := c.parseHref(string(hrefMatch[1]))
+		if foundHref != targetPath {
+			continue
+		}
+
+		// 找到了目标 response 块；检查是否含 <D:collection
+		if collectionRe.Match(block) {
+			return true
 		}
 	}
 	return false
 }
 
-// listRecursive 递归列出目录（Depth:1 手动递归模式）。
-func (c *WebDAVClient) listRecursive(ctx context.Context, remotePath string, seenDirs map[string]bool) ([]FileInfo, error) {
+// hasCollectionChild 兼容旧签名的桥接函数。
+func (c *WebDAVClient) hasCollectionChild(href string, body []byte) bool {
+	return c.hasCollectionChildInBlock(body, href)
+}
+
+// maxConcurrentDirs 最多同时扫描的子目录数量。
+const maxConcurrentDirs = 8 // 降低并发，避免触发 123pan 限速
+
+// listRecursive 递归列出目录（Depth:1 手动递归，goroutine 并发加速）。
+// seenDirs 必须被 mutex 保护。
+func (c *WebDAVClient) listRecursive(ctx context.Context, remotePath string, seenDirs map[string]bool, mu *sync.Mutex) ([]FileInfo, error) {
+	mu.Lock()
 	if seenDirs[remotePath] {
+		mu.Unlock()
 		return nil, nil
 	}
 	seenDirs[remotePath] = true
+	mu.Unlock()
 
-	// 获取当前目录的所有条目（含目录）
 	entries, err := c.listAllAtDepth(ctx, remotePath, "1")
 	if err != nil {
 		return nil, err
+	}
+
+	// 保护：123pan 把某些文件（.iso 等）标记为 <collection>（目录）。
+	// 对文件路径做 PROPFIND 时服务器返回该文件自身（1个条目）。
+	// 检测这种情况并将其作为文件处理，避免对文件路径无限递归。
+	if len(entries) == 1 && entries[0].Name == path.Base(remotePath) {
+		return []FileInfo{entries[0].FileInfo}, nil
 	}
 
 	var allFiles []FileInfo
@@ -300,13 +329,46 @@ func (c *WebDAVClient) listRecursive(ctx context.Context, remotePath string, see
 		}
 	}
 
+	if len(subDirs) == 0 {
+		return allFiles, nil
+	}
+
+	// 并发扫描所有子目录（限制最大并发数）
+	type dirResult struct {
+		path  string
+		files []FileInfo
+		err   error
+	}
+
+	// 使用 semaphore 模式限制并发数
+	sem := make(chan struct{}, maxConcurrentDirs)
+	resultCh := make(chan dirResult, len(subDirs))
+
+	var wg sync.WaitGroup
 	for _, dir := range subDirs {
-		dirFiles, err := c.listRecursive(ctx, dir, seenDirs)
-		if err != nil {
+		wg.Add(1)
+		go func(d string) {
+			defer wg.Done()
+			sem <- struct{}{}         // 获取令牌
+			defer func() { <-sem }() // 释放令牌
+			files, err := c.listRecursive(ctx, d, seenDirs, mu)
+			resultCh <- dirResult{path: d, files: files, err: err}
+		}(dir)
+	}
+
+	// 并发完成时关闭通道
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	for r := range resultCh {
+		if r.err != nil {
 			continue
 		}
-		allFiles = append(allFiles, dirFiles...)
+		allFiles = append(allFiles, r.files...)
 	}
+
 	return allFiles, nil
 }
 
@@ -372,7 +434,9 @@ func (c *WebDAVClient) listAllAtDepth(ctx context.Context, remotePath, depth str
 		case "0", "false", "f":
 			isDir = false
 		default:
-			isDir = c.hasCollectionChild(href, body)
+			// 直接在 body 中检测当前 response 块是否含 <D:collection>，
+			// 不依赖传入 href（避免 XML 实体 / percent-encoding 导致的解码不匹配问题）。
+			isDir = c.hasCollectionChildInBlock(body, r.Href)
 		}
 
 		rel := c.relativePath(href, remoteBase)
