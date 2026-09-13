@@ -1,7 +1,7 @@
 # SESSION.md — partisync 路线基线 v2
 
 > **用途**：抗上下文压缩的项目事实源。进入新阶段或继续会话前必须重读；若路线变化，先更新本文件再行动。
-> **当前阶段**：MCD 闭环已通过 L3 浏览器验收（T7，8/8 断言）；P2 安全加固批 + **AC-11 独立复审已满足**（三面 fresh-context 审计员 verdict 均 pass）；**P2.1 复审修复批已完成（2026-09-13）**：4 medium（S1/S2/F-I1/M1）+ 6 低成本 low 已修，L1 三绿（新增 9 测试含反向验证）、L2 60/60、L3 8/8，证据 `docs/evidence/l2-integration-p21-repair.md`。残留：S3/S4（low，待 P2.2）、info 级 3 项、② 测试残留清理（需用户批准）、③ C2-7/C2-9 与 B-01/B-02/B-06。详见 §14。
+> **当前阶段**：MCD 闭环已通过 L3 浏览器验收（T7，8/8 断言）；P2 安全加固批 + **AC-11 独立复审已满足**（三面 fresh-context 审计员 verdict 均 pass）；**P2.1/P2.2 复审修复批完成**（4+2 medium、8+ low 全修，L1/L2/L3 全绿）；**P2 收尾三件事完成（2026-09-13）**：① 测试残留清理（DB/卷/Meili 清零，脚本 `scripts/cleanup-test-residue.sh` 幂等可重跑；1M 基准语料保留 999,982 条，可由 `benchmark-1m.sh` 复现）；② S3/S4 修复（`l2-integration-p21-repair.md` §6）；③ C2-7/C2-9 UI + B-01/B-02/B-06 证据口径收口（8080 产品链路 p95=40.13ms 实证）。审计遗留仅剩 info 级 3 项（F-I2/F-I6/F-I7）。详见 §14。
 
 ## 1. 真实目标
 
@@ -293,9 +293,9 @@
 - L1 ✅（证据）：单测计数统一为 75fd604 15 + F6 1 = 16（审计员「18」含 helper 函数，以 `git show | grep '^+func Test'` 实数为准）。
 - L2 ✅（证据）：L3 脚本 `ok` 判定已纳入 `badResponses.length === 0`。
 
-### info（3）
+### info（3，均接受/留观）
 
-- F-I6：`readyz_test.go` 缺 PG 失败路径单测；F-I7：`/readyz` 错误串泄露内部拓扑（127.0.0.1 only 可接受，上反代前需改二元）；F-I8：`storage.Healthy` docstring 名实不符（随 F-I1 修）。
+- F-I6：`readyz_test.go` 缺 PG 失败路径单测；F-I7：`/readyz` 错误串泄露内部拓扑（127.0.0.1 only 可接受，上反代前需改二元）；F-I8：`storage.Healthy` docstring 名实不符（已随 F-I1 修 ✅）。
 
 ### 盲区（审计员声明，主 Agent 转录）
 
