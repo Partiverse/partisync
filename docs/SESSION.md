@@ -293,11 +293,14 @@
 - L1 ✅（证据）：单测计数统一为 75fd604 15 + F6 1 = 16（审计员「18」含 helper 函数，以 `git show | grep '^+func Test'` 实数为准）。
 - L2 ✅（证据）：L3 脚本 `ok` 判定已纳入 `badResponses.length === 0`。
 
-### info（3，均接受/留观）
+### info（3）— ✅ 全部已修（F-I6/F-I7 随本轮 65d78f8，F-I8 随 F-I1）
 
-- F-I6：`readyz_test.go` 缺 PG 失败路径单测；F-I7：`/readyz` 错误串泄露内部拓扑（127.0.0.1 only 可接受，上反代前需改二元）；F-I8：`storage.Healthy` docstring 名实不符（已随 F-I1 修 ✅）。
+- F-I6 ✅（探针）：`readyz_test.go` 缺 PG 失败路径单测 → 新增 `TestReadyNotReadyWhenPostgresUnreachable`（PG 不可达 503）+ `TestReadyErrorFieldCarriesNoTopology`（error 字段不含拓扑泄露）。
+- F-I7 ✅（探针）：`/readyz` 错误串泄露内部拓扑 → 响应统一二元口径（`unreachable`/`unavailable`），原始错误写日志；ADR-002 正式记录探针语义。
+- F-I8 ✅（探针）：`storage.Healthy` docstring 名实不符（已随 F-I1 修 ✅）。
 
 ### 盲区（审计员声明，主 Agent 转录）
 
 - CSP sandbox 浏览器真实行为未实测；F6 未在 live 复现（依赖单测+探针面 live 等价复现）；PG/Meili 中途故障未 live `docker stop` 验证（禁破坏容器）；历史 53/53 基线无法回放。
-- **未做（勿顺手做）**: 认证/RBAC、A2-07…A2-09、前端 415 文案提示、MCD 口径变更。
+- **未做（勿顺手做）**: 认证/RBAC、A2-07…A2-09、MCD 口径变更。
+  - 注：前端 415/413 人话提示（`playground/src/lib/api.ts` uploadAsset）已随本轮实现，不属于顺手做范畴。
