@@ -65,8 +65,16 @@ const cards = () => page.locator('div.cursor-pointer').count()
 await page.goto(BASE, { waitUntil: 'networkidle' })
 await page.waitForSelector('h1:has-text("资产管理")', { timeout: 20000 })
 await page.waitForTimeout(900)
-check('1.1 列表渲染非空', (await cards()) > 0, `cards=${await cards()}`)
-steps.push({ step: '1-冷启动列表', shot: await shot('01-list') })
+// 空库兼容（P2 残留清理后）：cards=0 且 API total=0 视为「空库正常渲染」；
+// 只有「库里有资产却渲染不出」才是失败。
+const totalAtStart = await page.evaluate(async () => {
+  const r = await fetch('/api/v1/assets?limit=1')
+  const j = await r.json()
+  return j.total ?? (j.results ? j.results.length : -1)
+})
+const cardsAtStart = await cards()
+check('1.1 列表渲染非空', cardsAtStart > 0 || totalAtStart === 0, `cards=${cardsAtStart}, total=${totalAtStart}`)
+steps.push({ step: '1-冷启动列表', cardCount: cardsAtStart, total: totalAtStart, shot: await shot('01-list') })
 
 // ── 2. 上传真实文件（multipart → SHA256 去重 → 内容寻址落盘）─────────
 await page.setInputFiles('input[type=file]', TEST_FILE)
