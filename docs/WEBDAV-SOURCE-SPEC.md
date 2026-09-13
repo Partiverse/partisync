@@ -164,7 +164,57 @@ playground/src/
 - 不实现 WebDAV 服务器功能（只做客户端）
 - 不在 MCD 阶段引入 rclone 进程管理（未来通过 subprocess 调用 rclone 做 SFTP 等复杂协议）
 
-## 9. 验收标准
+## 9. WebDAV 服务器兼容性（经验证）
+
+参考 rclone WebDAV backend 实现，整理各服务器兼容性要点。
+
+### 9.1 XML 命名空间（已验证）
+
+| 服务器 | xmlns 要求 | 前缀格式 | 备注 |
+|---|---|---|---|
+| 123pan | 必须 `xmlns="DAV:"` | `D:` | 无此命名空间返回 404 |
+| httpbin.org | 可选 | `DAV:` | 标准 RFC 4918 |
+| Nextcloud | 可选 | `d:` | 支持 DAV: 和无前缀 |
+| OwnCloud | 可选 | `d:` | 同 Nextcloud |
+| SharePoint | 可选 | `d:` | Cookie 认证，非 Basic Auth |
+
+**实现**：Go `encoding/xml` 的 struct tag 按 **Local Name** 匹配（忽略前缀），`xml:"href"` 可匹配 `<d:href>`、`<DAV:href>`、`<href>`。
+
+### 9.2 目录判断（已验证）
+
+- **标准**：`<resourcetype><collection/></resourcetype>` → 目录（Rclone 用 token 流式解码检测）
+- **Microsoft 扩展**：`iscollection="1"` 或 `"t"` → 目录
+- **注意事项**：`xml.Unmarshal` 的字符串字段无法直接判断是否有 `<collection>` 子元素，需要 token 流式解码
+
+### 9.3 PROPFIND Depth
+
+- **优先 `Depth: infinity`**：大部分服务器支持
+- **降级策略**：若返回 403/404，改用 `Depth: 1` + 手动递归目录（Rclone OwnCloud 策略）
+- **SharePoint 特例**：`Depth: 1` 不返回文件，只能用 `Depth: 0` 重试
+
+### 9.4 多 propstat 块
+
+每个 `<response>` 可能包含多个 `<propstat>`：
+- 第一个 200 OK：有效属性
+- 后续 404 Not Found：属性不存在（Rclone 的 Prop 结构用 lazy 方式处理：合并所有 propstat，StatusOK() 检查第一个状态）
+
+### 9.5 href 格式
+
+- 可能被 URL 编码：`%2F` → `/`
+- 可能含 XML 实体：`&amp;` `&lt;` `&gt;`
+- 可能含 query/fragment：`/path/file.txt?token=xxx`
+- 解决方案：先 XML 实体解码 → URL 解码 → 剥离 query/fragment
+
+### 9.6 认证方式
+
+| 方式 | 支持服务器 | 实现 |
+|---|---|---|
+| Basic Auth | 大部分 | `req.SetBasicAuth()` |
+| Bearer Token | 部分 | `Authorization: Bearer xxx` |
+| NTLM | SharePoint-NTLM | golang.org/x/net/ntlm（Rclone 用） |
+| Cookie | SharePoint Online | 专用 cookie 获取流程（Rclone 用） |
+
+## 10. 验收标准
 
 - [ ] `POST /api/v1/sources` 可创建 WebDAV 源，密码不返回在响应中
 - [ ] `DELETE /api/v1/sources/{id}` 删除源，source_id 被置 NULL
