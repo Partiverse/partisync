@@ -513,3 +513,27 @@ func TestUploadRejectsTooManyParts(t *testing.T) {
 		t.Fatalf("body = %s, want too-many-parts message", w.Body.String())
 	}
 }
+
+// S3（P2 独立复审）：预览响应的 Content-Type 决不允许是 HTML 家族——
+// text/html / application/xhtml+xml（含带参数形式）一律降级 text/plain；
+// 其余 MIME 原样返回（图片/文本家族的预览行为不变）。
+func TestPreviewResponseMimeDowngradesHTML(t *testing.T) {
+	cases := map[string]string{
+		"text/html":                          "text/plain; charset=utf-8",
+		"Text/HTML":                          "text/plain; charset=utf-8",
+		"text/html; charset=utf-8":           "text/plain; charset=utf-8",
+		"application/xhtml+xml":              "text/plain; charset=utf-8",
+		"image/png":                          "image/png",
+		"image/jpeg":                         "image/jpeg",
+		"application/pdf":                    "application/pdf",
+		"text/plain":                         "text/plain",
+		"text/markdown":                      "text/markdown",
+		"application/json":                   "application/json",
+		"application/xhtml-xml-lookalike/v2": "application/xhtml-xml-lookalike/v2",
+	}
+	for in, want := range cases {
+		if got := previewResponseMime(in); got != want {
+			t.Errorf("previewResponseMime(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

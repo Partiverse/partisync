@@ -911,6 +911,24 @@ func (s *Server) requireAsset(w http.ResponseWriter, r *http.Request, id string)
 	return asset, true
 }
 
+// isHTMLMime 判断 MIME（可带参数）是否为浏览器会解析执行的 HTML 家族。
+func isHTMLMime(mime string) bool {
+	m := strings.ToLower(strings.TrimSpace(mime))
+	if i := strings.IndexByte(m, ';'); i >= 0 {
+		m = strings.TrimSpace(m[:i])
+	}
+	return m == "text/html" || m == "application/xhtml+xml"
+}
+
+// previewResponseMime 返回预览响应应使用的 Content-Type：
+// HTML 家族一律降级为 text/plain（S3——按源码渲染，浏览器不解析标签）。
+func previewResponseMime(mime string) string {
+	if isHTMLMime(mime) {
+		return "text/plain; charset=utf-8"
+	}
+	return mime
+}
+
 // handlePreviewAsset 输出资产文件内容（真实文件读取，MCD「预览」闭环）。
 // 路径来自 assets.path（服务端生成的内容寻址相对路径），经 storage.Store.Open
 // 校验不越界；ext 可选强制下载文件名。
@@ -953,7 +971,14 @@ func (s *Server) handlePreviewAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", asset.MimeType)
+	// S3（P2 独立复审）：绝不把任何资产内容以 text/html（或 xhtml）内联返回——
+	// HTML 形内容降级为 text/plain 按源码渲染，浏览器不解析标签；
+	// CSP sandbox 与 nosniff 继续作为第二、第三道防线。
+	respMime := previewResponseMime(asset.MimeType)
+	if respMime != asset.MimeType {
+		log.Printf("preview downgraded html-ish mime for asset %s: %s -> text/plain", asset.ID, asset.MimeType)
+	}
+	w.Header().Set("Content-Type", respMime)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'none'; sandbox")
 	if r.URL.Query().Get("download") == "1" {

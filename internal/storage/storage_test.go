@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -384,5 +385,49 @@ func TestCleanStaleTempRemovesOnlyOldUploadFiles(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("%s should survive cleanup: %v", p, err)
 		}
+	}
+}
+
+// S4（P2 独立复审）：并发同内容上传必须恰好产生一个对象，且 Deduped=false 的
+// 恰好一个——link() 原子提交保证失败路径的 Discard 只由创建者执行，绝不误删
+// 他方行引用的共享对象（旧 Stat→Rename 有窗口）。
+func TestSaveConcurrentSameContentExactlyOneCreator(t *testing.T) {
+	s := newTestStore(t, 0)
+	payload := makePNG(t, 6, 6)
+
+	const n = 8
+	results := make([]*SavedObject, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			obj, err := s.Save(bytes.NewReader(payload), "race.png")
+			if err != nil {
+				t.Errorf("Save #%d: %v", idx, err)
+				return
+			}
+			results[idx] = obj
+		}(i)
+	}
+	wg.Wait()
+
+	creators := 0
+	for i, obj := range results {
+		if obj == nil {
+			t.Fatalf("Save #%d returned nil", i)
+		}
+		if !obj.Deduped {
+			creators++
+		}
+		if obj.RelPath != results[0].RelPath {
+			t.Errorf("Save #%d relPath = %q, want consistent %q", i, obj.RelPath, results[0].RelPath)
+		}
+	}
+	if creators != 1 {
+		t.Fatalf("creators = %d, want exactly 1 (others must be Deduped)", creators)
+	}
+	if got := countFiles(t, s.Root()); got != 1 {
+		t.Fatalf("stored files = %d, want 1", got)
 	}
 }

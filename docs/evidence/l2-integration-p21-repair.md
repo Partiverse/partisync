@@ -47,7 +47,22 @@
 
 ## 5. 残留与盲区（如实声明）
 
-- **未修（留待 P2.2）**：S3（`.md` 携带 `<script>` 内联预览仅靠 CSP sandbox 兜底）、S4（并发同内容上传 Discard 竞态，窗口小）、
+> **P2.2 增补（2026-09-13 同日）**：S3 与 S4 已修复并验证，第 5 节原「未修」清单相应过期（见 §6）。
+
+## 6. P2.2 增补：S3 / S4 修复与验证（2026-09-13）
+
+| ID | 修复 | 位置 |
+|---|---|---|
+| S3 | 预览响应 MIME 绝不允许 HTML 家族：`previewResponseMime()` 把 `text/html` / `application/xhtml+xml`（含带参数形式）降级为 `text/plain; charset=utf-8`（按源码渲染，浏览器不解析标签）；CSP sandbox + nosniff 保持第二、三道防线 | `internal/api/handlers.go` |
+| S4 | `storage.Save` 提交由 Stat→Rename 改为 **link() 原子提交**：并发同内容上传恰好一个请求创建终路径对象（Deduped=false），其余得 ErrExist（Deduped=true）；失败路径 Discard 只可能由创建者执行，不可能误删他方引用的共享对象（Windows 不支持 link，部署目标为 Linux 容器） | `internal/storage/storage.go` |
+
+验证：
+- L1 三绿（新增 `TestPreviewResponseMimeDowngradesHTML`、`TestSaveConcurrentSameContentExactlyOneCreator`）；S4 反向验证——把 EEXIST 分支强制置 Deduped=false（≈旧行为）后并发测试确实失败，还原后通过。
+- live（:8080 新镜像）：`<script>` 开头的 `.md` 以 `stored_mime=text/html` 入库 → 预览 200 且 `Content-Type: text/plain; charset=utf-8`；8 路并发同内容上传 → DB 恰 1 行、卷恰 1 对象、201×1 + 200×7。
+- L2 全量 60/60 PASS（`docs/verification/p2.1/l2-p22-run.log`）；L3 8/8 PASS（`docs/verification/p2.1/l3-p22-run.json`）。
+
+
+- **未修（~~留待 P2.2~~ → P2.2 已修 S3/S4，见 §6）**：~~S3（`.md` 携带 `<script>` 内联预览仅靠 CSP sandbox 兜底）~~ ✅、~~S4（并发同内容上传 Discard 竞态，窗口小）~~ ✅、
   F-I2（/readyz 在 compose 无人消费，架构性）、F-I6（readyz 缺 PG 失败路径单测）、F-I7（/readyz 错误串回显拓扑，127.0.0.1 部署可接受）。
 - **部分实现**：F-I1 的磁盘剩余空间检查需平台 syscall，本批未含（写探针已覆盖只读/文件替换两个假阳性场景）。
 - **无法 live 复现**：S1 的回读失败分支需在 insert 与回读之间注入 DB 故障，L2 环境无法安全注入；

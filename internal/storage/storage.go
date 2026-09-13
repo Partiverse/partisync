@@ -226,18 +226,26 @@ func (s *Store) Save(r io.Reader, clientName string) (*SavedObject, error) {
 	obj.MimeType, obj.ContentSniffed = sniffMime(head, AllowedExtensions[ext])
 	obj.Width, obj.Height = imageSize(head)
 
-	if _, statErr := os.Stat(finalPath); statErr == nil {
-		// 内容已存在：丢弃临时文件，不重复占用磁盘。
-		obj.Deduped = true
-		return obj, nil
-	}
-
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 		return nil, fmt.Errorf("storage: create shard dir: %w", err)
 	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return nil, fmt.Errorf("storage: commit object: %w", err)
+	// S4（P2 独立复审）：用 link() 原子提交，取代 Stat→Rename——旧实现下并发
+	// 同内容上传双方都可能看到「对象不存在」，随后任意一方失败路径 Discard 会
+	// 误删另一方行引用的共享对象。link() 保证恰好一个请求创建终路径对象，
+	// 其余得到 ErrExist（Deduped=true），Discard 只可能由创建者执行。
+	// （link() 在 Windows 不可用；部署目标为 Linux 容器。）
+	linkErr := os.Link(tmpPath, finalPath)
+	switch {
+	case linkErr == nil:
+		obj.Deduped = false
+	case errors.Is(linkErr, os.ErrExist):
+		// 终路径已被（并发请求或更早请求）提交：本次不产生新副本。
+		obj.Deduped = true
+	default:
+		return nil, fmt.Errorf("storage: commit object: %w", linkErr)
 	}
+	// link 成功后 tmp 仍是第二个名字，显式摘除；dedup 时 tmp 也应删除。
+	_ = os.Remove(tmpPath)
 	committed = true
 	return obj, nil
 }

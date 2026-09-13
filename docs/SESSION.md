@@ -283,8 +283,8 @@
 
 ### low（9）— S5/F-I3/F-I4/F-I5/L1/L2 已修（✅），S3/S4/F-I2 留待 P2.2
 
-- S3（安全）：`.md` 内容含 `<script>` 时入库 `mime=text/html` 且预览内联 200，唯一脚本防线 CSP sandbox；建议上传侧拒 text/html 嗅探或强制 attachment。**未修**。
-- S4（安全）：并发同内容上传 Stat→Rename 竞态，一方 insert 失败可 Discard 他方引用的共享对象（推演，窗口小）。**未修**。
+- S3 ✅（安全，P2.2）：预览 MIME 决不允许 HTML 家族——`previewResponseMime()` 将 text/html / xhtml 降级 text/plain 源码渲染；live 实证 text/html 存储 → 预览 `text/plain; charset=utf-8`。
+- S4 ✅（安全，P2.2）：`storage.Save` 改 link() 原子提交，并发同内容恰好一个创建者；live 8 路并发 → 1 行 1 对象（201×1+200×7）。
 - S5 ✅（安全）：新增 `storage.CleanStaleTemp`，启动清扫 `.tmp` 内 >1h 的 `upload-*` 崩溃残留。
 - F-I2（探针）：`/readyz` 在 compose 部署无人消费（compose 不支持 readiness），仅对 K8s readinessProbe 有用。**架构性，未修**。
 - F-I3 ✅（探针）：compose `server` 已暴露 `MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-}`。
