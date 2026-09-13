@@ -69,3 +69,13 @@
   覆盖方式为 store 集成单测（真 PG 实证 `DeleteAssetBySHA256` 语义）+ handler 补偿顺序代码走查。
 - 本批修复与验证由实施者（主 Agent）完成；**独立复审面已由三份 fresh-context 审计报告构成（AC-11 已满足）**，
   本批改动如需再审计，建议下轮派发时点名 S1/S2 两处 diff。
+
+## 7. ③ 收尾：C2-7/C2-9 UI、B-01/B-02/B-06（2026-09-13）
+
+- **C2-9 排序 UI**：列表页新增排序选择器（默认相关度 / 名称 A–Z、Z–A / 大小升降，对应后端白名单 `name|size_bytes:asc|desc`）。
+- **C2-7 MIME 过滤 UI**：新增 MIME 精确过滤选择器（与后端 `mime_type = "type/subtype"` 语义一致）。
+- `npm run build` 全绿；浏览器回归（1M 索引在位、hero.png fixture 播种后）**12/12 PASS**（`docs/verification/p2.1/browser-regression-p22.log`）。
+- **B-01**：`benchmark-1m.md` 口径修正改为**随报告自动附加**（`scripts/benchmark-1m.sh` 内置），p95 表述统一为「并发饱和下客户端观测值」。
+- **B-02**：新增 `scripts/benchmark-api-8080.sh`，产品链路（8080 /api/v1/assets → Meili → JSON）实测：999,982 命中、50 并发 × 5000 请求 → **p50=20.66ms / p95=40.13ms / p99=54.82ms、成功率 100%**；单请求低负载 2.4–3.7ms。报告 `docs/evidence/benchmark-api-8080.md`。两种口径均 <100ms。
+- **B-06**：`l2-integration-p1.md` 与 `benchmark-1m.md` 已附不改动历史数字的口径修正小节（排序当时不可用 / LMDB 体积以当次实测为准 / 1M 索引证据以两轮独立复现为准）。
+- 1M 索引已重建（numberOfDocuments=1,000,000，本次复现 p95=17.77ms 直连口径）。

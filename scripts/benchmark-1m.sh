@@ -132,6 +132,18 @@ $(grep -E "(RPS|p50|p90|p95|p99|min|max|avg|PASS|FAIL)" "$TMP_OUTPUT" | sed 's/^
 - **MCD 目标**: 100 万资产搜索 p95 < 100ms
 - **实测判定**: $(if grep -q "PASS: p95" "$TMP_OUTPUT"; then echo "✅ **通过 (PASS)** — 实测 p95 严格小于 100ms，达成 MCD 工业级性能指标。"; else echo "❌ **未通过 (FAIL)**"; fi)
 
+---
+
+## 口径修正（B-01/B-06，audit-t6-prime；随报告自动附加）
+
+- 本报告 p95 是 **$CONCURRENCY 并发饱和负载下的客户端观测值**，主体为客户端传输伪影
+  （audit-t6-prime httptrace：42–43ms 几乎全在 body-read；同查询 curl/python 端到端 2–4ms；
+  Meili \`processingTimeMs\` 0–3ms）。它**不是**"单请求检索延迟"，但作为饱和吞吐下的尾部
+  延迟口径成立（伪影只抬高不压低，PASS 结论不变）。
+- LMDB 体积随压测语料与合并策略变化，以当次实测为准，勿跨运行引用旧值（B-06）。
+- 8080 产品链路（server API → Meili → JSON）的独立延迟证据见
+  \`docs/evidence/benchmark-api-8080.md\`（B-02）。
+
 EOF
 
 rm -f "$TMP_OUTPUT"

@@ -64,17 +64,23 @@ export function AssetLibraryPage() {
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState("")
   const [resourceType, setResourceType] = useState<string>("all")
+  // C2-7（T6′ 审计）：MIME 类型过滤 UI——后端为精确匹配（mime_type = "type/subtype"）。
+  const [mimeType, setMimeType] = useState<string>("all")
+  // C2-9（T6′ 审计）：排序 UI——后端白名单 name/size_bytes × asc/desc。
+  const [sort, setSort] = useState<string>("")
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid")
   const [offset, setOffset] = useState(0)
   const limit = 24
 
   const fetchAssets = useCallback(
-    (searchQ: string, filterType: string, searchOffset: number) => {
+    (searchQ: string, filterType: string, mime: string, sortParam: string, searchOffset: number) => {
       setLoading(true)
       api
         .listAssets({
           q: searchQ,
           resourceType: filterType === "all" ? "" : filterType,
+          mimeType: mime === "all" ? "" : mime,
+          sort: sortParam,
           limit,
           offset: searchOffset,
         })
@@ -91,10 +97,10 @@ export function AssetLibraryPage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      fetchAssets(q, resourceType, offset)
+      fetchAssets(q, resourceType, mimeType, sort, offset)
     }, 150)
     return () => clearTimeout(timer)
-  }, [q, resourceType, offset, fetchAssets])
+  }, [q, resourceType, mimeType, sort, offset, fetchAssets])
 
   const handleSearch = (val: string) => {
     setQ(val)
@@ -131,7 +137,7 @@ export function AssetLibraryPage() {
       )
       setQ("")
       setOffset(0)
-      fetchAssets("", "all", 0)
+      fetchAssets("", "all", "all", "", 0)
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : "上传失败")
     } finally {
@@ -299,6 +305,49 @@ export function AssetLibraryPage() {
               </Button>
             ))}
           </div>
+          {/* C2-7：MIME 类型精确过滤（与后端 mime_type = "type/subtype" 语义一致） */}
+          <select
+            aria-label="按 MIME 类型过滤"
+            value={mimeType}
+            onChange={(e) => {
+              setMimeType(e.target.value)
+              setOffset(0)
+            }}
+            className="h-9 rounded-md border bg-transparent px-2 text-xs text-muted-foreground"
+          >
+            <option value="all">MIME：全部</option>
+            {[
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/webp",
+              "application/pdf",
+              "text/plain",
+              "text/markdown",
+              "text/csv",
+              "application/json",
+            ].map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          {/* C2-9：排序（后端白名单 name/size_bytes × asc/desc；空串 = 默认相关度） */}
+          <select
+            aria-label="排序方式"
+            value={sort}
+            onChange={(e) => {
+              setSort(e.target.value)
+              setOffset(0)
+            }}
+            className="h-9 rounded-md border bg-transparent px-2 text-xs text-muted-foreground"
+          >
+            <option value="">排序：默认</option>
+            <option value="name:asc">名称 A–Z</option>
+            <option value="name:desc">名称 Z–A</option>
+            <option value="size_bytes:asc">大小从小到大</option>
+            <option value="size_bytes:desc">大小从大到小</option>
+          </select>
         </div>
 
         <div className="flex items-center gap-2">
