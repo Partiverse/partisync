@@ -3,13 +3,16 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"partisync/server/internal/search"
+	"partisync/server/internal/store"
 )
 
 // readyBody 解析 /readyz 响应。
@@ -110,5 +113,59 @@ func TestHealthzStaysAliveWhenStorageBroken(t *testing.T) {
 	}
 	if w := doReq(t, mux, http.MethodGet, "/readyz", ""); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz status = %d, want 503", w.Code)
+	}
+}
+
+// F-I6（P2 独立复审）：PG 不可达 → 503 且 postgres 项点名失败。
+func TestReadyNotReadyWhenPostgresUnreachable(t *testing.T) {
+	// 127.0.0.1:1 无监听：连接被拒（快速失败，不触发超时等待）。
+	db, err := sql.Open("postgres", "postgres://partisync:x@127.0.0.1:1/db?sslmode=disable&connect_timeout=2")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	s := &Server{store: store.NewStoreFromDB(db), meili: nil, content: newTestStorage(t, 0)}
+
+	w := doReq(t, s.NewServeMux(), http.MethodGet, "/readyz", "")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", w.Code, w.Body.String())
+	}
+	body := decodeReady(t, w.Body.String())
+	if body.Ready {
+		t.Fatal("ready = true, want false")
+	}
+	if ok, found := body.depOK("postgres"); !found || ok {
+		t.Fatalf("postgres dependency = (%v, found=%v), want not ok", ok, found)
+	}
+}
+
+// F-I7（P2 独立复审）：/readyz 的 error 字段必须是二元口径——
+// 不得回显驱动错误串（含 DSN 主机、容器名、DNS 地址等内部拓扑）。
+func TestReadyErrorFieldCarriesNoTopology(t *testing.T) {
+	db, err := sql.Open("postgres", "postgres://partisync:x@127.0.0.1:1/db?sslmode=disable&connect_timeout=2")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	s := &Server{store: store.NewStoreFromDB(db), meili: nil, content: newTestStorage(t, 0)}
+
+	w := doReq(t, s.NewServeMux(), http.MethodGet, "/readyz", "")
+	body := decodeReady(t, w.Body.String())
+	for _, d := range body.Dependencies {
+		if d.OK && d.Err != "" {
+			t.Errorf("dependency %s: ok=true but error=%q", d.Name, d.Err)
+		}
+		if !d.OK {
+			if d.Err != "unreachable" && d.Err != "unavailable" {
+				t.Errorf("dependency %s: error = %q, want binary marker (unreachable/unavailable)", d.Name, d.Err)
+			}
+			for _, leak := range []string{"127.0.0", "postgres:", "5432", "dial", "DSN", "password"} {
+				if strings.Contains(d.Err, leak) {
+					t.Errorf("dependency %s: error %q leaks topology (contains %q)", d.Name, d.Err, leak)
+				}
+			}
+		}
 	}
 }

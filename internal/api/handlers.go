@@ -100,6 +100,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleReady 就绪探针（readiness）：检查 PG/Meili/存储根可达。
 // 依赖故障返回 503（compose 可据此摘除流量，但不重启进程）。
 // meili 为 nil（检索降级模式）或 storage 为 nil 时不视为未就绪。
+// F-I7（P2 独立复审）：响应只携带二元状态，具体错误仅进服务端日志——
+// 原始错误串含内部拓扑（DSN 主机、容器名、DNS 地址），不该外泄。
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	type dep struct {
 		Name string `json:"name"`
@@ -113,7 +115,8 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if _, err := s.store.CountAssets(ctx); err != nil {
-			deps = append(deps, dep{Name: "postgres", OK: false, Err: err.Error()})
+			log.Printf("readyz: postgres probe failed: %v", err)
+			deps = append(deps, dep{Name: "postgres", OK: false, Err: "unreachable"})
 			ready = false
 		} else {
 			deps = append(deps, dep{Name: "postgres", OK: true})
@@ -123,7 +126,8 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if err := s.meili.Health(ctx); err != nil {
-			deps = append(deps, dep{Name: "meilisearch", OK: false, Err: err.Error()})
+			log.Printf("readyz: meilisearch probe failed: %v", err)
+			deps = append(deps, dep{Name: "meilisearch", OK: false, Err: "unreachable"})
 			ready = false
 		} else {
 			deps = append(deps, dep{Name: "meilisearch", OK: true})
@@ -131,7 +135,8 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.content != nil {
 		if err := s.content.Healthy(); err != nil {
-			deps = append(deps, dep{Name: "storage", OK: false, Err: err.Error()})
+			log.Printf("readyz: storage probe failed: %v", err)
+			deps = append(deps, dep{Name: "storage", OK: false, Err: "unavailable"})
 			ready = false
 		} else {
 			deps = append(deps, dep{Name: "storage", OK: true})

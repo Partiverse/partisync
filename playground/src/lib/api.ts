@@ -133,12 +133,23 @@ export const api = {
     fetch(`/api/v1/assets/${id}`).then((r) => r.json() as Promise<{ asset: Asset }>),
 
   // uploadAsset 上传真实文件字节（multipart/form-data）；后端做 SHA256 去重与安全落盘。
+  // 415/413 的后端错误串偏机器向，这里转成人话（内容与扩展名不符 → 415；超上限 → 413）。
   uploadAsset: (file: File): Promise<UploadAssetResponse> => {
     const form = new FormData()
     form.append('file', file)
-    return fetch('/api/v1/assets/upload', { method: 'POST', body: form }).then(
-      (r) => r.json() as Promise<UploadAssetResponse>
-    )
+    return fetch('/api/v1/assets/upload', { method: 'POST', body: form }).then(async (r) => {
+      const body = (await r.json()) as UploadAssetResponse
+      if (!r.ok && body.error) {
+        if (r.status === 415) {
+          body.error = body.error.includes('content does not match')
+            ? '文件内容与其扩展名不符（疑似伪装文件），为安全起见已拒绝'
+            : '不支持的文件类型（仅允许 png/jpg/jpeg/gif/webp/pdf/txt/md/csv/json）'
+        } else if (r.status === 413) {
+          body.error = '文件或请求体超过大小上限'
+        }
+      }
+      return body
+    })
   },
 
   createAsset: (body: object): Promise<{ asset: Asset } | { error: string }> =>

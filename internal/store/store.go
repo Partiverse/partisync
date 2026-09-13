@@ -45,6 +45,12 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// NewStoreFromDB 用既有 *sql.DB 包装 Store（测试与嵌入场景用，
+// 例如指向必然不可达地址构造故障注入；生产路径走 NewStore）。
+func NewStoreFromDB(db *sql.DB) *Store {
+	return &Store{db: db}
+}
+
 // assetColumns 统一列清单，避免 SELECT *。
 const assetColumns = "id, name, path, sha256, size_bytes, mime_type, resource_type, metadata, created_at, updated_at"
 
