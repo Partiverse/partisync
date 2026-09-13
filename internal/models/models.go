@@ -62,11 +62,12 @@ type TagSuggestion struct {
 }
 
 // DataSource 数据源（data_sources 表）。
+// Config 仅内部使用，不序列化到 API 响应。
 type DataSource struct {
 	ID             string          `json:"id"`
 	Name           string          `json:"name"`
 	Type           string          `json:"type"` // "webdav"
-	Config         json.RawMessage `json:"config,omitempty"` // 内部字段，不对外暴露
+	Config         json.RawMessage `json:"-"`    // 内部字段，永不序列化
 	URL            string          `json:"url,omitempty"`    // 从 config 解密后回填，供 UI 显示
 	Username       string          `json:"username,omitempty"`
 	RemotePath     string          `json:"remote_path,omitempty"`
@@ -74,6 +75,22 @@ type DataSource struct {
 	LastScanResult *ScanResult     `json:"last_scan_result,omitempty"`
 	AssetCount     int             `json:"asset_count,omitempty"` // 关联资产数量
 	CreatedAt      time.Time       `json:"created_at"`
+}
+
+// FillDisplayFields 从 config JSON 中解密出显示字段（URL/Username/RemotePath）。
+// 必须在返回给 API 之前调用。
+func (ds *DataSource) FillDisplayFields() error {
+	if len(ds.Config) == 0 {
+		return nil
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(ds.Config, &cfg); err != nil {
+		return err
+	}
+	ds.URL = cfg["url"]
+	ds.Username = cfg["username"]
+	ds.RemotePath = cfg["remote_path"]
+	return nil
 }
 
 // ScanResult 扫描结果统计。

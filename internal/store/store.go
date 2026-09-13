@@ -534,6 +534,7 @@ func (s *Store) GetDataSource(ctx context.Context, id string) (*models.DataSourc
 	if err != nil {
 		return nil, fmt.Errorf("get datasource: %w", err)
 	}
+	ds.FillDisplayFields()
 	return ds, nil
 }
 
@@ -552,9 +553,12 @@ func (s *Store) ListDataSources(ctx context.Context) ([]models.DataSource, error
 		if err != nil {
 			return nil, fmt.Errorf("scan datasource row: %w", err)
 		}
-		// 填充资产计数
+		ds.FillDisplayFields()
 		ds.AssetCount, _ = s.countAssetsBySource(ctx, ds.ID)
 		out = append(out, *ds)
+	}
+	if out == nil {
+		out = []models.DataSource{}
 	}
 	return out, rows.Err()
 }
