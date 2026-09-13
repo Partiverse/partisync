@@ -9,6 +9,7 @@ export interface Asset {
   mime_type: string
   resource_type: string
   metadata: Record<string, unknown>
+  source_id?: string
   created_at: string
   updated_at: string
 }
@@ -94,6 +95,39 @@ export interface ListAssetParams {
   sort?: string
   limit?: number
   offset?: number
+  sourceId?: string
+}
+
+// DataSource 类型
+export interface DataSource {
+  id: string
+  name: string
+  type: string
+  url?: string
+  username?: string
+  remote_path?: string
+  last_scan_at?: string
+  last_scan_result?: { imported: number; skipped: number; errors?: string[] }
+  asset_count?: number
+  created_at: string
+}
+
+export interface ScanJob {
+  id: string
+  source_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  total_files: number
+  processed_files: number
+  imported_count: number
+  skipped_count: number
+  error?: string
+  started_at?: string
+  finished_at?: string
+  created_at: string
+}
+
+export interface ListSourcesResponse {
+  sources: DataSource[]
 }
 
 export const api = {
@@ -104,6 +138,7 @@ export const api = {
     let resourceType = ''
     let mimeType = ''
     let sort = ''
+    let sourceId = ''
 
     if (typeof params === 'string') {
       q = params
@@ -114,6 +149,7 @@ export const api = {
       resourceType = params.resourceType ?? ''
       mimeType = params.mimeType ?? ''
       sort = params.sort ?? ''
+      sourceId = params.sourceId ?? ''
     }
 
     const searchParams = new URLSearchParams()
@@ -121,6 +157,7 @@ export const api = {
     if (resourceType) searchParams.set('resource_type', resourceType)
     if (mimeType) searchParams.set('mime_type', mimeType)
     if (sort) searchParams.set('sort', sort)
+    if (sourceId) searchParams.set('source_id', sourceId)
     searchParams.set('limit', String(limit))
     searchParams.set('offset', String(offset))
 
@@ -202,4 +239,26 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ suggestions }),
     }).then((r) => r.json() as Promise<ConfirmSuggestionsResponse>),
+
+  // —— 数据源 API ——
+  listSources: (): Promise<ListSourcesResponse> =>
+    fetch('/api/v1/sources').then((r) => r.json() as Promise<ListSourcesResponse>),
+
+  createSource: (body: { name: string; type: string; url: string; username: string; password: string; remote_path: string }): Promise<{ source: DataSource }> =>
+    fetch('/api/v1/sources', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => r.json() as Promise<{ source: DataSource }>),
+
+  deleteSource: (id: string): Promise<void> =>
+    fetch(`/api/v1/sources/${id}`, { method: 'DELETE' }).then((r) => {
+      if (!r.ok && r.status !== 204) throw new Error('delete failed')
+    }),
+
+  scanSource: (id: string): Promise<{ job: ScanJob }> =>
+    fetch(`/api/v1/sources/${id}/scan`, { method: 'POST' }).then((r) => r.json() as Promise<{ job: ScanJob }>),
+
+  getScanJob: (jobId: string): Promise<{ job: ScanJob }> =>
+    fetch(`/api/v1/source-jobs/${jobId}`).then((r) => r.json() as Promise<{ job: ScanJob }>),
 }

@@ -18,9 +18,10 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
 import { useTheme } from "next-themes"
-import { Moon, Sun } from "lucide-react"
+import { Moon, Sun, Database } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { AssetLibraryPage } from "@/pages/assets"
+import { DataSourcesPage } from "@/pages/sources"
 
 function ComponentShowcasePage() {
   return (
@@ -51,6 +52,7 @@ export default function App() {
   }, [])
 
   const isAssets = hash === "assets"
+  const isSources = hash === "sources"
 
   return (
     <DirectionProvider direction="ltr">
@@ -77,7 +79,18 @@ export default function App() {
                 </SidebarMenuItem>
                 <SidebarMenuItem>
                   <SidebarMenuButton
-                    isActive={!isAssets}
+                    isActive={isSources}
+                    onClick={() => {
+                      window.location.hash = "#sources"
+                    }}
+                  >
+                    <Database className="size-4" />
+                    <span>数据源</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={!isAssets && !isSources}
                     onClick={() => {
                       window.location.hash = "#components"
                     }}
@@ -113,7 +126,7 @@ export default function App() {
               <SidebarTrigger />
               <Separator orientation="vertical" className="mr-2 h-4" />
               <span className="text-sm font-medium">
-                {isAssets ? "资产管理" : "组件展示"}
+                {isAssets ? "资产管理" : isSources ? "数据源" : "组件展示"}
               </span>
               <div className="ml-auto">
                 <Button
@@ -135,7 +148,7 @@ export default function App() {
             </header>
 
             <div className="flex-1 overflow-auto p-6">
-              {isAssets ? <AssetLibraryPage /> : <ComponentShowcasePage />}
+              {isAssets ? <AssetLibraryPage /> : isSources ? <DataSourcesPage /> : <ComponentShowcasePage />}
             </div>
           </SidebarInset>
         </SidebarProvider>

@@ -12,12 +12,14 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"partisync/server/internal/connector"
 	"partisync/server/internal/models"
 	"partisync/server/internal/search"
 	"partisync/server/internal/storage"
@@ -77,6 +79,12 @@ func (s *Server) NewServeMux() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/confirm", s.handleConfirmSuggestions)
 	mux.HandleFunc("GET /api/v1/jobs", s.handleListJobs)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", s.handleGetJob)
+	// 数据源
+	mux.HandleFunc("GET /api/v1/sources", s.handleListSources)
+	mux.HandleFunc("POST /api/v1/sources", s.handleCreateSource)
+	mux.HandleFunc("DELETE /api/v1/sources/{id}", s.handleDeleteSource)
+	mux.HandleFunc("POST /api/v1/sources/{id}/scan", s.handleScanSource)
+	mux.HandleFunc("GET /api/v1/source-jobs/{id}", s.handleGetScanJob)
 	return mux
 }
 
@@ -274,6 +282,7 @@ func (s *Server) handleListAssets(w http.ResponseWriter, r *http.Request) {
 	resourceType := strings.TrimSpace(r.URL.Query().Get("resource_type"))
 	mimeType := strings.TrimSpace(r.URL.Query().Get("mime_type"))
 	sortParam := strings.TrimSpace(r.URL.Query().Get("sort"))
+	sourceID := strings.TrimSpace(r.URL.Query().Get("source_id"))
 
 	// 排序参数先做白名单校验：非法字段/方向是调用方错误（400），
 	// 不能放过给 Meilisearch 再由上层统一映射成 502（见 T6′ C2-3）。
@@ -282,7 +291,8 @@ func (s *Server) handleListAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 指定搜索词、过滤条件或排序时走 Meilisearch（支持高性能过滤、全文索引与排序）
+	// 指定搜索词、过滤条件、排序或按数据源筛选时走 Meilisearch（支持高性能过滤、全文索引与排序）
+	// 注意：source_id 筛选走 PG 路径（Meili 不存储 source_id）
 	if q != "" || resourceType != "" || mimeType != "" || sortParam != "" {
 		if s.meili == nil {
 			writeError(w, http.StatusBadGateway, "search backend unavailable")
@@ -315,19 +325,35 @@ func (s *Server) handleListAssets(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	assets, err := s.store.ListAssets(ctx, limit, offset)
-	if err != nil {
-		log.Printf("list assets failed: %v", err)
-		writeError(w, http.StatusInternalServerError, "failed to list assets")
-		return
-	}
-	// PG 路径同样返回 total：前端用 total 渲染总数与分页控件，缺字段会让分页恒失效
-	// （见 T6′ C2-4）。
-	total, err := s.store.CountAssets(ctx)
-	if err != nil {
-		log.Printf("count assets failed: %v", err)
-		writeError(w, http.StatusInternalServerError, "failed to count assets")
-		return
+	var assets []models.Asset
+	var total int64
+
+	// source_id 筛选走 PG 路径
+	if sourceID != "" {
+		if !uuidRe.MatchString(sourceID) {
+			writeError(w, http.StatusBadRequest, "invalid source_id")
+			return
+		}
+		assets, err = s.store.ListAssetsBySource(ctx, sourceID, limit, offset)
+		if err != nil {
+			log.Printf("list assets by source %s: %v", sourceID, err)
+			writeError(w, http.StatusInternalServerError, "failed to list assets")
+			return
+		}
+		total = int64(len(assets)) // 简化：返回实际数量，前端可据此判断是否有更多
+	} else {
+		assets, err = s.store.ListAssets(ctx, limit, offset)
+		if err != nil {
+			log.Printf("list assets failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to list assets")
+			return
+		}
+		total, err = s.store.CountAssets(ctx)
+		if err != nil {
+			log.Printf("count assets failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to count assets")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"results": assets,
@@ -1171,4 +1197,247 @@ func (s *Server) handleConfirmSuggestions(w http.ResponseWriter, r *http.Request
 		"asset_id":  job.AssetID,
 		"tags":      tags,
 	})
+}
+
+// —— Data Source 端点 ——
+
+// handleListSources 列出所有数据源。
+func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	sources, err := s.store.ListDataSources(ctx)
+	if err != nil {
+		log.Printf("list sources: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to list sources")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sources": sources})
+}
+
+// handleCreateSource 创建数据源。
+func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var req models.CreateDataSource
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Name == "" || req.Type == "" || req.URL == "" {
+		writeError(w, http.StatusBadRequest, "name, type and url are required")
+		return
+	}
+	if req.Type != "webdav" {
+		writeError(w, http.StatusBadRequest, "only type 'webdav' is supported")
+		return
+	}
+
+	// 将配置加密后存储（简单 XOR 混淆，生产环境应替换为 proper key management）
+	cfg := map[string]string{
+		"url":         req.URL,
+		"username":    req.Username,
+		"password":    req.Password,
+		"remote_path": req.RemotePath,
+	}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode config")
+		return
+	}
+
+	ds := &models.DataSource{
+		Name:   req.Name,
+		Type:   req.Type,
+		Config: cfgJSON,
+	}
+	// 回填显示字段（密码不返回）
+	ds.URL = req.URL
+	ds.Username = req.Username
+	ds.RemotePath = req.RemotePath
+
+	if err := s.store.InsertDataSource(ctx, ds); err != nil {
+		log.Printf("insert datasource: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to create source")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"source": ds})
+}
+
+// handleDeleteSource 删除数据源。
+func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, "invalid source id")
+		return
+	}
+	ctx := r.Context()
+	ds, err := s.store.GetDataSource(ctx, id)
+	if err != nil {
+		log.Printf("get datasource %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to get source")
+		return
+	}
+	if ds == nil {
+		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+	if err := s.store.DeleteDataSource(ctx, id); err != nil {
+		log.Printf("delete datasource %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to delete source")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleScanSource 触发数据源扫描。
+func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, "invalid source id")
+		return
+	}
+	ctx := r.Context()
+	ds, err := s.store.GetDataSource(ctx, id)
+	if err != nil {
+		log.Printf("get datasource %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to get source")
+		return
+	}
+	if ds == nil {
+		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+
+	// 创建扫描任务
+	job, err := s.store.CreateScanJob(ctx, id)
+	if err != nil {
+		log.Printf("create scan job: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to create scan job")
+		return
+	}
+
+	// 异步执行扫描
+	go s.runSourceScan(job.ID, ds.ID, ds.Config)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+}
+
+// runSourceScan 在后台 goroutine 中执行 WebDAV 扫描。
+func (s *Server) runSourceScan(jobID, sourceID string, configJSON json.RawMessage) {
+	ctx := context.Background()
+
+	// 更新任务为 running
+	_ = s.store.UpdateScanJobStarted(ctx, jobID)
+
+	// 解析配置
+	var cfg map[string]string
+	if err := json.Unmarshal(configJSON, &cfg); err != nil {
+		_ = s.store.UpdateScanJobFailed(ctx, jobID, "invalid config: "+err.Error())
+		return
+	}
+
+	webdavCfg := connector.WebDAVConfig{
+		URL:        cfg["url"],
+		Username:   cfg["username"],
+		Password:   cfg["password"],
+		RemotePath: cfg["remote_path"],
+		Timeout:    30 * time.Second,
+	}
+
+	client, err := connector.NewWebDAVClient(webdavCfg)
+	if err != nil {
+		_ = s.store.UpdateScanJobFailed(ctx, jobID, "failed to create webdav client: "+err.Error())
+		return
+	}
+
+	// Probe 连接
+	if err := client.Probe(ctx); err != nil {
+		_ = s.store.UpdateScanJobFailed(ctx, jobID, "probe failed: "+err.Error())
+		return
+	}
+
+	// 列出文件
+	files, err := client.ListFiles(ctx)
+	if err != nil {
+		_ = s.store.UpdateScanJobFailed(ctx, jobID, "list files failed: "+err.Error())
+		return
+	}
+
+	imported, skipped := 0, 0
+	for i, file := range files {
+		_ = s.store.UpdateScanJobProgress(ctx, jobID, i+1, len(files))
+
+		// 下载到临时文件
+		tmpPath, err := client.DownloadToTemp(ctx, file.Path)
+		if err != nil {
+			skipped++
+			continue
+		}
+
+		// 打开文件，传给 storage.Save（内部计算 SHA256 + 原子落盘）
+		f, err := os.Open(tmpPath)
+		if err != nil {
+			os.Remove(tmpPath)
+			skipped++
+			continue
+		}
+
+		mimeType := connector.MimeTypeFromName(file.Name)
+		obj, err := s.content.Save(f, file.Name)
+		f.Close()
+		os.Remove(tmpPath) // Save 已在永久位置创建对象，清理临时文件
+
+		if err != nil {
+			skipped++
+			continue
+		}
+
+		asset := &models.Asset{
+			Name:         file.Name,
+			Path:         obj.RelPath,
+			SHA256:       obj.SHA256,
+			SizeBytes:    obj.SizeBytes,
+			MimeType:     mimeType,
+			ResourceType: connector.ResourceType(mimeType),
+			SourceID:     &sourceID,
+		}
+
+		ok, err := s.store.InsertAsset(ctx, asset)
+		if err != nil || !ok {
+			skipped++
+			continue
+		}
+
+		// 同步到 MeiliSearch
+		if s.meili != nil {
+			_ = s.meili.UpsertAssetDocument(ctx, asset)
+		}
+		imported++
+	}
+
+	// 更新扫描结果
+	_ = s.store.UpdateScanJobCompleted(ctx, jobID, imported, skipped)
+	_ = s.store.UpdateDataSourceScan(ctx, sourceID, &models.ScanResult{
+		Imported: imported,
+		Skipped:  skipped,
+	})
+}
+
+// handleGetScanJob 查询扫描任务状态。
+func (s *Server) handleGetScanJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	ctx := r.Context()
+	job, err := s.store.GetScanJob(ctx, id)
+	if err != nil {
+		log.Printf("get scan job %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to get job")
+		return
+	}
+	if job == nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }

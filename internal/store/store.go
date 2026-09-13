@@ -52,20 +52,22 @@ func NewStoreFromDB(db *sql.DB) *Store {
 }
 
 // assetColumns 统一列清单，避免 SELECT *。
-const assetColumns = "id, name, path, sha256, size_bytes, mime_type, resource_type, metadata, created_at, updated_at"
+// 注意：source_id 必须在最后一位（可 NULL，SELECT 时允许扫描为 NULL）。
+const assetColumns = "id, name, path, sha256, size_bytes, mime_type, resource_type, metadata, source_id, created_at, updated_at"
 
 // InsertAsset 按 sha256 去重写入资产。
 // 返回 inserted=false 表示哈希冲突（已存在），不视为错误。
+// sourceID 可为空（nil 表示本地上传）。
 func (s *Store) InsertAsset(ctx context.Context, a *models.Asset) (bool, error) {
 	metadata := a.Metadata
 	if len(metadata) == 0 {
 		metadata = []byte("{}")
 	}
-	const q = `INSERT INTO assets (name, path, sha256, size_bytes, mime_type, resource_type, metadata)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+	const q = `INSERT INTO assets (name, path, sha256, size_bytes, mime_type, resource_type, metadata, source_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (sha256) DO NOTHING`
 	res, err := s.db.ExecContext(ctx, q,
-		a.Name, a.Path, a.SHA256, a.SizeBytes, a.MimeType, a.ResourceType, metadata)
+		a.Name, a.Path, a.SHA256, a.SizeBytes, a.MimeType, a.ResourceType, metadata, a.SourceID)
 	if err != nil {
 		return false, fmt.Errorf("insert asset: %w", err)
 	}
@@ -282,14 +284,14 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// scanAsset 将一行结果扫描为 Asset。metadata 允许为 NULL。
+// scanAsset 将一行结果扫描为 Asset。metadata/source_id 允许为 NULL。
 func scanAsset(r rowScanner) (*models.Asset, error) {
 	var (
 		a        models.Asset
 		metadata []byte
 	)
 	if err := r.Scan(&a.ID, &a.Name, &a.Path, &a.SHA256, &a.SizeBytes, &a.MimeType,
-		&a.ResourceType, &metadata, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&a.ResourceType, &metadata, &a.SourceID, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if len(metadata) > 0 {
@@ -505,4 +507,208 @@ ON CONFLICT (asset_id, tag_id) DO NOTHING`,
 	}
 	committed = true
 	return confirmed, nil
+}
+
+// —— DataSource 数据源 ——
+
+// dataSourceColumns 用于 SELECT 的列。
+const dataSourceColumns = "id, name, type, config, last_scan_at, last_scan_result, created_at"
+
+// InsertDataSource 插入新数据源。
+// config 应为加密后的 JSON bytes。
+func (s *Store) InsertDataSource(ctx context.Context, ds *models.DataSource) error {
+	const q = `INSERT INTO data_sources (name, type, config)
+VALUES ($1, $2, $3)
+RETURNING id, created_at`
+	return s.db.QueryRowContext(ctx, q, ds.Name, ds.Type, ds.Config).Scan(&ds.ID, &ds.CreatedAt)
+}
+
+// GetDataSource 按 ID 查询；未找到返回 (nil, nil)。
+func (s *Store) GetDataSource(ctx context.Context, id string) (*models.DataSource, error) {
+	const q = "SELECT " + dataSourceColumns + " FROM data_sources WHERE id = $1"
+	row := s.db.QueryRowContext(ctx, q, id)
+	ds, err := scanDataSource(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get datasource: %w", err)
+	}
+	return ds, nil
+}
+
+// ListDataSources 返回所有数据源。
+func (s *Store) ListDataSources(ctx context.Context) ([]models.DataSource, error) {
+	const q = "SELECT " + dataSourceColumns + " FROM data_sources ORDER BY created_at DESC"
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list datasources: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.DataSource
+	for rows.Next() {
+		ds, err := scanDataSource(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan datasource row: %w", err)
+		}
+		// 填充资产计数
+		ds.AssetCount, _ = s.countAssetsBySource(ctx, ds.ID)
+		out = append(out, *ds)
+	}
+	return out, rows.Err()
+}
+
+// DeleteDataSource 删除数据源（资产 source_id 置 NULL，不删资产）。
+func (s *Store) DeleteDataSource(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 先把资产的 source_id 置 NULL
+	if _, err := tx.ExecContext(ctx, "UPDATE assets SET source_id = NULL WHERE source_id = $1", id); err != nil {
+		return fmt.Errorf("clear asset source_id: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM data_sources WHERE id = $1", id); err != nil {
+		return fmt.Errorf("delete datasource: %w", err)
+	}
+	return tx.Commit()
+}
+
+// UpdateDataSourceScan 更新数据源最后扫描时间和结果。
+func (s *Store) UpdateDataSourceScan(ctx context.Context, id string, result *models.ScanResult) error {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal scan result: %w", err)
+	}
+	const q = `UPDATE data_sources SET last_scan_at = NOW(), last_scan_result = $2 WHERE id = $1`
+	_, err = s.db.ExecContext(ctx, q, id, resultJSON)
+	return err
+}
+
+// ListAssetsBySource 返回指定数据源的所有资产。
+func (s *Store) ListAssetsBySource(ctx context.Context, sourceID string, limit, offset int) ([]models.Asset, error) {
+	const cols = "id, name, path, sha256, size_bytes, mime_type, resource_type, metadata, source_id, created_at, updated_at"
+	q := "SELECT " + cols + " FROM assets WHERE source_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+	rows, err := s.db.QueryContext(ctx, q, sourceID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list assets by source: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.Asset
+	for rows.Next() {
+		a, err := scanAsset(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan asset row: %w", err)
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
+// countAssetsBySource 返回指定数据源的资产数量。
+func (s *Store) countAssetsBySource(ctx context.Context, sourceID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM assets WHERE source_id = $1", sourceID).Scan(&n)
+	return n, err
+}
+
+// scanDataSource 扫描一行数据源。
+func scanDataSource(r rowScanner) (*models.DataSource, error) {
+	var ds models.DataSource
+	var config, lastResult []byte
+	err := r.Scan(&ds.ID, &ds.Name, &ds.Type, &config, &ds.LastScanAt, &lastResult, &ds.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if len(config) > 0 {
+		ds.Config = json.RawMessage(config)
+	}
+	if len(lastResult) > 0 {
+		var lr models.ScanResult
+		if err := json.Unmarshal(lastResult, &lr); err == nil {
+			ds.LastScanResult = &lr
+		}
+	}
+	return &ds, nil
+}
+
+// —— SourceScanJob 扫描任务 ——
+
+// CreateScanJob 创建扫描任务。
+func (s *Store) CreateScanJob(ctx context.Context, sourceID string) (*models.ScanJob, error) {
+	const q = `INSERT INTO source_scan_jobs (source_id, status)
+VALUES ($1, 'queued')
+RETURNING id, source_id, status, total_files, processed_files, imported_count,
+          skipped_count, COALESCE(error_message, ''), started_at, finished_at, created_at`
+	var j models.ScanJob
+	err := s.db.QueryRowContext(ctx, q, sourceID).Scan(
+		&j.ID, &j.SourceID, &j.Status, &j.TotalFiles, &j.ProcessedFiles,
+		&j.ImportedCount, &j.SkippedCount, &j.ErrorMessage,
+		&j.StartedAt, &j.FinishedAt, &j.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create scan job: %w", err)
+	}
+	return &j, nil
+}
+
+// GetScanJob 按 ID 查询扫描任务。
+func (s *Store) GetScanJob(ctx context.Context, id string) (*models.ScanJob, error) {
+	const q = `SELECT id, source_id, status, total_files, processed_files, imported_count,
+skipped_count, COALESCE(error_message, ''), started_at, finished_at, created_at
+FROM source_scan_jobs WHERE id = $1`
+	row := s.db.QueryRowContext(ctx, q, id)
+	j, err := scanScanJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get scan job: %w", err)
+	}
+	return j, nil
+}
+
+// UpdateScanJobStarted 将任务状态更新为 running。
+func (s *Store) UpdateScanJobStarted(ctx context.Context, id string) error {
+	const q = `UPDATE source_scan_jobs SET status = 'running', started_at = NOW() WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, q, id)
+	return err
+}
+
+// UpdateScanJobProgress 更新扫描进度。
+func (s *Store) UpdateScanJobProgress(ctx context.Context, id string, processed, total int) error {
+	const q = `UPDATE source_scan_jobs SET processed_files = $2, total_files = $3 WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, q, id, processed, total)
+	return err
+}
+
+// UpdateScanJobCompleted 标记扫描完成。
+func (s *Store) UpdateScanJobCompleted(ctx context.Context, id string, imported, skipped int) error {
+	const q = `UPDATE source_scan_jobs
+SET status = 'completed', finished_at = NOW(), imported_count = $2, skipped_count = $3
+WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, q, id, imported, skipped)
+	return err
+}
+
+// UpdateScanJobFailed 标记扫描失败。
+func (s *Store) UpdateScanJobFailed(ctx context.Context, id, errMsg string) error {
+	const q = `UPDATE source_scan_jobs
+SET status = 'failed', finished_at = NOW(), error_message = $2
+WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, q, id, errMsg)
+	return err
+}
+
+// scanScanJob 扫描一行扫描任务。
+func scanScanJob(r rowScanner) (*models.ScanJob, error) {
+	var j models.ScanJob
+	err := r.Scan(&j.ID, &j.SourceID, &j.Status, &j.TotalFiles, &j.ProcessedFiles,
+		&j.ImportedCount, &j.SkippedCount, &j.ErrorMessage,
+		&j.StartedAt, &j.FinishedAt, &j.CreatedAt)
+	return &j, err
 }

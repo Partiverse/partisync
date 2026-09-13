@@ -68,12 +68,15 @@ export function AssetLibraryPage() {
   const [mimeType, setMimeType] = useState<string>("all")
   // C2-9（T6′ 审计）：排序 UI——后端白名单 name/size_bytes × asc/desc。
   const [sort, setSort] = useState<string>("")
+  // 数据源筛选
+  const [sourceId, setSourceId] = useState<string>("all")
+  const [sources, setSources] = useState<Array<{ id: string; name: string }>>([])
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid")
   const [offset, setOffset] = useState(0)
   const limit = 24
 
   const fetchAssets = useCallback(
-    (searchQ: string, filterType: string, mime: string, sortParam: string, searchOffset: number) => {
+    (searchQ: string, filterType: string, mime: string, sortParam: string, searchOffset: number, srcId: string) => {
       setLoading(true)
       api
         .listAssets({
@@ -83,6 +86,7 @@ export function AssetLibraryPage() {
           sort: sortParam,
           limit,
           offset: searchOffset,
+          sourceId: srcId === "all" ? "" : srcId,
         })
         .then((r) => {
           // 后端两种路径都返回 results（T6′ C2-1：此前读 r.assets 导致列表恒为空）
@@ -97,10 +101,17 @@ export function AssetLibraryPage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      fetchAssets(q, resourceType, mimeType, sort, offset)
+      fetchAssets(q, resourceType, mimeType, sort, offset, sourceId)
     }, 150)
     return () => clearTimeout(timer)
-  }, [q, resourceType, mimeType, sort, offset, fetchAssets])
+  }, [q, resourceType, mimeType, sort, offset, sourceId, fetchAssets])
+
+  // 加载数据源列表（用于筛选下拉）
+  useEffect(() => {
+    api.listSources().then((r) => {
+      setSources((r.sources ?? []).map((s) => ({ id: s.id, name: s.name })))
+    }).catch(() => {})
+  }, [])
 
   const handleSearch = (val: string) => {
     setQ(val)
@@ -137,7 +148,7 @@ export function AssetLibraryPage() {
       )
       setQ("")
       setOffset(0)
-      fetchAssets("", "all", "all", "", 0)
+      fetchAssets("", "all", "all", "", 0, sourceId)
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : "上传失败")
     } finally {
@@ -348,6 +359,21 @@ export function AssetLibraryPage() {
             <option value="size_bytes:asc">大小从小到大</option>
             <option value="size_bytes:desc">大小从大到小</option>
           </select>
+          {/* 数据源筛选 */}
+          <select
+            aria-label="按数据源筛选"
+            value={sourceId}
+            onChange={(e) => {
+              setSourceId(e.target.value)
+              setOffset(0)
+            }}
+            className="h-9 rounded-md border bg-transparent px-2 text-xs text-muted-foreground"
+          >
+            <option value="all">数据源：全部</option>
+            {sources.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
         </div>
 
         <div className="flex items-center gap-2">
@@ -387,10 +413,17 @@ export function AssetLibraryPage() {
               className="group flex flex-col justify-between overflow-hidden rounded-lg border bg-card p-3 shadow-sm transition hover:border-primary hover:shadow-md cursor-pointer"
             >
               <div className="flex flex-col gap-1.5">
-                <div className="flex items-center justify-between">
-                  <Badge variant="outline" className="text-[10px] uppercase">
-                    {asset.resource_type || "file"}
-                  </Badge>
+                <div className="flex items-center justify-between gap-1">
+                  <div className="flex items-center gap-1">
+                    <Badge variant="outline" className="text-[10px] uppercase">
+                      {asset.resource_type || "file"}
+                    </Badge>
+                    {asset.source_id && (
+                      <Badge variant="secondary" className="text-[10px]">
+                        WebDAV
+                      </Badge>
+                    )}
+                  </div>
                   <span className="text-[10px] text-muted-foreground">
                     {formatBytes(asset.size_bytes)}
                   </span>
@@ -415,6 +448,7 @@ export function AssetLibraryPage() {
                 <TableHead>类型</TableHead>
                 <TableHead>MIME</TableHead>
                 <TableHead>大小</TableHead>
+                <TableHead>来源</TableHead>
                 <TableHead>创建时间</TableHead>
               </TableRow>
             </TableHeader>
@@ -435,6 +469,13 @@ export function AssetLibraryPage() {
                     <Badge variant="outline">{asset.mime_type}</Badge>
                   </TableCell>
                   <TableCell>{formatBytes(asset.size_bytes)}</TableCell>
+                  <TableCell>
+                    {asset.source_id ? (
+                      <Badge variant="secondary" className="text-xs">WebDAV</Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">本地上传</span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDate(asset.created_at)}
                   </TableCell>

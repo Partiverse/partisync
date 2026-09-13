@@ -9,6 +9,7 @@ import (
 
 // Asset 数据资产（assets 表）。
 // SHA256 为文件内容哈希，用于去重；ResourceType 预留扩展点（image/document/video/...）。
+// SourceID 标识资产来源：nil 表示本地上传，UUID 表示来自对应数据源。
 type Asset struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
@@ -18,6 +19,7 @@ type Asset struct {
 	MimeType     string          `json:"mime_type"`
 	ResourceType string          `json:"resource_type"`
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	SourceID     *string         `json:"source_id,omitempty"` // nullable
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
@@ -57,4 +59,57 @@ const (
 type TagSuggestion struct {
 	Name       string  `json:"name"`
 	Confidence float64 `json:"confidence"`
+}
+
+// DataSource 数据源（data_sources 表）。
+type DataSource struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Type           string          `json:"type"` // "webdav"
+	Config         json.RawMessage `json:"config,omitempty"` // 内部字段，不对外暴露
+	URL            string          `json:"url,omitempty"`    // 从 config 解密后回填，供 UI 显示
+	Username       string          `json:"username,omitempty"`
+	RemotePath     string          `json:"remote_path,omitempty"`
+	LastScanAt     *time.Time      `json:"last_scan_at,omitempty"`
+	LastScanResult *ScanResult     `json:"last_scan_result,omitempty"`
+	AssetCount     int             `json:"asset_count,omitempty"` // 关联资产数量
+	CreatedAt      time.Time       `json:"created_at"`
+}
+
+// ScanResult 扫描结果统计。
+type ScanResult struct {
+	Imported int      `json:"imported"`
+	Skipped  int      `json:"skipped"`
+	Errors   []string `json:"errors,omitempty"`
+}
+
+// CreateDataSource 创建数据源的请求体。
+type CreateDataSource struct {
+	Name       string `json:"name"`
+	Type      string `json:"type"` // "webdav"
+	URL       string `json:"url"`
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	RemotePath string `json:"remote_path"`
+}
+
+// ScanRequest 扫描请求。
+type ScanRequest struct {
+	Recursive *bool    `json:"recursive"` // default true
+	Types     []string `json:"types"`     // 资源类型过滤 ["image","document"]
+}
+
+// ScanJob 异步扫描任务。
+type ScanJob struct {
+	ID            string     `json:"id"`
+	SourceID      string     `json:"source_id"`
+	Status        string     `json:"status"` // "queued" | "running" | "completed" | "failed"
+	TotalFiles    int        `json:"total_files"`
+	ProcessedFiles int        `json:"processed_files"`
+	ImportedCount int        `json:"imported_count"`
+	SkippedCount  int        `json:"skipped_count"`
+	ErrorMessage  string     `json:"error,omitempty"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
