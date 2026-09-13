@@ -218,12 +218,17 @@ export function DataSourcesPage() {
     }
     setSaving(true)
     try {
-      const body: Record<string, string> = { name: editName, url: editUrl, username: editUsername, remote_path: editRemotePath }
+      const body: Record<string, string> = { name: editName, url: editUrl, remote_path: editRemotePath }
+      // username 只有非空才发送（空=用户清空意图）
+      if (editUsername) body.username = editUsername
       if (editPassword) body.password = editPassword
-      await api.updateSource(editingId, body)
+      const res = await api.updateSource(editingId, body)
       toast.success("数据源已更新")
       setShowEdit(false)
-      fetchSources()
+      // 用 API 返回的完整数据原地更新列表
+      setSources((prev) =>
+        prev.map((s) => (s.id === editingId ? res.source : s))
+      )
     } catch {
       toast.error("更新失败")
     } finally {
