@@ -1,7 +1,7 @@
 # SESSION.md — partisync 路线基线 v2
 
 > **用途**：抗上下文压缩的项目事实源。进入新阶段或继续会话前必须重读；若路线变化，先更新本文件再行动。
-> **当前阶段**：MCD 闭环已通过 L3 浏览器验收（T7，8/8 断言）；C2-5 与 T7 三项前提缺口（标签/确认/预览）已补齐；**P2 安全加固批 A2-01…A2-06 已实现、复审并修掉 1 个 medium 缺陷，L1/L2/L3 全绿**；但**独立复审三次派发全部无产出，AC-11 仍未满足**（现为实施者自证）。详见 §12/§13。
+> **当前阶段**：MCD 闭环已通过 L3 浏览器验收（T7，8/8 断言）；C2-5 与 T7 三项前提缺口（标签/确认/预览）已补齐；**P2 安全加固批 A2-01…A2-06 已实现、复审并修掉 1 个 medium 缺陷，L1/L2/L3 全绿**；**AC-11 独立复审已满足（2026-09-13）**——换路由后三面 fresh-context 审计员（vectide/glm-5.3、minimax-cn/MiniMax-M3、tencent/hy3、zai/glm-5.3-flash）全部产出有效报告，**verdict 均 pass、无 blocker/high**，新发现 4 medium + 9 low + 3 info 残留（未修，见 §14）。详见 §12/§13/§14。
 
 ## 1. 真实目标
 
@@ -197,6 +197,11 @@
   - 前端：详情弹窗内联预览 + 标签增删 UI + AI 确认按钮，`npm run build` 全绿；
   - **T7 L3 通过（8/8 断言，consoleErrors=0，badResponses=0）**：脚本 `scripts/l3-mcd-acceptance.mjs`，证据 `docs/evidence/l3-mcd-acceptance.md`，截图 `docs/verification/t7-l3/`（7 张）；执行后实测 assets=17/tags=4/asset_tags=6；
   - 声明：修复与验证为主 Agent 实施，未做 T7 后独立复审；建议下轮派 fresh-context 审计员。
+- [x] **P2 独立复审（AC-11）满足（2026-09-13）**：换路由（deepseek 时代三连败后，本轮 vectide/minimax/tencent/zai 四路）并行派发三面 fresh-context 审计员，全部产出有效报告，**verdict 均 pass、无 blocker/high**：
+  - 安全面 `pass（有保留）`：`docs/evidence/audit-p2-independent-security.md`——A2-01/03/04/05+F6 主干 live 实测成立；2 medium（S1 回读失败 Discard 悬空行、S2 部件头无上限 DoS）+ 3 low；
+  - 探针/超时面 `pass`：`docs/evidence/audit-p2-independent-probe-timeout.md`——A2-02/03/06 live+单测双成立，F6 在 99MiB+3MiB junk 场景实测清理有效；1 medium（F-I1 `storage.Healthy()` 弱探针）+ 4 low；
+  - 证据真实性面 `pass`：`docs/evidence/audit-p2-independent-evidence.md`——L1 三绿、L2 S1–S8 命名卷等价复现、L3 8/8 独立重跑均一致，无伪造/夸大；1 medium（L2 脚本绑宿主 /tmp 不可移植）+ 3 low；
+  - 残留 findings 汇总与处置建议见 §14；测试遗留资产行/对象待用户批准后统一清理。
 - [x] **SPA 静态托管进 Docker（2026-09-12）**：`cmd/server/main.go` 新增 `spaHandler`（`WEB_DIST=/app/web` 启用，/api 与 /healthz 优先）；Dockerfile 改为 COPY 宿主机 `playground/dist`（容器内无法访问 npm registry，前端由宿主机构建）；`.dockerignore` 放行 dist。L3 全部断言对静态托管服务复测通过（8/8，consoleErrors=0）。体验地址 `http://127.0.0.1:8080/`。
 - [x] **P2 安全加固批收尾（2026-09-13）**：A2-01…A2-06 全部关闭——multipart 改流式（不再落容器 `/tmp`）、新增 `GET /readyz` 就绪探针、请求体上限跟随 `MAX_UPLOAD_BYTES`、预览内容-声明一致性校验（415，并修掉初版 md/csv/json 误拒）、失败路径孤儿文件清理、上传端点按请求放宽读写期限（40.97s 慢上传实测 201）。L1 三绿（初版 14 个新用例，含反向验证）；L2 脚本 `scripts/l2-p2-hardening.sh` **53/53 PASS**；L3 回归 **8/8 PASS**（`docs/verification/p2-hardening-run.json`）；证据 `docs/evidence/l2-integration-p2-hardening.md`；任务卡 `docs/P2-HARDENING-TASK-CARD.md`。随后复审（3 次独立派发全败 → 实施者自查，**非独立**）发现并修复 medium 缺陷 **F6**（`a6a6702`），新增单测与 L2 S8 后 **60/60 PASS**、单测 16 个。**独立复审仍未满足（AC-11 pending）**，详见 §13 与 `docs/evidence/audit-p2-hardening.md`。
 
@@ -256,6 +261,39 @@
   - **复审发现并已修 1 个 medium 缺陷（F6，`a6a6702`）**：file 部件已落盘、随后部件触发请求体上限时，已落盘对象无人清理 → 无 DB 行的孤儿文件（一次性容器实测 413 但对象存在）。修复后同场景 `NO_ORPHAN`，并新增单测 + L2 S8 常驻回归。
   - 其余 findings：F1（400 文案回显内部错误串）已修；F2（`/readyz` 回显内部拓扑）接受并记录；F3（元数据端点接受任意 path，读取面已中性化）、F4（A2-05 窄并发窗，未实测）待办；F5 接受。
   - 复核补测：**存储型 XSS 在执行层被拦下**（真实 Chromium：对照组脚本执行成功、预览端点被 CSP sandbox 拒绝）；`去重命中对象不误删` 由代码级说明升级为实测。
-- **门禁**: **独立复审（AC-11）仍未满足** —— `75fd604` 与 `a6a6702` 均为实施者自证；`audit-t6-prime.md` 原始 `verdict=fail` 与 T6″ 结论均不因本批改变。
-- **下一步建议**: ① 补一次**真正独立**的复审（本环境 subagent 派发三次全败，可换路由/模型或由人复核；重点：F6 修复面、文本家族放行判定、`/readyz` 探测口径）；② 清理库/卷内测试残留（`p2-*`、历史 `t4-l2.jpg`/`evil.png` 等，需用户批准后实施）；③ C2-7/C2-9（MIME 过滤 UI / 排序 UI）与 B-01/B-02/B-06（证据口径 + 8080 产品链路基准）。
+- **门禁**: ~~独立复审（AC-11）仍未满足~~ → **已满足（2026-09-13）**：三面 fresh-context 独立审计员全部返回且 verdict=pass（报告见 §9 末条与 §14）；`75fd604`/`a6a6702` 的实施者自证结论被独立复现确认。`audit-t6-prime.md` 原始 `verdict=fail` 与 T6″ 结论不因本批改变（历史记录保持原样）。
+- **下一步建议（更新）**: ① ~~补一次真正独立的复审~~ **已完成**；② 清理库/卷内测试残留（`p2-*`、历史 `t4-l2.jpg`/`evil.png` 及本轮三面审计员新增的测试资产行/对象，需用户批准后实施）；③ **P2.1 修复批**：§14 的 4 medium（S1/S2/M1/F-I1）+ 低成本 low 项；④ C2-7/C2-9（MIME 过滤 UI / 排序 UI）与 B-01/B-02/B-06（证据口径 + 8080 产品链路基准）。
+
+## 14. P2 独立复审残留 findings（2026-09-13，待排期）
+
+> 来源：`docs/evidence/audit-p2-independent-{security,probe-timeout,evidence}.md`。三面 verdict 均 pass，以下为 accumulative 待修清单，**未在本轮修复**。
+
+### medium（4）
+
+| ID | 面 | 问题 | 位置/复现 | 修复方向 |
+|---|---|---|---|---|
+| S1 | 安全 | 回读失败路径 `Discard` 删掉已入库（inserted=true）行引用的对象 → 悬空 DB 行、预览 404 | `internal/api/handlers.go:624-635`（代码推演+审计员实测路径存在） | 改为删 DB 行或保留文件 |
+| S2 | 安全 | multipart 部件头无独立上限：实测 8MB 部件头 201 接受；默认配置单请求头部内存 ≈ 请求体上限×并发 → DoS | `internal/api/handlers.go`（流式解析循环） | 限单部件头 64KiB + 部件数上限 |
+| F-I1 | 探针 | `storage.Healthy()` 弱探针：仅 `os.Stat`，read-only `.tmp`/被替换为 regular file 时假阳性 healthy；docstring `not writable-ready` 名实不符 | `internal/storage`（审计员实测 5 case 中 2 假阳性，`.audit-tmp` 探针已自清） | 改为真实写探针（临时文件 create+delete）+ 磁盘空间下限 |
+| M1 | 证据 | `scripts/l2-p2-hardening.sh` S5/S8 一次性容器绑宿主 `/tmp`，跨环境（/tmp 对 docker daemon 不可见）必败，可移植性风险 | 脚本 S5/S8 段 | 改命名卷 |
+
+### low（9）
+
+- S3（安全）：`.md` 内容含 `<script>` 时入库 `mime=text/html` 且预览内联 200，唯一脚本防线 CSP sandbox；建议上传侧拒 text/html 嗅探或强制 attachment。
+- S4（安全）：并发同内容上传 Stat→Rename 竞态，一方 insert 失败可 Discard 他方引用的共享对象（推演，窗口小）。
+- S5（安全）：`.tmp` 无启动/定期清扫，崩溃残留永久留存。
+- F-I2（探针）：`/readyz` 在 compose 部署无人消费（compose 不支持 readiness），仅对 K8s readinessProbe 有用。
+- F-I3（探针）：`MAX_UPLOAD_BYTES` 未在 `docker-compose.yml` 暴露。
+- F-I4（探针）：`allowSlowUpload` 静默吞 `SetReadDeadline/WriteDeadline` 错误，未来中间件改动会静默退化且无日志。
+- F-I5（文档）：`docs/P2-HARDENING-TASK-CARD.md:23,39` A2-06 描述与代码不符（实为 server 级 15s 保持、仅上传端点按请求放宽）。
+- L1（证据）：单测新增数文档口径 14/15/16 互不一致，git 实为 18 个新测试函数——低估非夸大。
+- L2（证据）：`scripts/l3-mcd-acceptance.mjs` 的 `ok` 判定漏 `badResponses`（AC-08 要求其为 0）。
+
+### info（3）
+
+- F-I6：`readyz_test.go` 缺 PG 失败路径单测；F-I7：`/readyz` 错误串泄露内部拓扑（127.0.0.1 only 可接受，上反代前需改二元）；F-I8：`storage.Healthy` docstring 名实不符（随 F-I1 修）。
+
+### 盲区（审计员声明，主 Agent 转录）
+
+- CSP sandbox 浏览器真实行为未实测；F6 未在 live 复现（依赖单测+探针面 live 等价复现）；PG/Meili 中途故障未 live `docker stop` 验证（禁破坏容器）；历史 53/53 基线无法回放。
 - **未做（勿顺手做）**: 认证/RBAC、A2-07…A2-09、前端 415 文案提示、MCD 口径变更。
