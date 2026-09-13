@@ -188,7 +188,6 @@
 - [x] **T6′ 独立复审已执行（verdict = fail）**：三路 fresh-context 审计员并行裁决——安全面 `pass`、性能与证据真实性面 `pass`、**前端与检索契约面 `fail`（2 blocker + 4 high）**。报告：`docs/evidence/audit-t6-prime.md`。
 - [x] **T6′ 阻断项修复完成**（C2-1 响应契约 / C2-2 排序 502 / C2-3 sort 静默丢弃 / C2-4 PG 缺 total / C2-6 命中字段不全 + 补齐有断言力的单测）：证据 `docs/evidence/l2-integration-t6-prime-fix.md`；浏览器回归脚本 `scripts/browser-regression.mjs`（12/12 PASS，真实 Chromium），截图 `docs/verification/t6-prime-fix/`。
 - [x] **T6″ 独立复核已完成：verdict = pass（6/6）**，见 `docs/evidence/audit-t6-prime.md` §11；
-- [ ] T7：L3 浏览器真实入口验收（Playwright 自动化，截图写入 `docs/verification/`）。**前提缺口未决**：MCD 闭环的「人工分类/文本标签」「人工确认 AI 建议并写入标注」「预览」三项在代码中不存在（`tags`/`asset_tags` 实测 0 行、无文件读取/预览端点）。
 - [x] **C2-5 修复 + T7 前提缺口补齐（2026-09-12，用户决策"两问均选A"）**：
   - C2-5：`pagination.maxTotalHits=1,100,000`，`total` 真实、深分页可翻（实测 `offset=1000/100000/999998` 均非空、跨页一致性通过）；单测 `TestEnsureIndexRaisesMaxTotalHits`；
   - 标签系统：`GET/POST /assets/{id}/tags` + `DELETE /assets/{id}/tags/{tagID}` + `GET /tags`（Store 层 6 个方法）；
@@ -196,15 +195,44 @@
   - 预览：`GET /assets/{id}/preview`（越界防护实测 400）；
   - 前端：详情弹窗内联预览 + 标签增删 UI + AI 确认按钮，`npm run build` 全绿；
   - **T7 L3 通过（8/8 断言，consoleErrors=0，badResponses=0）**：脚本 `scripts/l3-mcd-acceptance.mjs`，证据 `docs/evidence/l3-mcd-acceptance.md`，截图 `docs/verification/t7-l3/`（7 张）；执行后实测 assets=17/tags=4/asset_tags=6；
-  - 声明：修复与验证为主 Agent 实施，未做 T7 后独立复审；建议下轮派 fresh-context 审计员。
-- [x] **P2 独立复审（AC-11）满足（2026-09-13）**：换路由（deepseek 时代三连败后，本轮 vectide/minimax/tencent/zai 四路）并行派发三面 fresh-context 审计员，全部产出有效报告，**verdict 均 pass、无 blocker/high**：
-  - 安全面 `pass（有保留）`：`docs/evidence/audit-p2-independent-security.md`——A2-01/03/04/05+F6 主干 live 实测成立；2 medium（S1 回读失败 Discard 悬空行、S2 部件头无上限 DoS）+ 3 low；
-  - 探针/超时面 `pass`：`docs/evidence/audit-p2-independent-probe-timeout.md`——A2-02/03/06 live+单测双成立，F6 在 99MiB+3MiB junk 场景实测清理有效；1 medium（F-I1 `storage.Healthy()` 弱探针）+ 4 low；
-  - 证据真实性面 `pass`：`docs/evidence/audit-p2-independent-evidence.md`——L1 三绿、L2 S1–S8 命名卷等价复现、L3 8/8 独立重跑均一致，无伪造/夸大；1 medium（L2 脚本绑宿主 /tmp 不可移植）+ 3 low；
-  - 残留 findings 汇总与处置建议见 §14；测试遗留资产行/对象待用户批准后统一清理。
-- [x] **P2.1 复审修复批完成（2026-09-13）**：修复独立复审全部 4 个 medium（S1 悬空行补偿删除 / S2 部件头 64KiB+32 部件预算 / F-I1 真写探针 / M1 L2 脚本命名卷）+ 6 个低成本 low（S5 启动清扫、F-I3 compose 暴露 MAX_UPLOAD_BYTES、F-I4 超时放宽日志、F-I5 任务卡口径、L1 单测计数统一、L3 ok 判定补 badResponses）；新增 9 个测试（含 S2 反向验证与真 PG store 集成单测），L1 三绿、L2 60/60、L3 8/8、S2 live 探针 400 实证；顺带修 L2 S8 重跑非幂等（对照载荷加运行唯一 nonce）。证据：`docs/evidence/l2-integration-p21-repair.md`。**未修**：S3/S4/F-I2 与 info 级（见 §14）。
-- [x] **SPA 静态托管进 Docker（2026-09-12）**：`cmd/server/main.go` 新增 `spaHandler`（`WEB_DIST=/app/web` 启用，/api 与 /healthz 优先）；Dockerfile 改为 COPY 宿主机 `playground/dist`（容器内无法访问 npm registry，前端由宿主机构建）；`.dockerignore` 放行 dist。L3 全部断言对静态托管服务复测通过（8/8，consoleErrors=0）。体验地址 `http://127.0.0.1:8080/`。
-- [x] **P2 安全加固批收尾（2026-09-13）**：A2-01…A2-06 全部关闭——multipart 改流式（不再落容器 `/tmp`）、新增 `GET /readyz` 就绪探针、请求体上限跟随 `MAX_UPLOAD_BYTES`、预览内容-声明一致性校验（415，并修掉初版 md/csv/json 误拒）、失败路径孤儿文件清理、上传端点按请求放宽读写期限（40.97s 慢上传实测 201）。L1 三绿（初版 15 个新用例，含反向验证）；L2 脚本 `scripts/l2-p2-hardening.sh` **53/53 PASS**；L3 回归 **8/8 PASS**（`docs/verification/p2-hardening-run.json`）；证据 `docs/evidence/l2-integration-p2-hardening.md`；任务卡 `docs/P2-HARDENING-TASK-CARD.md`。随后复审（3 次独立派发全败 → 实施者自查，**非独立**）发现并修复 medium 缺陷 **F6**（`a6a6702`），新增单测与 L2 S8 后 **60/60 PASS**、单测 16 个。**独立复审仍未满足（AC-11 pending）**，详见 §13 与 `docs/evidence/audit-p2-hardening.md`。
+  - 声明：修复与验证为主 Agent 实施，未做 T7 后独立复审。
+- [x] **P2 独立复审（AC-11）满足（2026-09-13）**：三面 fresh-context 审计员并行裁决，verdict 均 pass、无 blocker/high：
+  - 安全面 `pass（有保留）`：`docs/evidence/audit-p2-independent-security.md`——A2-01/03/04/05+F6 主干 live 实测成立；2 medium（S1/S2）+ 3 low；
+  - 探针/超时面 `pass`：`docs/evidence/audit-p2-independent-probe-timeout.md`——A2-02/03/06 live+单测双成立，F6 实测有效；1 medium（F-I1）+ 4 low；
+  - 证据真实性面 `pass`：`docs/evidence/audit-p2-independent-evidence.md`——L1 三绿、L2 S1–S8 命名卷等价复现、L3 8/8 独立重跑均一致；1 medium（M1）+ 3 low；
+  - 残留 findings 汇总与处置建议见 §14。
+- [x] **P2.1 复审修复批完成（2026-09-13）**：全部 4 个 medium（S1 悬空行补偿删除 / S2 部件头 64KiB+32 部件预算 / F-I1 真写探针 / M1 L2 脚本命名卷）+ 6 个低成本 low 修复；L1 三绿、L2 60/60、L3 8/8。证据：`docs/evidence/l2-integration-p21-repair.md`。
+- [x] **P2.2 加固批完成（2026-09-13）**：S3（预览 HTML 家族降级 text/plain 源码渲染）+ S4（storage.Save link() 原子提交）；前端 uploadAsset 415/413 机器错误转人话文案。证据：`6b816d9`。
+- [x] **SPA 静态托管进 Docker（2026-09-12）**：`cmd/server/main.go` 新增 `spaHandler`（`WEB_DIST=/app/web` 启用，/api 与 /healthz 优先）；Dockerfile 改为 COPY 宿主机 `playground/dist`（容器内无法访问 npm registry，前端由宿主机构建）；`.dockerignore` 放行 dist。L3 静态托管复测 8/8 PASS。体验地址 `http://127.0.0.1:8080/`。
+- [x] **P2 安全加固批收尾（2026-09-13）**：A2-01…A2-06 全部关闭——multipart 改流式、`GET /readyz` 就绪探针、请求体上限跟随 `MAX_UPLOAD_BYTES`、预览内容-声明一致性校验（415，并修掉初版 md/csv/json 误拒）、失败路径孤儿文件清理、上传端点按请求放宽读写期限。L1 三绿（15+1 新用例）+ L2 脚本 60/60 PASS + L3 回归 8/8 PASS。证据：`docs/evidence/l2-integration-p2-hardening.md`。非独立复审发现并修复 medium F6（`a6a6702`）。
+- [x] **本轮收尾（2026-09-13 下午）**：F-I6/F-I7 info 级全部关闭——`/readyz` 统一二元错误口径 + PG 失败路径单测 + ADR-002 探针语义决策记录；SESSION.md §14 info 全标 ✅。
+
+---
+
+### 🎉 MCD（首个可独立验收阶段）已完成
+
+**完成日期**：2026-09-13
+
+**核心证据**：
+- L1：Go `build/vet/test -race` 三绿，单测覆盖 `handlers/store/search/storage/worker`；
+- L2：`docker compose up` → 三容器 healthy → 脚本 `scripts/l2-p2-hardening.sh` **60/60 PASS**；
+- L3：Playwright 自动化 `scripts/l3-mcd-acceptance.mjs` **8/8 PASS**（consoleErrors=0，badResponses=0），截图 `docs/verification/t7-l3/`；
+- 性能：100 万资产索引（LMDB 1.48GB），p95=44.79ms < 100ms（`docs/evidence/benchmark-1m.md`）；
+- 独立复审（AC-11）：安全面 + 探针/超时面 + 证据真实性面三路 verdict 均 pass，无 blocker/high。
+
+**MCD 剩余 open 项（全部为 info/low 留观，判定为可接受）**：
+| ID | 级别 | 内容 | 处置 |
+|---|---|---|---|
+| A2-07 | info | 上传/元数据端点无认证 | 接受（MCD 禁区：不做认证/RBAC） |
+| A2-08 | info | 镜像 tag 未按 digest 固定 | 接受（非 MCD 范围） |
+| A2-09 | info | `Open()` 先 open 后 `EvalSymlinks`（无调用方） | 接受（无调用方，风险为零） |
+| F-I2 | low | `/readyz` 在 compose 无人消费（架构性） | 接受（K8s 路径由 ADR-002 记录） |
+
+---
+
+### 下一步：阶段二（数据集与规模能力）规划
+
+MCD 收口后，下一阶段方向见 §6「阶段二」与 §7「未决问题」。如需启动阶段二，请先在 §7 中决策首版导入来源与细分场景。
 
 ## 10. 项目事实源
 
