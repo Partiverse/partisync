@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -427,5 +428,88 @@ func TestUploadCleansUpObjectWhenBodyCapTripsAfterFilePart(t *testing.T) {
 	}
 	if files := countFiles(t, dir); files != 0 {
 		t.Fatalf("orphan objects left after parse failure: %d files", files)
+	}
+}
+
+// rawMultipartRequest 构造手写 multipart 请求体（用于 Go writer 造不出的畸形头部）。
+func rawMultipartRequest(t *testing.T, boundary string, body []byte) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/assets/upload", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	return r
+}
+
+// S2（P2 独立复审）：部件头总大小超预算（64KiB）必须 400 拒绝，而不是把
+// ~请求体上限的头部读入内存。用大量短头行绕过 bufio 单行上限，专测总量预算。
+func TestUploadRejectsOversizedPartHeader(t *testing.T) {
+	s := &Server{store: new(store.Store), meili: nil, content: newTestStorage(t, 0)}
+
+	var body bytes.Buffer
+	body.WriteString("--B\r\n")
+	body.WriteString(strings.Repeat("X-Pad: 0123456789abcdef\r\n", 6000)) // ≈150KB 头部
+	body.WriteString("Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\n")
+	body.WriteString("data\r\n--B--\r\n")
+
+	w := serveUpload(t, s, rawMultipartRequest(t, "B", body.Bytes()))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "part header exceeds size limit") {
+		t.Fatalf("body = %s, want part-header-too-large message", w.Body.String())
+	}
+}
+
+// S2 对照：合法小头部 + 正常文件不受预算影响（saveUploadedFile 级别，证明预算只约束头部阶段）。
+func TestUploadAcceptsNormalPartHeaderUnderBudget(t *testing.T) {
+	content := newTestStorage(t, 0)
+	s := &Server{content: content}
+
+	r := uploadRequest(t, "ok.txt", []byte("normal payload"), true)
+	saved, _, err := s.saveUploadedFile(r)
+	if err != nil {
+		t.Fatalf("saveUploadedFile with normal headers: %v", err)
+	}
+	if saved.SizeBytes != int64(len("normal payload")) {
+		t.Fatalf("size = %d", saved.SizeBytes)
+	}
+}
+
+// S2：单个超长头行（80KB，远超 bufio 缓冲、超预算）同样映射为 400——
+// 预算按字节总量计，与行数无关；且响应不得回显头部内容。
+func TestUploadMapsOversizedHeaderLineToBadRequest(t *testing.T) {
+	s := &Server{store: new(store.Store), meili: nil, content: newTestStorage(t, 0)}
+
+	var body bytes.Buffer
+	body.WriteString("--B\r\n")
+	body.WriteString("X-Pad: " + strings.Repeat("A", 80<<10) + "\r\n") // 单行 80KB > 64KiB 预算
+	body.WriteString("Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\n")
+	body.WriteString("data\r\n--B--\r\n")
+
+	w := serveUpload(t, s, rawMultipartRequest(t, "B", body.Bytes()))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "AAAA") {
+		t.Fatalf("response echoes header content: %s", w.Body.String())
+	}
+}
+
+// S2：部件数超过上限（32）必须 400 拒绝，防止碎片部件逐个消耗解析预算。
+func TestUploadRejectsTooManyParts(t *testing.T) {
+	s := &Server{store: new(store.Store), meili: nil, content: newTestStorage(t, 0)}
+
+	var body bytes.Buffer
+	body.WriteString("--B\r\n")
+	for i := 0; i < maxMultipartParts+1; i++ {
+		body.WriteString(fmt.Sprintf("Content-Disposition: form-data; name=\"f%d\"\r\n\r\nv\r\n--B\r\n", i))
+	}
+	body.WriteString("--B--\r\n")
+
+	w := serveUpload(t, s, rawMultipartRequest(t, "B", body.Bytes()))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "part count exceeds limit") {
+		t.Fatalf("body = %s, want too-many-parts message", w.Body.String())
 	}
 }

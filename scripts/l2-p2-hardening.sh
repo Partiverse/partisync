@@ -16,7 +16,9 @@
 # 退出码：0 = 全部检查通过。
 #
 # 副作用（可恢复）：短暂停止/启动 partisync-postgres 与 partisync-meilisearch；
-# 写入若干 p2-* 测试资产；在 /tmp 下创建并清理两个一次性容器的数据目录（:8081 / :8082）。
+# 写入若干 p2-* 测试资产；创建并清理两个命名卷 + 一次性容器（:8081 / :8082）。
+# P2 独立复审 M1：S5/S8 一次性容器原用宿主 /tmp bind mount，在 /tmp 对 docker
+# daemon 不可见的环境必失败；改用命名卷（镜像内 /data/assets 已预建且属主 app）。
 
 set -uo pipefail
 
@@ -27,27 +29,20 @@ PG_CT=${PG_CT:-partisync-postgres}
 MEILI_CT=${MEILI_CT:-partisync-meilisearch}
 NET=${NET:-partisync_default}
 IMAGE=${IMAGE:-partisync-server:local}
-CAP_DATA=${CAP_DATA:-/tmp/p2-cap-data}
+CAP_DATA=${CAP_DATA:-p2-cap-data}
 S8_BASE=${S8_BASE:-http://127.0.0.1:8082}
-S8_DATA=${S8_DATA:-/tmp/p2-s8-data}
+S8_DATA=${S8_DATA:-p2-s8-data}
 
 WORK=$(mktemp -d /tmp/p2l2.XXXXXX)
 
-# cleanup_cap_data 删除一次性容器的数据目录：文件由容器内 uid 10001 创建，
-# 宿主 rm 无权限，故用同镜像容器删除，再删空目录。
+# cleanup_cap_data 删除一次性容器的命名卷（M1：原 bind mount 方案在受控沙箱不可移植）。
 cleanup_cap_data() {
-  if [ -d "$CAP_DATA" ]; then
-    docker run --rm -v "$CAP_DATA:/cleanup" "$IMAGE" sh -c 'rm -rf /cleanup/* /cleanup/.[!.]*' >/dev/null 2>&1 || true
-    rmdir "$CAP_DATA" >/dev/null 2>&1 || true
-  fi
+  docker volume rm -f "$CAP_DATA" >/dev/null 2>&1 || true
 }
 
-# cleanup_s8_data 删除 S8 一次性容器的数据目录（同 cleanup_cap_data：文件由容器内 uid 10001 创建）。
+# cleanup_s8_data 删除 S8 一次性容器的命名卷。
 cleanup_s8_data() {
-  if [ -d "$S8_DATA" ]; then
-    docker run --rm -v "$S8_DATA:/cleanup" "$IMAGE" sh -c 'rm -rf /cleanup/* /cleanup/.[!.]*' >/dev/null 2>&1 || true
-    rmdir "$S8_DATA" >/dev/null 2>&1 || true
-  fi
+  docker volume rm -f "$S8_DATA" >/dev/null 2>&1 || true
 }
 
 trap 'rm -rf "$WORK"; cleanup_cap_data; cleanup_s8_data' EXIT
@@ -219,8 +214,6 @@ check_eq "容器 /tmp 条目数" 0 "$tmpcount"
 # --------------------------------------------- S5 请求体上限跟随配置（AC-04）
 say "S5 A2-03 请求体上限跟随 MAX_UPLOAD_BYTES（AC-04）"
 cleanup_cap_data
-mkdir -p "$CAP_DATA"
-chmod 777 "$CAP_DATA"
 docker rm -f p2-cap-test >/dev/null 2>&1 || true
 docker run -d --name p2-cap-test --network "$NET" -p 127.0.0.1:8081:8080 \
   -e MAX_UPLOAD_BYTES=1048576 -e STORAGE_ROOT=/data/assets -e WEB_DIST= \
@@ -286,8 +279,6 @@ check_true "上传耗时 > 35s（超过旧 15s 读超时与 30s 写超时）" \
 # --------------------- S8 解析期失败不留孤儿对象（F6 复审回归）
 say "S8 解析期失败不留孤儿对象（F6 复审回归）"
 cleanup_s8_data
-mkdir -p "$S8_DATA"
-chmod 777 "$S8_DATA"
 docker rm -f p2-s8-test >/dev/null 2>&1 || true
 docker run -d --name p2-s8-test --network "$NET" -p 127.0.0.1:8082:8080 \
   -e MAX_UPLOAD_BYTES=1048576 -e STORAGE_ROOT=/data/assets -e WEB_DIST= \
@@ -295,13 +286,18 @@ docker run -d --name p2-s8-test --network "$NET" -p 127.0.0.1:8082:8080 \
 if wait_code "$S8_BASE/healthz" 200 30; then pass "一次性容器（1MiB 上限）就绪"; else fail "一次性容器未就绪"; fi
 
 # 对照组：合法文件部件（64KiB）、无超限字段 → 201，且对象确实落盘。
-python3 - "$WORK/s8-control.bin" <<'PY'
-import pathlib, sys
-payload = b'C' * (64 * 1024)
+# 载荷尾部加运行唯一 nonce：避免与历史运行的载荷同内容命中 DB 去重
+# （去重路径返回 200 existing=true，会让本组断言对重跑失去确定性）。
+python3 - "$WORK/s8-control.bin" "$WORK/s8-control-payload.bin" <<'PY'
+import pathlib, sys, time
+nonce = str(time.time_ns()).encode()
+payload = b'C' * (64 * 1024 - len(nonce)) + nonce
 b = b'S8BOUNDARY'
 pathlib.Path(sys.argv[1]).write_bytes(
     b'--' + b + b'\r\nContent-Disposition: form-data; name="file"; filename="s8-control.txt"\r\n'
     b'Content-Type: text/plain\r\n\r\n' + payload + b'\r\n--' + b + b'--\r\n')
+# 载荷另存一份，供后续 ctl_sha 按实际内容计算（nonce 随机，无法用常量重算）。
+pathlib.Path(sys.argv[2]).write_bytes(payload)
 PY
 code=$(http POST "$S8_BASE/api/v1/assets/upload" -H "Content-Type: multipart/form-data; boundary=S8BOUNDARY" --data-binary @"$WORK/s8-control.bin")
 check_code "S8 对照组（无超限字段）上传" 201 "$code"
@@ -323,7 +319,7 @@ code=$(http POST "$S8_BASE/api/v1/assets/upload" -H "Content-Type: multipart/for
 check_code "S8 超限请求（file 部件已落盘后解析失败）" 413 "$code"
 
 exp_sha=$(python3 -c "import hashlib;print(hashlib.sha256(b'X'*(64*1024)).hexdigest())")
-ctl_sha=$(python3 -c "import hashlib;print(hashlib.sha256(b'C'*(64*1024)).hexdigest())")
+ctl_sha=$(sha256sum "$WORK/s8-control-payload.bin" | awk '{print $1}')
 if docker exec p2-s8-test sh -c "test -e /data/assets/${exp_sha:0:2}/${exp_sha:2}"; then
   fail "S8 失败请求的 file 部件对象被清理（残留孤儿 ${exp_sha:0:2}/${exp_sha:2}）"
 else

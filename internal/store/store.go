@@ -70,6 +70,22 @@ ON CONFLICT (sha256) DO NOTHING`
 	return n > 0, nil
 }
 
+// DeleteAssetBySHA256 按内容哈希删除资产行，返回是否确有行被删。
+// 用途：上传回读失败时的**补偿删除**（P2 独立复审 S1）——inserted=true 意味着
+// 本请求刚创建了该哈希的唯一一行，删除后才能安全清理已落盘对象；
+// 删除失败时调用方应保留对象（宁留孤儿文件，不留悬空 DB 行）。
+func (s *Store) DeleteAssetBySHA256(ctx context.Context, sha256 string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, "DELETE FROM assets WHERE sha256 = $1", sha256)
+	if err != nil {
+		return false, fmt.Errorf("delete asset by sha256: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete asset rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
 // GetAssetByID 按主键查询；未找到返回 (nil, nil)。
 func (s *Store) GetAssetByID(ctx context.Context, id string) (*models.Asset, error) {
 	q := "SELECT " + assetColumns + " FROM assets WHERE id = $1"

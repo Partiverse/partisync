@@ -103,6 +103,13 @@ func main() {
 		log.Fatalf("init content storage: %v", err)
 	}
 
+	// S5（P2 独立复审）：进程崩溃会遗留 upload-* 临时文件在 .tmp，启动时清扫一次。
+	if n, err := content.CleanStaleTemp(time.Hour); err != nil {
+		log.Printf("WARN: clean stale temp files: %v", err)
+	} else if n > 0 {
+		log.Printf("cleaned %d stale temp file(s) in storage .tmp", n)
+	}
+
 	meili := search.NewClient(meiliURL, meiliKey)
 	if err := meili.EnsureIndex(context.Background()); err != nil {
 		log.Printf("WARN: ensure meilisearch index failed (search degraded): %v", err)

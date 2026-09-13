@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -537,13 +539,18 @@ const (
 )
 
 // allowSlowUpload 放宽本次请求的读/写期限，使大文件慢速上传不被服务端级超时截断。
-// 不支持该控制的 ResponseWriter（如测试用 recorder）会返回错误，忽略即可——
-// 此时仍有服务端级超时兜底，不影响安全性。
+// 不支持该控制的 ResponseWriter（如测试用 recorder）会返回错误——此时仍有服务端级
+// 超时兜底，不影响安全性；但必须记日志：若未来中间件改动了 ResponseWriter 链导致
+// 放宽静默失效，这里要有迹可循（P2 独立复审 F-I4）。
 func allowSlowUpload(w http.ResponseWriter) {
 	rc := http.NewResponseController(w)
 	now := time.Now()
-	_ = rc.SetReadDeadline(now.Add(uploadReadBudget))
-	_ = rc.SetWriteDeadline(now.Add(uploadWriteBudget))
+	if err := rc.SetReadDeadline(now.Add(uploadReadBudget)); err != nil {
+		log.Printf("upload: relax read deadline failed (server-level timeout will apply): %v", err)
+	}
+	if err := rc.SetWriteDeadline(now.Add(uploadWriteBudget)); err != nil {
+		log.Printf("upload: relax write deadline failed (server-level timeout will apply): %v", err)
+	}
 }
 
 // 上传解析的可预期错误（由 handler 映射为 4xx）。
@@ -551,7 +558,56 @@ var (
 	errUploadNotMultipart = errors.New("request is not multipart/form-data")
 	errUploadNoFilePart   = errors.New(`multipart part "file" is required`)
 	errUploadNoFileName   = errors.New("uploaded file must have a name")
+	// P2 独立复审 S2：部件头必须有限额。multipart 部件头由 textproto 全量读入内存，
+	// Go 标准库对其总大小无上限（只受请求体上限约束）——不设防时单个请求可把
+	// ~MaxBytes 字节的头部吸入内存，放大面 = 请求体上限 × 并发。
+	errPartHeaderTooLarge = errors.New("multipart part header exceeds size limit")
+	errTooManyParts       = errors.New("multipart part count exceeds limit")
 )
+
+const (
+	// maxPartHeaderBytes 单个部件头部（含 multipart 边界行）的读取预算。
+	// 合法表单的头部（Content-Disposition/Content-Type + 边界）远小于该值。
+	maxPartHeaderBytes = 64 << 10
+	// maxMultipartParts 单请求允许的部件数上限（file + 少量元数据字段）。
+	maxMultipartParts = 32
+)
+
+// headerBudgetReader 在启用时限制从底层读取的字节量，用于约束 multipart 部件头
+// 阶段的内存放大；内容流式落盘阶段必须关闭预算（文件本身可达 MaxBytes）。
+type headerBudgetReader struct {
+	r       io.Reader
+	budget  int64
+	enabled bool
+}
+
+func (h *headerBudgetReader) Read(p []byte) (int, error) {
+	n, err := h.r.Read(p)
+	if h.enabled && n > 0 {
+		h.budget -= int64(n)
+		if h.budget < 0 {
+			// 已读出的 n 字节交还调用方（bufio 会缓存），错误在下次填充时浮现。
+			return n, errPartHeaderTooLarge
+		}
+	}
+	return n, err
+}
+
+// newMultipartReader 构造带头部预算的 multipart 解析器。
+// 与 r.MultipartReader() 等价，但插入了 headerBudgetReader 以约束部件头阶段
+// 的读取量（S2），并在部件数超过 maxMultipartParts 时提前拒绝。
+func newMultipartReader(r *http.Request) (*multipart.Reader, *headerBudgetReader, error) {
+	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mt != "multipart/form-data" {
+		return nil, nil, fmt.Errorf("%w: %v", errUploadNotMultipart, err)
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, nil, fmt.Errorf("%w: missing boundary", errUploadNotMultipart)
+	}
+	body := &headerBudgetReader{r: r.Body, budget: maxPartHeaderBytes, enabled: true}
+	return multipart.NewReader(body, boundary), body, nil
+}
 
 // handleUploadAsset 接收 multipart/form-data 的真实文件字节：
 // 流式落盘（内容寻址 + SHA256 去重）→ 元数据入库 → 同步 Meilisearch。
@@ -623,13 +679,20 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 
 	created, err := s.store.GetAssetBySHA256(ctx, saved.SHA256)
 	if err != nil || created == nil {
-		log.Printf("upload readback created failed: %v", err)
-		// A2-05：回读失败同样清理孤儿文件。
-		if !saved.Deduped {
+		log.Printf("upload readback created failed (sha256 %s, err=%v)", saved.SHA256, err)
+		// P2 独立复审 S1：inserted=true 说明本请求已写入 DB 行，此时**不能**直接
+		// Discard 对象——那会制造「有行无文件」的悬空 DB 行（预览/下载 404）。
+		// 补偿顺序：先删回 DB 行；删行成功才清理本次新落盘的对象（去重命中的对象
+		// 不属于本请求，不删）。删行失败则行+对象都在，状态一致，客户端可安全重试。
+		rowDeleted, dErr := s.store.DeleteAssetBySHA256(ctx, saved.SHA256)
+		if dErr != nil {
+			log.Printf("upload compensating row delete failed (sha256 %s): %v", saved.SHA256, dErr)
+		} else if !saved.Deduped {
 			if dErr := s.content.Discard(saved.RelPath); dErr != nil {
 				log.Printf("upload orphan cleanup failed (path %q): %v", saved.RelPath, dErr)
 			}
 		}
+		_ = rowDeleted // rowDeleted=false 仅表示行本就不存在（如并发删除），无需再补偿
 		writeError(w, http.StatusInternalServerError, "failed to load created asset")
 		return
 	}
@@ -660,18 +723,28 @@ func (s *Server) saveUploadedFile(r *http.Request) (saved *storage.SavedObject, 
 		}
 	}()
 
-	mr, err := r.MultipartReader()
+	mr, body, err := newMultipartReader(r)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: %v", errUploadNotMultipart, err)
+		return nil, "", err
 	}
 
+	parts := 0
 	for {
+		// S2：仅部件头解析阶段启用读取预算；内容阶段必须关闭，否则大文件会被误限。
+		body.budget = maxPartHeaderBytes
+		body.enabled = true
 		part, partErr := mr.NextPart()
+		body.enabled = false
 		if errors.Is(partErr, io.EOF) {
 			break
 		}
 		if partErr != nil {
 			return saved, clientName, partErr
+		}
+		parts++
+		if parts > maxMultipartParts {
+			_ = part.Close()
+			return saved, clientName, errTooManyParts
 		}
 
 		// 非文件部分（或重复的 file 部分）：读尽后丢弃，否则会阻塞后续 part 的解析。
@@ -716,7 +789,11 @@ func uploadErrorStatus(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, errUploadNotMultipart),
 		errors.Is(err, errUploadNoFilePart),
-		errors.Is(err, errUploadNoFileName):
+		errors.Is(err, errUploadNoFileName),
+		errors.Is(err, errPartHeaderTooLarge),
+		errors.Is(err, errTooManyParts):
+		// 注：Go 1.22 stdlib 对部件头另有 10MiB/部件、10000 条目兜底，但都在
+		// 本端点的 64KiB 预算之后才触发，正常不可达（见 docs/SESSION.md §14 S2）。
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
@@ -741,6 +818,10 @@ func uploadErrorMessage(err error) string {
 			return errUploadNotMultipart.Error()
 		case errors.Is(err, errUploadNoFileName):
 			return errUploadNoFileName.Error()
+		case errors.Is(err, errPartHeaderTooLarge):
+			return errPartHeaderTooLarge.Error()
+		case errors.Is(err, errTooManyParts):
+			return errTooManyParts.Error()
 		default:
 			return err.Error()
 		}

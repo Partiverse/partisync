@@ -133,7 +133,9 @@ await browser.close()
 
 const failed = checks.filter((c) => !c.ok)
 const result = {
-  ok: failed.length === 0 && consoleErrors.length === 0,
+  // L2（P2 独立复审）：badResponses 必须参与 ok 判定（AC-08 要求其为 0），
+  // 否则坏响应只在明细里可见、不影响退出码。
+  ok: failed.length === 0 && consoleErrors.length === 0 && badResponses.length === 0,
   checks,
   failed,
   consoleErrors,

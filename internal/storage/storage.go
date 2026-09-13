@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -82,12 +83,60 @@ func New(root string, maxBytes int64) (*Store, error) {
 // Root 返回存储根的绝对路径。
 func (s *Store) Root() string { return s.root }
 
-// Healthy 检查存储根可达（readiness 探针用，A2-02）。
+// Healthy 检查存储可用（readiness 探针用，A2-02）。
+// P2 独立复审 F-I1：只 os.Stat 是弱探针——只读挂载或 .tmp 被替换成普通文件时
+// 会假阳性 healthy。这里改为真实写探针：确认 .tmp 存在且为目录，并在其中
+// 创建+删除一个临时文件验证写权限。磁盘剩余空间检查需要平台相关 syscall，
+// 本版不含（已知盲区，见 docs/SESSION.md §14）。
 func (s *Store) Healthy() error {
-	if _, err := os.Stat(filepath.Join(s.root, tmpDirName)); err != nil {
-		return fmt.Errorf("storage root %q not writable-ready: %w", s.root, err)
+	tmpDir := filepath.Join(s.root, tmpDirName)
+	info, err := os.Stat(tmpDir)
+	if err != nil {
+		return fmt.Errorf("storage tmp dir %q not statable: %w", tmpDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("storage tmp path %q is not a directory", tmpDir)
+	}
+	f, err := os.CreateTemp(tmpDir, "healthcheck-*")
+	if err != nil {
+		return fmt.Errorf("storage tmp dir %q not writable: %w", tmpDir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("storage healthcheck file cleanup failed in %q: %w", tmpDir, err)
 	}
 	return nil
+}
+
+// CleanStaleTemp 清扫 .tmp 内残留的 upload-* 临时文件（P2 独立复审 S5）：
+// 进程崩溃会把已创建、未 rename 的临时文件永久留在 .tmp 里，Save 的 defer
+// 只覆盖本次调用。返回删除的文件数；maxAge 之内的文件视为仍在写入，不动。
+// 建议在服务启动时调用一次。
+func (s *Store) CleanStaleTemp(maxAge time.Duration) (int, error) {
+	tmpDir := filepath.Join(s.root, tmpDirName)
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		return 0, fmt.Errorf("storage: read tmp dir: %w", err)
+	}
+	deadline := time.Now().Add(-maxAge)
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "upload-") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // 并发窗口内文件可能刚被 rename 走，跳过即可
+		}
+		if info.ModTime().After(deadline) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(tmpDir, e.Name())); err == nil {
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 // Discard 删除已落盘的对象（A2-05：入库失败时清理孤儿文件，防磁盘泄漏）。

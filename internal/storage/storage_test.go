@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // makePNG 生成一张 w×h 的合法 PNG，作为测试用真实内容。
@@ -317,5 +318,71 @@ func TestHealthyDetectsMissingTmpDir(t *testing.T) {
 	}
 	if err := s.Healthy(); err == nil {
 		t.Fatalf("Healthy = nil, want error after .tmp removal")
+	}
+}
+
+// Healthy（F-I1）：.tmp 被替换为普通文件时必须探出故障（弱 os.Stat 探针的假阳性场景）。
+func TestHealthyDetectsTmpReplacedByRegularFile(t *testing.T) {
+	s := newTestStore(t, 0)
+	if err := os.RemoveAll(filepath.Join(s.Root(), ".tmp")); err != nil {
+		t.Fatalf("remove .tmp: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Root(), ".tmp"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("write regular file over .tmp: %v", err)
+	}
+	if err := s.Healthy(); err == nil {
+		t.Fatal("Healthy = nil, want error when .tmp is a regular file")
+	}
+}
+
+// Healthy（F-I1）：只读 .tmp 必须探出故障——真实写探针（create+delete）覆盖 os.Stat 的盲区。
+// 以 root 运行时 chmod 不构成限制，跳过。
+func TestHealthyDetectsReadOnlyTmp(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: read-only directory is still writable, cannot simulate")
+	}
+	s := newTestStore(t, 0)
+	tmpDir := filepath.Join(s.Root(), ".tmp")
+	if err := os.Chmod(tmpDir, 0o555); err != nil {
+		t.Fatalf("chmod .tmp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o755) })
+	if err := s.Healthy(); err == nil {
+		t.Fatal("Healthy = nil, want error when .tmp is read-only")
+	}
+}
+
+// CleanStaleTemp（S5）：只清超过 maxAge 的 upload-* 文件；新文件与非 upload 前缀不动。
+func TestCleanStaleTempRemovesOnlyOldUploadFiles(t *testing.T) {
+	s := newTestStore(t, 0)
+	tmpDir := filepath.Join(s.Root(), ".tmp")
+
+	oldFile := filepath.Join(tmpDir, "upload-stale")
+	newFile := filepath.Join(tmpDir, "upload-fresh")
+	other := filepath.Join(tmpDir, "keep-me")
+	for _, p := range []string{oldFile, newFile, other} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	stale := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(oldFile, stale, stale); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	n, err := s.CleanStaleTemp(time.Hour)
+	if err != nil {
+		t.Fatalf("CleanStaleTemp: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("removed = %d, want 1", n)
+	}
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Fatalf("stale file still exists (stat err = %v)", err)
+	}
+	for _, p := range []string{newFile, other} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s should survive cleanup: %v", p, err)
+		}
 	}
 }

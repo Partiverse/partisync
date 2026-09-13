@@ -57,6 +57,8 @@ services:
       MEILI_URL: "http://meilisearch:7700"
       MEILI_KEY: "partisync_master_key_for_dev_only_32_chars_long"
       STORAGE_ROOT: "/data/assets"
+      # F-I3（P2 独立复审）：单文件上限可由宿主机环境覆盖（字节）；留空用内置默认 100MiB。
+      MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-}"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:

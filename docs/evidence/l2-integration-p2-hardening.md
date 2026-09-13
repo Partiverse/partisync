@@ -273,6 +273,6 @@ PASS=60 FAIL=0
 RESULT=PASS
 ```
 
-- L1：`build/vet/test -race` 三绿（新用例 16 个）；`gofmt -l cmd internal` 为空。
+- L1：`build/vet/test -race` 三绿（新用例 16 个 = `75fd604` 15 个 + `a6a6702`/F6 1 个）；`gofmt -l cmd internal` 为空。
 - L3：T7 闭环 **8/8 PASS**（截图已用修复版镜像重采），`consoleErrors=[]`、`badResponses=[]`。
 - **独立性**：修复与复验同样由实施者完成，**不构成独立复审**。
