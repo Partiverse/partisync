@@ -145,11 +145,17 @@
 ## 7. 未决问题（下轮讨论，不在未决前编码）
 
 1. AI/ML 团队的首个细分场景：计算机视觉数据集、文档/NLP 数据集，还是多模态研究资料；
-2. 首版导入来源：浏览器上传、服务端挂载目录、对象存储，或其中的最小组合；
-3. 服务端技术栈与索引组合：Rust/Tantivy、独立 Meilisearch，或关系库全文检索；
+2. 首版导入来源：浏览器上传 + 服务端挂载目录（**MCD 已选定**，见 §5）；对象存储（S3/GCS）列入阶段二；
+3. 服务端技术栈与索引组合：**已选定**（Go + Meilisearch，见 D13-D15）；
 4. “文件处理吞吐”的具体目标：导入、哈希、缩略图、导出分别需要达到什么指标；
 5. AI endpoint 的协议、成本预算、隐私边界和失败重试语义；
-6. 是否需要认证、团队权限和审计日志进入 MCD。
+6. 是否需要认证、团队权限和审计日志进入 MCD（**MCD 禁区**，首版不做）；
+7. **多端连接器：自写适配层 vs 直接复用 rclone Go 库**：
+   - **建议：自写适配层 + rclone subprocess 仅用于无标准 SDK 的协议（SFTP/WebDAV/少数专有云）**；
+   - 理由① 安全：rclone 刚披露 CVE-2026-4964，直接引库将所有后端传输漏洞引入信任边界；subprocess 隔离只暴露调用接口；
+   - 理由② 体积：完整 rclone 库含 50+ 后端（二进制膨胀），与“D13 单二进制静态链接”决策冲突；
+   - 理由③ 模型不匹配：rclone 是同步阻塞传输，不适合 partisync 的异步流式摄入；
+   - 具体分配：S3/GCS/Azure → AWS SDK Go v2 / cloud SDK；Google Drive/Dropbox → rclone subprocess；SFTP/WebDAV → rclone subprocess 或轻量 Go 库；HTTP URL → 自写 net/http；其他 DAM → 自写 API 客户端。
 
 ## 8. 明确排除（防止范围蔓延）
 
