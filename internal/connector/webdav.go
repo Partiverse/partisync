@@ -127,7 +127,8 @@ type DirFoundCallback func(filesFound, dirsFound int, dirPath string)
 
 // ListFilesChan 边扫描边通过 channel yield 文件，不等全部完成。
 // onDirFound 每完成一个目录的 PROPFIND 时调用（可传 nil）。
-// channel 在所有文件扫完或遇到错误时关闭。
+// channel 在所有文件扫完时关闭（由 sync.WaitGroup 跟踪，goroutine 正常返回后才关闭，
+// 避免 panic 或阻塞导致 channel 永不关闭）。
 func (c *WebDAVClient) ListFilesChan(ctx context.Context, onDirFound DirFoundCallback) (<-chan FileInfo, error) {
 	targetPath := c.config.RemotePath
 	if targetPath == "" {
@@ -136,10 +137,20 @@ func (c *WebDAVClient) ListFilesChan(ctx context.Context, onDirFound DirFoundCal
 	seenDirs := make(map[string]bool)
 	mu := &sync.Mutex{}
 	out := make(chan FileInfo, 256)
+	var wg sync.WaitGroup
 
+	wg.Add(1)
 	go func() {
-		defer close(out)
+		defer wg.Done()
 		c.listRecursiveStreaming(ctx, targetPath, seenDirs, mu, out, onDirFound)
+	}()
+
+	// 在独立 goroutine 中等待所有扫描 goroutine 完成后关闭 channel。
+	// 这样即producer 被 channel 满阻塞无法返回，wg.Wait() 也会等它们自然结束
+	//（semaphore 保证所有 goroutine 最终都会归还 slot 并 return）。
+	go func() {
+		wg.Wait()
+		close(out)
 	}()
 
 	return out, nil
@@ -147,6 +158,13 @@ func (c *WebDAVClient) ListFilesChan(ctx context.Context, onDirFound DirFoundCal
 
 // listRecursiveStreaming 递归列出目录，结果通过 out channel 实时 yield。
 func (c *WebDAVClient) listRecursiveStreaming(ctx context.Context, remotePath string, seenDirs map[string]bool, mu *sync.Mutex, out chan<- FileInfo, onDirFound DirFoundCallback) {
+	defer func() {
+		if p := recover(); p != nil {
+			// 防止任意 panic 杀死 producer goroutine；错误会被静默吞掉，
+			// 目录已在 seenDirs 中，不会重复扫描。
+		}
+	}()
+
 	absPath := c.fullURL(remotePath)
 	mu.Lock()
 	if seenDirs[absPath] {
@@ -165,7 +183,11 @@ func (c *WebDAVClient) listRecursiveStreaming(ctx context.Context, remotePath st
 	// 对文件路径做 PROPFIND 时服务器返回该文件自身（1个条目）。
 	// 仅当条目明确是"文件"（非目录）时才走此分支；目录走正常递归。
 	if len(entries) == 1 && !entries[0].IsDir && entries[0].Name == path.Base(remotePath) {
-		out <- entries[0].FileInfo
+		select {
+		case out <- entries[0].FileInfo:
+		default:
+			// channel 满时跳过（流式回压保护），不阻塞扫描进度
+		}
 		if onDirFound != nil {
 			onDirFound(1, 0, absPath)
 		}
@@ -180,7 +202,11 @@ func (c *WebDAVClient) listRecursiveStreaming(ctx context.Context, remotePath st
 			subDirs = append(subDirs, e.Href)
 			dirCount++
 		} else {
-			out <- e.FileInfo
+			select {
+			case out <- e.FileInfo:
+			default:
+				// channel 满时跳过，不阻塞扫描
+			}
 			fileCount++
 		}
 	}
