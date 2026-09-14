@@ -121,6 +121,95 @@ func (c *WebDAVClient) ListFiles(ctx context.Context) ([]FileInfo, error) {
 	return c.listRecursive(ctx, targetPath, seenDirs, mu)
 }
 
+// DirFoundCallback 每扫完一个目录后调用（用于进度报告）。
+// 参数：发现的文件数、发现的子目录数、当前目录的绝对路径。
+type DirFoundCallback func(filesFound, dirsFound int, dirPath string)
+
+// ListFilesChan 边扫描边通过 channel yield 文件，不等全部完成。
+// onDirFound 每完成一个目录的 PROPFIND 时调用（可传 nil）。
+// channel 在所有文件扫完或遇到错误时关闭。
+func (c *WebDAVClient) ListFilesChan(ctx context.Context, onDirFound DirFoundCallback) (<-chan FileInfo, error) {
+	targetPath := c.config.RemotePath
+	if targetPath == "" {
+		targetPath = "/"
+	}
+	seenDirs := make(map[string]bool)
+	mu := &sync.Mutex{}
+	out := make(chan FileInfo, 256)
+
+	go func() {
+		defer close(out)
+		c.listRecursiveStreaming(ctx, targetPath, seenDirs, mu, out, onDirFound)
+	}()
+
+	return out, nil
+}
+
+// listRecursiveStreaming 递归列出目录，结果通过 out channel 实时 yield。
+func (c *WebDAVClient) listRecursiveStreaming(ctx context.Context, remotePath string, seenDirs map[string]bool, mu *sync.Mutex, out chan<- FileInfo, onDirFound DirFoundCallback) {
+	absPath := c.fullURL(remotePath)
+	mu.Lock()
+	if seenDirs[absPath] {
+		mu.Unlock()
+		return
+	}
+	seenDirs[absPath] = true
+	mu.Unlock()
+
+	entries, err := c.listAllAtDepth(ctx, remotePath, "1")
+	if err != nil {
+		return
+	}
+
+	// 保护：123pan 把某些文件（.iso 等）标记为 <collection>（目录）。
+	// 对文件路径做 PROPFIND 时服务器返回该文件自身（1个条目）。
+	// 仅当条目明确是"文件"（非目录）时才走此分支；目录走正常递归。
+	if len(entries) == 1 && !entries[0].IsDir && entries[0].Name == path.Base(remotePath) {
+		out <- entries[0].FileInfo
+		if onDirFound != nil {
+			onDirFound(1, 0, absPath)
+		}
+		return
+	}
+
+	fileCount, dirCount := 0, 0
+	var subDirs []string
+
+	for _, e := range entries {
+		if e.IsDir {
+			subDirs = append(subDirs, e.Href)
+			dirCount++
+		} else {
+			out <- e.FileInfo
+			fileCount++
+		}
+	}
+
+	if onDirFound != nil {
+		onDirFound(fileCount, dirCount, absPath)
+	}
+
+	if len(subDirs) == 0 {
+		return
+	}
+
+	// 并发扫描所有子目录（限制最大并发数）
+	sem := make(chan struct{}, maxConcurrentDirs)
+	var wg sync.WaitGroup
+
+	for _, dir := range subDirs {
+		wg.Add(1)
+		go func(d string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			c.listRecursiveStreaming(ctx, d, seenDirs, mu, out, onDirFound)
+		}(dir)
+	}
+
+	wg.Wait()
+}
+
 // listAtDepth 发送指定 Depth 的 PROPFIND 请求并解析文件。
 func (c *WebDAVClient) listAtDepth(ctx context.Context, remotePath, depth string) ([]FileInfo, error) {
 	body, err := c.propfindRaw(ctx, remotePath, depth)
@@ -418,7 +507,6 @@ type listEntry struct {
 
 // listAllAtDepth 列出指定路径下所有条目（含文件/目录分类），内部走带重试的 propfindRaw。
 func (c *WebDAVClient) listAllAtDepth(ctx context.Context, remotePath, depth string) ([]listEntry, error) {
-	t0 := time.Now()
 	body, err := c.propfindRaw(ctx, remotePath, depth)
 	if err != nil {
 		return nil, err
@@ -428,8 +516,6 @@ func (c *WebDAVClient) listAllAtDepth(ctx context.Context, remotePath, depth str
 	if err := xml.Unmarshal(body, &ms); err != nil {
 		return nil, err
 	}
-	reqID := fmt.Sprintf("%d", time.Now().UnixNano())
-	fmt.Printf("[webdav] listAllAtDepth ID=%s %s: %d responses, dur=%v\n", reqID, remotePath, len(ms.Responses), time.Since(t0))
 
 	remoteBase := c.normalizeRemoteBase(remotePath)
 	var entries []listEntry

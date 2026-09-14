@@ -1395,11 +1395,25 @@ func (s *Server) runSourceScan(jobID, sourceID, sourceType string, configJSON js
 		return
 	}
 
-	var files []connector.FileInfo
+	imported, skipped := 0, 0
+	// 每处理 progressThrottle 个文件才写一次 DB；dirsFound 累计已扫描目录数。
+	const progressThrottle = 100
+	dirsFound := 0
+	totalSeen := 0
+
+	// progressThrottleDB 每 Throttle 次数或每个目录扫描完触发一次 DB 更新。
+	throttleCounter := 0
+	maybeUpdateProgress := func() {
+		throttleCounter++
+		if throttleCounter >= progressThrottle {
+			_ = s.store.UpdateScanJobProgress(ctx, jobID, totalSeen, totalSeen)
+			throttleCounter = 0
+		}
+	}
 
 	switch sourceType {
 	case "123pan":
-		// 123pan 原生 API
+		// 123pan 原生 API（暂不支持 channel，保留原有 batch 模式）
 		rootID := cfg["root_id"]
 		if rootID == "" {
 			rootID = "0"
@@ -1419,16 +1433,23 @@ func (s *Server) runSourceScan(jobID, sourceID, sourceType string, configJSON js
 			_ = s.store.UpdateScanJobFailed(ctx, jobID, "123pan probe failed: "+err.Error())
 			return
 		}
-		files, err = panClient.ListFiles(ctx)
+		files, err := panClient.ListFiles(ctx)
 		if err != nil {
 			_ = s.store.UpdateScanJobFailed(ctx, jobID, "123pan list files failed: "+err.Error())
 			return
+		}
+		totalSeen = len(files)
+		for i, file := range files {
+			if i == len(files)-1 || i%progressThrottle == 0 {
+				_ = s.store.UpdateScanJobProgress(ctx, jobID, i+1, len(files))
+			}
+			processFile(ctx, &file, sourceID, metadataOnly, s, &imported, &skipped)
 		}
 
 	case "webdav":
 		fallthrough
 	default:
-		// WebDAV（默认）
+		// WebDAV：使用 ListFilesChan 边扫描边 yield 文件，实时更新进度。
 		webdavCfg := connector.WebDAVConfig{
 			URL:        cfg["url"],
 			Username:   cfg["username"],
@@ -1445,100 +1466,26 @@ func (s *Server) runSourceScan(jobID, sourceID, sourceType string, configJSON js
 			_ = s.store.UpdateScanJobFailed(ctx, jobID, "probe failed: "+err.Error())
 			return
 		}
-		files, err = webdavClient.ListFiles(ctx)
+
+		// onDirFound：每个目录 PROPFIND 完成后触发，用于实时更新 dirsFound。
+		onDirFound := func(filesFound, dirs int, dirPath string) {
+			dirsFound += dirs
+			totalSeen += filesFound
+			_ = s.store.UpdateScanJobProgress(ctx, jobID, totalSeen, totalSeen)
+			throttleCounter = 0 // 目录扫描完成后重置计数器
+		}
+
+		fileCh, err := webdavClient.ListFilesChan(ctx, onDirFound)
 		if err != nil {
 			_ = s.store.UpdateScanJobFailed(ctx, jobID, "list files failed: "+err.Error())
 			return
 		}
-	}
 
-	imported, skipped := 0, 0
-	// 节流：每处理 progressThrottle 个文件才写一次 DB，避免 144k 文件产生 144k 次 DB 写。
-	// 最后一个文件总是同步，以确保最终状态正确。
-	const progressThrottle = 100
-	for i, file := range files {
-		if i == len(files)-1 || i%progressThrottle == 0 {
-			_ = s.store.UpdateScanJobProgress(ctx, jobID, i+1, len(files))
+		for file := range fileCh {
+			totalSeen++
+			processFile(ctx, &file, sourceID, metadataOnly, s, &imported, &skipped)
+			maybeUpdateProgress()
 		}
-
-		if metadataOnly {
-			// --- 元数据仅入库模式 ---
-			// 无需下载：用 sourceID + relPath + size 的快速哈希作为代理 SHA256，
-			// 既满足 InsertAsset 的唯一键约束，又避免网络传输与磁盘 I/O。
-			proxySHA256 := proxyAssetSHA256(sourceID, file.Path, file.Size)
-			mimeType := file.MimeType
-			if mimeType == "" {
-				mimeType = connector.MimeTypeFromName(file.Name)
-			}
-			asset := &models.Asset{
-				Name:         file.Name,
-				Path:         file.Path, // 相对路径（来自连接器，已修复为数据源根相对）
-				SHA256:       proxySHA256,
-				SizeBytes:    file.Size,
-				MimeType:     mimeType,
-				ResourceType: connector.ResourceType(mimeType),
-				SourceID:     &sourceID,
-			}
-			ok, err := s.store.InsertAsset(ctx, asset)
-			if err != nil || !ok {
-				skipped++
-				continue
-			}
-			if s.meili != nil {
-				_ = s.meili.UpsertAssetDocument(ctx, asset)
-			}
-			imported++
-			continue
-		}
-
-		// --- 完整下载模式（下载内容→计算 SHA256→落盘）---
-		tmpPath, err := s.downloadForSource(ctx, sourceType, file.Path)
-		if err != nil {
-			skipped++
-			continue
-		}
-		if tmpPath == "" {
-			skipped++
-			continue
-		}
-
-		f, err := os.Open(tmpPath)
-		if err != nil {
-			os.Remove(tmpPath)
-			skipped++
-			continue
-		}
-
-		mimeType := connector.MimeTypeFromName(file.Name)
-		obj, err := s.content.Save(f, file.Name)
-		f.Close()
-		os.Remove(tmpPath)
-
-		if err != nil {
-			skipped++
-			continue
-		}
-
-		asset := &models.Asset{
-			Name:         file.Name,
-			Path:         obj.RelPath,
-			SHA256:       obj.SHA256,
-			SizeBytes:    obj.SizeBytes,
-			MimeType:     mimeType,
-			ResourceType: connector.ResourceType(mimeType),
-			SourceID:     &sourceID,
-		}
-
-		ok, err := s.store.InsertAsset(ctx, asset)
-		if err != nil || !ok {
-			skipped++
-			continue
-		}
-
-		if s.meili != nil {
-			_ = s.meili.UpsertAssetDocument(ctx, asset)
-		}
-		imported++
 	}
 
 	// 更新扫描结果
@@ -1547,6 +1494,75 @@ func (s *Server) runSourceScan(jobID, sourceID, sourceType string, configJSON js
 		Imported: imported,
 		Skipped:  skipped,
 	})
+}
+
+// processFile 处理单个文件（入库 + 索引）。
+func processFile(ctx context.Context, file *connector.FileInfo, sourceID string, metadataOnly bool, s *Server, imported, skipped *int) {
+	if metadataOnly {
+		proxySHA256 := proxyAssetSHA256(sourceID, file.Path, file.Size)
+		mimeType := file.MimeType
+		if mimeType == "" {
+			mimeType = connector.MimeTypeFromName(file.Name)
+		}
+		asset := &models.Asset{
+			Name:         file.Name,
+			Path:         file.Path,
+			SHA256:       proxySHA256,
+			SizeBytes:    file.Size,
+			MimeType:     mimeType,
+			ResourceType: connector.ResourceType(mimeType),
+			SourceID:     &sourceID,
+		}
+		ok, err := s.store.InsertAsset(ctx, asset)
+		if err != nil || !ok {
+			*skipped++
+			return
+		}
+		if s.meili != nil {
+			_ = s.meili.UpsertAssetDocument(ctx, asset)
+		}
+		*imported++
+		return
+	}
+
+	// 完整下载模式
+	tmpPath, err := s.downloadForSource(ctx, sourceID, file.Path)
+	if err != nil || tmpPath == "" {
+		*skipped++
+		return
+	}
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		os.Remove(tmpPath)
+		*skipped++
+		return
+	}
+	mimeType := connector.MimeTypeFromName(file.Name)
+	obj, err := s.content.Save(f, file.Name)
+	f.Close()
+	os.Remove(tmpPath)
+	if err != nil {
+		*skipped++
+		return
+	}
+	asset := &models.Asset{
+		Name:         file.Name,
+		Path:         obj.RelPath,
+		SHA256:       obj.SHA256,
+		SizeBytes:    obj.SizeBytes,
+		MimeType:     mimeType,
+		ResourceType: connector.ResourceType(mimeType),
+		SourceID:     &sourceID,
+	}
+	ok, err := s.store.InsertAsset(ctx, asset)
+	if err != nil || !ok {
+		*skipped++
+		return
+	}
+	if s.meili != nil {
+		_ = s.meili.UpsertAssetDocument(ctx, asset)
+	}
+	*imported++
 }
 
 // proxyAssetSHA256 为元数据仅入库模式构造代理内容哈希。
