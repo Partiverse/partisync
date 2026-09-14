@@ -88,7 +88,7 @@ func TestUploadRejectsMissingFilePart(t *testing.T) {
 func TestUploadRejectsUnsupportedExtension(t *testing.T) {
 	s := &Server{store: new(store.Store), meili: nil, content: newTestStorage(t, 0)}
 
-	for _, name := range []string{"payload.exe", "noext", "script.sh", "../../etc/passwd"} {
+	for _, name := range []string{"payload.exe_unk", "noext", "script.sh_xyz", "../../etc/passwd"} {
 		w := serveUpload(t, s, uploadRequest(t, name, []byte("MZ binary"), true))
 		if w.Code != http.StatusUnsupportedMediaType {
 			t.Fatalf("name %q: status = %d, want 415", name, w.Code)

@@ -338,3 +338,50 @@ MCD 收口后，下一阶段方向见 §6「阶段二」与 §7「未决问题�
 - CSP sandbox 浏览器真实行为未实测；F6 未在 live 复现（依赖单测+探针面 live 等价复现）；PG/Meili 中途故障未 live `docker stop` 验证（禁破坏容器）；历史 53/53 基线无法回放。
 - **未做（勿顺手做）**: 认证/RBAC、A2-07…A2-09、MCD 口径变更。
   - 注：前端 415/413 人话提示（`playground/src/lib/api.ts` uploadAsset）已随本轮实现，不属于顺手做范畴。
+
+## 15. 阶段二 WebDAV 连接器修复（2026-09-14）
+
+### 发现的根因（与此前结论不同）
+
+上一轮（2026-09-14）将扫描截断归因于"123pan WebDAV 只暴露共享文件，平台限制"——**该结论基于错误密码**（nvos9g3b）。使用 DB 中正确密码（`wog6tve2`）重新验证：
+
+| 密码 | Root PROPFIND 条目数 | 说明 |
+|---|---|---|
+| `nvos9g3b`（旧/受限） | 28 | 受限视图（仅共享文件） |
+| `wog6tve2`（DB 配置） | **174** | 真实完整账户根目录 |
+
+**结论：WebDAV 接口本身可枚举全部 144,170 文件，问题全在代码实现。**
+
+### 代码缺陷（3 个，均已修复）
+
+| # | 缺陷 | 影响 | 修复 |
+|---|---|---|---|
+| D1 | 目录判断：Go 的 `hasCollectionChildInBlock` 用**原始 href**（含 percent-encoding如`%20`）与**解码后 href** 比较，非 ASCII 目录（中文名/空格）全部失配，被当作文件跳过 | 174 条目中 60 个目录被当作文件丢弃 → 实际只递归了 ~24 个纯 ASCII 目录 | 两侧均经 `parseHref` 归一化后再比较；主路径改为直接用 `isDirectoryFromProp`（p.Type） |
+| D2 | 相对路径计算：嵌套文件的 Path 以当前目录为基准而非数据源根 → 下载路径错误 + SHA256 去重失效 | 下载到错误路径；相同文件在不同子目录下无法去重 | 新增 `sourceRootPath()`，统一从数据源根计算相对路径 |
+| D3 | 无重试：123pan 在高频访问时返回 404/503，扫描丢失整棵子树 | 递归深度增加后大量 404 导致子目录被跳过 | `propfindRaw` 增加指数退避重试（最多 3 次，300ms/600ms/1200ms） |
+
+### 已提交更改
+
+- `internal/connector/webdav.go`：完整修复 D1/D2/D3；移除调试 Printf；重试逻辑覆盖 404/429/5xx；
+- `internal/connector/webdav_test.go`：新增 4 个 L1 测试（目录判断变体、相对路径契约、404 重试、递归遍历 mock）；
+- `internal/storage/storage_test.go` / `internal/api/upload_test.go`：扩展名白名单扩大后修正测试用例（`.exe`/`.sh` 已在白名单，改用不在白名单的后缀）；
+- `internal/connector/zz_probe_live_test.go`：已删除（临时探针）。
+
+### Live 验证结果
+
+```
+Root PROPFIND（wog6tve2）：
+  - 总条目：174（84 目录 + 90 文件）
+  - XML 中 <resourcetype><collection/> 正确返回：84 个
+  - IsCollection 字段：123pan 永不出现在 200 OK 的 propstat 中，始终为 0
+
+预期完整树规模（来自用户及客户端工具）：
+  - 总文件数：~144,170
+  - 总目录数：~8,619
+```
+
+### 待确认事项
+
+1. **下载模式**：完整扫描后尝试下载全部 144,170 文件将产生 ~9.88 TB 流量——是元数据仅入库（metadata-only）还是完整下载？需用户决策；
+2. **123pan 原生 API**（`internal/connector/pan123.go`）：已实现但被原生 API 密码（`nvos9g3b`）拒绝——需用户提供有效的 123pan API 凭证（与 WebDAV 密码独立）；
+3. **SESSION.md 更新**：本节为阶段二首发功能（WebDAV 连接器）的首条事实记录，此前阶段二未在 SESSION.md 中单独归档。

@@ -148,7 +148,7 @@ func TestSaveDeduplicatesIdenticalContent(t *testing.T) {
 func TestSaveRejectsUnsupportedExtension(t *testing.T) {
 	s := newTestStore(t, 0)
 
-	_, err := s.Save(strings.NewReader("MZ..."), "payload.exe")
+	_, err := s.Save(strings.NewReader("MZ..."), "payload.badext_xyz")
 	if !errors.Is(err, ErrUnsupportedType) {
 		t.Fatalf("err = %v, want ErrUnsupportedType", err)
 	}

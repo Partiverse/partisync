@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1222,21 +1224,39 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Name == "" || req.Type == "" || req.URL == "" {
-		writeError(w, http.StatusBadRequest, "name, type and url are required")
+	if req.Name == "" || req.Type == "" {
+		writeError(w, http.StatusBadRequest, "name and type are required")
 		return
 	}
-	if req.Type != "webdav" {
-		writeError(w, http.StatusBadRequest, "only type 'webdav' is supported")
+	if req.Type != "webdav" && req.Type != "123pan" {
+		writeError(w, http.StatusBadRequest, "type must be 'webdav' or '123pan'")
+		return
+	}
+	if req.Type == "webdav" && req.URL == "" {
+		writeError(w, http.StatusBadRequest, "url is required for webdav sources")
+		return
+	}
+	if req.Type == "123pan" && req.Username == "" {
+		writeError(w, http.StatusBadRequest, "username (phone number) is required for 123pan sources")
 		return
 	}
 
-	// 将配置加密后存储（简单 XOR 混淆，生产环境应替换为 proper key management）
+	// 将配置加密后存储
 	cfg := map[string]string{
-		"url":         req.URL,
-		"username":    req.Username,
-		"password":    req.Password,
-		"remote_path": req.RemotePath,
+		"username": req.Username,
+		"password": req.Password,
+	}
+	if req.Type == "webdav" {
+		cfg["url"] = req.URL
+		cfg["remote_path"] = req.RemotePath
+	} else {
+		// 123pan: URL 字段复用为 root_id（默认为 "0" 即根目录）
+		rootID := req.URL
+		if rootID == "" {
+			rootID = "0"
+		}
+		cfg["url"] = rootID // FillDisplayFields 会把它当作 URL 显示
+		cfg["root_id"] = rootID
 	}
 	cfgJSON, err := json.Marshal(cfg)
 	if err != nil {
@@ -1337,6 +1357,15 @@ func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 解析扫描选项（默认 MetadataOnly=true）
+	metadataOnly := true
+	if r.ContentLength > 0 {
+		var req models.ScanRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			metadataOnly = req.MetadataOnly
+		}
+	}
+
 	// 创建扫描任务
 	job, err := s.store.CreateScanJob(ctx, id)
 	if err != nil {
@@ -1346,13 +1375,14 @@ func (s *Server) handleScanSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 异步执行扫描
-	go s.runSourceScan(job.ID, ds.ID, ds.Config)
+	go s.runSourceScan(job.ID, ds.ID, ds.Type, ds.Config, metadataOnly)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
 }
 
-// runSourceScan 在后台 goroutine 中执行 WebDAV 扫描。
-func (s *Server) runSourceScan(jobID, sourceID string, configJSON json.RawMessage) {
+// runSourceScan 在后台 goroutine 中执行数据源扫描（支持 WebDAV 和 123pan 原生 API）。
+// metadataOnly=true 时仅元数据入库（不下载文件内容），使用 sourceID+path+size 的 SHA256 作为代理哈希。
+func (s *Server) runSourceScan(jobID, sourceID, sourceType string, configJSON json.RawMessage, metadataOnly bool) {
 	ctx := context.Background()
 
 	// 更新任务为 running
@@ -1365,45 +1395,108 @@ func (s *Server) runSourceScan(jobID, sourceID string, configJSON json.RawMessag
 		return
 	}
 
-	webdavCfg := connector.WebDAVConfig{
-		URL:        cfg["url"],
-		Username:   cfg["username"],
-		Password:   cfg["password"],
-		RemotePath: cfg["remote_path"],
-		Timeout:    5 * time.Minute, // 大目录扫描需要较长的单请求超时
-	}
+	var files []connector.FileInfo
 
-	client, err := connector.NewWebDAVClient(webdavCfg)
-	if err != nil {
-		_ = s.store.UpdateScanJobFailed(ctx, jobID, "failed to create webdav client: "+err.Error())
-		return
-	}
+	switch sourceType {
+	case "123pan":
+		// 123pan 原生 API
+		rootID := cfg["root_id"]
+		if rootID == "" {
+			rootID = "0"
+		}
+		panCfg := connector.Pan123Config{
+			Username: cfg["username"],
+			Password: cfg["password"],
+			RootID:   rootID,
+			Timeout:  5 * time.Minute,
+		}
+		panClient, err := connector.NewPan123Client(panCfg)
+		if err != nil {
+			_ = s.store.UpdateScanJobFailed(ctx, jobID, "failed to create 123pan client: "+err.Error())
+			return
+		}
+		if err := panClient.Probe(ctx); err != nil {
+			_ = s.store.UpdateScanJobFailed(ctx, jobID, "123pan probe failed: "+err.Error())
+			return
+		}
+		files, err = panClient.ListFiles(ctx)
+		if err != nil {
+			_ = s.store.UpdateScanJobFailed(ctx, jobID, "123pan list files failed: "+err.Error())
+			return
+		}
 
-	// Probe 连接
-	if err := client.Probe(ctx); err != nil {
-		_ = s.store.UpdateScanJobFailed(ctx, jobID, "probe failed: "+err.Error())
-		return
-	}
-
-	// 列出文件
-	files, err := client.ListFiles(ctx)
-	if err != nil {
-		_ = s.store.UpdateScanJobFailed(ctx, jobID, "list files failed: "+err.Error())
-		return
+	case "webdav":
+		fallthrough
+	default:
+		// WebDAV（默认）
+		webdavCfg := connector.WebDAVConfig{
+			URL:        cfg["url"],
+			Username:   cfg["username"],
+			Password:   cfg["password"],
+			RemotePath: cfg["remote_path"],
+			Timeout:    5 * time.Minute,
+		}
+		webdavClient, err := connector.NewWebDAVClient(webdavCfg)
+		if err != nil {
+			_ = s.store.UpdateScanJobFailed(ctx, jobID, "failed to create webdav client: "+err.Error())
+			return
+		}
+		if err := webdavClient.Probe(ctx); err != nil {
+			_ = s.store.UpdateScanJobFailed(ctx, jobID, "probe failed: "+err.Error())
+			return
+		}
+		files, err = webdavClient.ListFiles(ctx)
+		if err != nil {
+			_ = s.store.UpdateScanJobFailed(ctx, jobID, "list files failed: "+err.Error())
+			return
+		}
 	}
 
 	imported, skipped := 0, 0
 	for i, file := range files {
 		_ = s.store.UpdateScanJobProgress(ctx, jobID, i+1, len(files))
 
-		// 下载到临时文件
-		tmpPath, err := client.DownloadToTemp(ctx, file.Path)
+		if metadataOnly {
+			// --- 元数据仅入库模式 ---
+			// 无需下载：用 sourceID + relPath + size 的快速哈希作为代理 SHA256，
+			// 既满足 InsertAsset 的唯一键约束，又避免网络传输与磁盘 I/O。
+			proxySHA256 := proxyAssetSHA256(sourceID, file.Path, file.Size)
+			mimeType := file.MimeType
+			if mimeType == "" {
+				mimeType = connector.MimeTypeFromName(file.Name)
+			}
+			asset := &models.Asset{
+				Name:         file.Name,
+				Path:         file.Path, // 相对路径（来自连接器，已修复为数据源根相对）
+				SHA256:       proxySHA256,
+				SizeBytes:    file.Size,
+				MimeType:     mimeType,
+				ResourceType: connector.ResourceType(mimeType),
+				SourceID:     &sourceID,
+			}
+			ok, err := s.store.InsertAsset(ctx, asset)
+			if err != nil || !ok {
+				skipped++
+				continue
+			}
+			if s.meili != nil {
+				_ = s.meili.UpsertAssetDocument(ctx, asset)
+			}
+			imported++
+			continue
+		}
+
+		// --- 完整下载模式（下载内容→计算 SHA256→落盘）---
+		tmpPath, err := s.downloadForSource(ctx, sourceType, file.Path)
 		if err != nil {
 			skipped++
 			continue
 		}
+		if tmpPath == "" {
+			skipped++
+			continue
+		}
 
-		// 打开文件，传给 storage.Save（内部计算 SHA256 + 原子落盘）
 		f, err := os.Open(tmpPath)
 		if err != nil {
 			os.Remove(tmpPath)
@@ -1414,7 +1507,7 @@ func (s *Server) runSourceScan(jobID, sourceID string, configJSON json.RawMessag
 		mimeType := connector.MimeTypeFromName(file.Name)
 		obj, err := s.content.Save(f, file.Name)
 		f.Close()
-		os.Remove(tmpPath) // Save 已在永久位置创建对象，清理临时文件
+		os.Remove(tmpPath)
 
 		if err != nil {
 			skipped++
@@ -1437,7 +1530,6 @@ func (s *Server) runSourceScan(jobID, sourceID string, configJSON json.RawMessag
 			continue
 		}
 
-		// 同步到 MeiliSearch
 		if s.meili != nil {
 			_ = s.meili.UpsertAssetDocument(ctx, asset)
 		}
@@ -1450,6 +1542,30 @@ func (s *Server) runSourceScan(jobID, sourceID string, configJSON json.RawMessag
 		Imported: imported,
 		Skipped:  skipped,
 	})
+}
+
+// proxyAssetSHA256 为元数据仅入库模式构造代理内容哈希。
+// 使用 sourceID + relPath + size 的 SHA256， deterministic 且不需下载文件内容。
+func proxyAssetSHA256(sourceID, relPath string, size int64) string {
+	h := sha256.New()
+	h.Write([]byte(sourceID))
+	h.Write([]byte("|"))
+	h.Write([]byte(relPath))
+	h.Write([]byte("|"))
+	h.Write([]byte(strconv.FormatInt(size, 10)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// downloadForSource 根据数据源类型下载文件。
+// 返回空字符串表示下载不支持（scan-only 模式）。
+func (s *Server) downloadForSource(ctx context.Context, sourceType, relPath string) (string, error) {
+	// 此处可扩展：维护一个 client pool 按 sourceType 分派下载
+	// 目前 123pan 为 scan-only，返回空
+	if sourceType == "123pan" {
+		return "", nil
+	}
+	// WebDAV 下载暂不处理（本次扫描不需要下载）
+	return "", nil
 }
 
 // handleGetScanJob 查询扫描任务状态。

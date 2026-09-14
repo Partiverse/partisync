@@ -121,8 +121,9 @@ type UpdateDataSource struct {
 
 // ScanRequest 扫描请求。
 type ScanRequest struct {
-	Recursive *bool    `json:"recursive"` // default true
-	Types     []string `json:"types"`     // 资源类型过滤 ["image","document"]
+	Recursive    *bool    `json:"recursive"`    // default true
+	Types        []string `json:"types"`        // 资源类型过滤 ["image","document"]
+	MetadataOnly bool     `json:"metadata_only"` // true=仅元数据入库，不下载文件内容（默认 true）
 }
 
 // ScanJob 异步扫描任务。
