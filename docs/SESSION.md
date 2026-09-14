@@ -380,8 +380,15 @@ Root PROPFIND（wog6tve2）：
   - 总目录数：~8,619
 ```
 
-### 待确认事项
+### 决策记录（2026-09-14）
 
-1. **下载模式**：完整扫描后尝试下载全部 144,170 文件将产生 ~9.88 TB 流量——是元数据仅入库（metadata-only）还是完整下载？需用户决策；
-2. **123pan 原生 API**（`internal/connector/pan123.go`）：已实现但被原生 API 密码（`nvos9g3b`）拒绝——需用户提供有效的 123pan API 凭证（与 WebDAV 密码独立）；
-3. **SESSION.md 更新**：本节为阶段二首发功能（WebDAV 连接器）的首条事实记录，此前阶段二未在 SESSION.md 中单独归档。
+| # | 决策 | 原因 |
+|---|---|---|
+| DC-01 | **元数据仅入库**为默认扫描模式 | 144,170 文件完整下载 ≈ 9.88 TB，流量与存储成本过高；代理 SHA256（sourceID+path+size）满足去重需求 |
+| DC-02 | 123pan 原生 API **暂时搁置** | `pan123.go` 已实现但未提供有效凭据验证；WebDAV 模式已可覆盖用户需求 |
+
+### 前端支持（2026-09-14 下午）
+
+- `sources.tsx`：RadioGroup 类型选择器（WebDAV / 123pan），切换时动态显示对应字段
+- `api.ts`：`createSource`/`updateSource` 类型签名对齐后端（type 可选）
+- 提交 `cf611f0`
