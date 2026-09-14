@@ -1406,7 +1406,7 @@ func (s *Server) runSourceScan(jobID, sourceID, sourceType string, configJSON js
 	maybeUpdateProgress := func() {
 		throttleCounter++
 		if throttleCounter >= progressThrottle {
-			_ = s.store.UpdateScanJobProgress(ctx, jobID, totalSeen, totalSeen)
+			_ = s.store.UpdateScanJobProgress(ctx, jobID, totalSeen, 0)
 			throttleCounter = 0
 		}
 	}
@@ -1468,11 +1468,12 @@ func (s *Server) runSourceScan(jobID, sourceID, sourceType string, configJSON js
 		}
 
 		// onDirFound：每个目录 PROPFIND 完成后触发，用于实时更新 dirsFound。
+		// total=0 表示"总数未知"，前端不显示百分比，只显示已处理文件数。
 		onDirFound := func(filesFound, dirs int, dirPath string) {
 			dirsFound += dirs
 			totalSeen += filesFound
-			_ = s.store.UpdateScanJobProgress(ctx, jobID, totalSeen, totalSeen)
-			throttleCounter = 0 // 目录扫描完成后重置计数器
+			_ = s.store.UpdateScanJobProgress(ctx, jobID, totalSeen, 0)
+			throttleCounter = 0 // 目录扫描完成后重置节流计数器
 		}
 
 		fileCh, err := webdavClient.ListFilesChan(ctx, onDirFound)

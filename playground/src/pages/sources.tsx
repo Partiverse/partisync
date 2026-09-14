@@ -66,7 +66,9 @@ function SourceCard({ source, onDelete, onEdit }: {
   }, [pollingJob])
 
   const scanProgress = pollingJob
-    ? Math.round(((pollingJob.processed_files || 0) / Math.max(pollingJob.total_files, 1)) * 100)
+    ? pollingJob.total_files === 0
+      ? 0 // 总数未知（流式扫描中），不显示百分比
+      : Math.round((pollingJob.processed_files / pollingJob.total_files) * 100)
     : 0
 
   return (
@@ -117,10 +119,12 @@ function SourceCard({ source, onDelete, onEdit }: {
           <div className="flex justify-between text-xs text-muted-foreground">
             <span>
               {pollingJob.status === "running"
-                ? `处理中 ${pollingJob.processed_files}/${pollingJob.total_files}`
+                ? pollingJob.total_files === 0
+                  ? `已处理 ${pollingJob.processed_files} 个文件（正在扫描…）`
+                  : `处理中 ${pollingJob.processed_files}/${pollingJob.total_files}`
                 : pollingJob.status}
             </span>
-            <span>{scanProgress}%</span>
+            <span>{scanProgress === 0 ? "" : `${scanProgress}%`}</span>
           </div>
           <Progress value={scanProgress} className="h-1.5" />
         </div>
