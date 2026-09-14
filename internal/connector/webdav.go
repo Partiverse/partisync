@@ -108,23 +108,14 @@ func NewWebDAVClient(cfg WebDAVConfig) (*WebDAVClient, error) {
 }
 
 // listFiles 列出 RemotePath 下的所有文件（递归）。
-// 策略：优先 Depth:infinity，失败则降级 Depth:1 手动递归。
+// 策略：Depth:1 + 手动递归（goroutine 并发）。
+// 不尝试 Depth:infinity，因为大量服务器（包括 123pan）报告成功但实际只返回 Depth:1 等价结果。
 func (c *WebDAVClient) ListFiles(ctx context.Context) ([]FileInfo, error) {
 	targetPath := c.config.RemotePath
 	if targetPath == "" {
 		targetPath = "/"
 	}
 
-	// 某些 WebDAV 服务器（如 123pan）报告 Depth:infinity 成功（207），
-	// 但实际只返回了 Depth:1 等价的结果，不做真正递归。
-	// 因此先尝试 infinity，再检查结果是否足够多——不足时降级到手动递归。
-	files, err := c.listAtDepth(ctx, targetPath, "infinity")
-	if err == nil && len(files) > 200 {
-		// infinity 返回了较多文件，认为是真正的递归结果
-		return files, nil
-	}
-
-	// 降级：Depth:1 + 手动递归（并发加速）
 	seenDirs := make(map[string]bool)
 	mu := &sync.Mutex{}
 	return c.listRecursive(ctx, targetPath, seenDirs, mu)
@@ -333,6 +324,9 @@ func (c *WebDAVClient) listRecursive(ctx context.Context, remotePath string, see
 		return allFiles, nil
 	}
 
+	// DEBUG: log subdirectory discovery
+	fmt.Printf("[webdav] %s: found %d subdirs, %d files so far\n", remotePath, len(subDirs), len(allFiles))
+
 	// 并发扫描所有子目录（限制最大并发数）
 	type dirResult struct {
 		path  string
@@ -349,9 +343,11 @@ func (c *WebDAVClient) listRecursive(ctx context.Context, remotePath string, see
 		wg.Add(1)
 		go func(d string) {
 			defer wg.Done()
-			sem <- struct{}{}         // 获取令牌
+			sem <- struct{}{} // 获取令牌（阻塞直到有空闲槽位）
 			defer func() { <-sem }() // 释放令牌
+			fmt.Printf("[webdav] START recurse %s\n", d)
 			files, err := c.listRecursive(ctx, d, seenDirs, mu)
+			fmt.Printf("[webdav] END recurse %s -> %d files, err=%v\n", d, len(files), err)
 			resultCh <- dirResult{path: d, files: files, err: err}
 		}(dir)
 	}
@@ -364,6 +360,7 @@ func (c *WebDAVClient) listRecursive(ctx context.Context, remotePath string, see
 
 	for r := range resultCh {
 		if r.err != nil {
+			fmt.Printf("[webdav] recurse error %s: %v\n", r.path, r.err)
 			continue
 		}
 		allFiles = append(allFiles, r.files...)
@@ -457,7 +454,7 @@ func (c *WebDAVClient) listAllAtDepth(ctx context.Context, remotePath, depth str
 				Size:     p.ContentLength,
 				MimeType: mimeType,
 			},
-			Href:  rel,
+			Href:  href, // 存绝对路径（服务器返回的 /webdav/abc/），避免 fullURL 拼接出双斜杠
 			IsDir: isDir,
 		})
 	}
@@ -526,10 +523,15 @@ func (c *WebDAVClient) relativePath(href, remoteBase string) string {
 	return rel
 }
 
-// fullURL 拼接完整 URL。
+// fullURL 拼接完整 URL。如果 p 已是绝对路径（以 / 开头），
+// 则替换 baseURL 的路径部分，避免双 base path。
 func (c *WebDAVClient) fullURL(p string) string {
 	u := *c.baseURL
 	if p == "/" {
+		return u.String()
+	}
+	if strings.HasPrefix(p, "/") {
+		u.Path = p
 		return u.String()
 	}
 	u.Path = path.Join(u.Path, p)
