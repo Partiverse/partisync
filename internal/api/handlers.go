@@ -1453,8 +1453,13 @@ func (s *Server) runSourceScan(jobID, sourceID, sourceType string, configJSON js
 	}
 
 	imported, skipped := 0, 0
+	// 节流：每处理 progressThrottle 个文件才写一次 DB，避免 144k 文件产生 144k 次 DB 写。
+	// 最后一个文件总是同步，以确保最终状态正确。
+	const progressThrottle = 100
 	for i, file := range files {
-		_ = s.store.UpdateScanJobProgress(ctx, jobID, i+1, len(files))
+		if i == len(files)-1 || i%progressThrottle == 0 {
+			_ = s.store.UpdateScanJobProgress(ctx, jobID, i+1, len(files))
+		}
 
 		if metadataOnly {
 			// --- 元数据仅入库模式 ---
