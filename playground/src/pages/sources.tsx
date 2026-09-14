@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { toast } from "sonner"
 
 function formatDate(iso: string | undefined): string {
@@ -72,11 +73,18 @@ function SourceCard({ source, onDelete, onEdit }: {
     <div className="border rounded-lg p-4 space-y-3">
       <div className="flex items-start justify-between">
         <div>
-          <h3 className="font-medium">{source.name}</h3>
-          <p className="text-sm text-muted-foreground">{source.type} · {source.url}</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            路径: {source.remote_path || "/"}
+          <div className="flex items-center gap-2">
+            <h3 className="font-medium">{source.name}</h3>
+            <Badge variant="outline" className="text-xs">{source.type}</Badge>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {source.type === "123pan"
+              ? source.username ? `手机: ${source.username}` : source.url ?? ""
+              : source.url ?? source.remote_path ?? ""}
           </p>
+          {source.type === "webdav" && source.remote_path && (
+            <p className="text-xs text-muted-foreground mt-1">路径: {source.remote_path}</p>
+          )}
         </div>
         <div className="flex gap-2">
           <Button
@@ -138,6 +146,7 @@ export function DataSourcesPage() {
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
   const [name, setName] = useState("")
+  const [sourceType, setSourceType] = useState<"webdav" | "123pan">("webdav")
   const [url, setUrl] = useState("")
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
@@ -147,6 +156,7 @@ export function DataSourcesPage() {
   const [showEdit, setShowEdit] = useState(false)
   const [editingId, setEditingId] = useState("")
   const [editName, setEditName] = useState("")
+  const [editSourceType, setEditSourceType] = useState<"webdav" | "123pan">("webdav")
   const [editUrl, setEditUrl] = useState("")
   const [editUsername, setEditUsername] = useState("")
   const [editPassword, setEditPassword] = useState("")
@@ -168,16 +178,25 @@ export function DataSourcesPage() {
   }, [fetchSources])
 
   const handleAdd = async () => {
-    if (!name || !url) {
-      toast.error("名称和 URL 不能为空")
+    if (!name) {
+      toast.error("显示名称不能为空")
+      return
+    }
+    if (sourceType === "webdav" && !url) {
+      toast.error("WebDAV URL 不能为空")
+      return
+    }
+    if (sourceType === "123pan" && !username) {
+      toast.error("手机号不能为空")
       return
     }
     setSaving(true)
     try {
-      await api.createSource({ name, type: "webdav", url, username, password, remote_path: remotePath })
+      await api.createSource({ name, type: sourceType, url, username, password, remote_path: remotePath })
       toast.success("数据源已创建")
       setShowAdd(false)
       setName("")
+      setSourceType("webdav")
       setUrl("")
       setUsername("")
       setPassword("")
@@ -204,6 +223,7 @@ export function DataSourcesPage() {
   const handleEdit = (source: DataSource) => {
     setEditingId(source.id)
     setEditName(source.name)
+    setEditSourceType(source.type === "123pan" ? "123pan" : "webdav")
     setEditUrl(source.url ?? "")
     setEditUsername(source.username ?? "")
     setEditPassword("") // 不回填密码
@@ -212,14 +232,25 @@ export function DataSourcesPage() {
   }
 
   const handleUpdate = async () => {
-    if (!editName || !editUrl) {
-      toast.error("名称和 URL 不能为空")
+    if (!editName) {
+      toast.error("显示名称不能为空")
+      return
+    }
+    if (editSourceType === "webdav" && !editUrl) {
+      toast.error("WebDAV URL 不能为空")
+      return
+    }
+    if (editSourceType === "123pan" && !editUsername) {
+      toast.error("手机号不能为空")
       return
     }
     setSaving(true)
     try {
-      const body: Record<string, string> = { name: editName, url: editUrl, remote_path: editRemotePath }
-      // username 只有非空才发送（空=用户清空意图）
+      const body: Record<string, string> = { name: editName, type: editSourceType }
+      if (editSourceType === "webdav") {
+        body.url = editUrl
+        body.remote_path = editRemotePath
+      }
       if (editUsername) body.username = editUsername
       if (editPassword) body.password = editPassword
       const res = await api.updateSource(editingId, body)
@@ -241,7 +272,7 @@ export function DataSourcesPage() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-semibold">数据源</h2>
-          <p className="text-sm text-muted-foreground">配置 WebDAV 数据源，扫描远程目录中的资产入库</p>
+          <p className="text-sm text-muted-foreground">配置 WebDAV 或 123pan 数据源，扫描后资产入库（默认仅元数据）</p>
         </div>
         <Button onClick={() => setShowAdd(true)}>添加数据源</Button>
       </div>
@@ -272,55 +303,96 @@ export function DataSourcesPage() {
       <Dialog open={showAdd} onOpenChange={setShowAdd}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>添加 WebDAV 数据源</DialogTitle>
+            <DialogTitle>添加数据源</DialogTitle>
             <DialogDescription>
-              配置 WebDAV 服务器信息，扫描后资产将导入到本地资产库（SHA256 自动去重）。
+              配置 WebDAV 或 123pan 账号，扫描后资产入库（SHA256 自动去重，默认仅元数据）。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-2">
               <Label>显示名称</Label>
               <Input
-                placeholder="我的 NAS"
+                placeholder="我的 NAS / 123pan"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
               />
             </div>
             <div className="space-y-2">
-              <Label>WebDAV URL</Label>
-              <Input
-                placeholder="https://nas.example.com/webdav/"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-              />
+              <Label>类型</Label>
+              <RadioGroup
+                value={sourceType}
+                onValueChange={(v) => { setSourceType(v as "webdav" | "123pan"); setUrl(""); setRemotePath("/") }}
+                className="flex gap-4"
+              >
+                <div className="flex items-center gap-2">
+                  <RadioGroupItem value="webdav" id="type-webdav" />
+                  <Label htmlFor="type-webdav" className="font-normal cursor-pointer">WebDAV</Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <RadioGroupItem value="123pan" id="type-123pan" />
+                  <Label htmlFor="type-123pan" className="font-normal cursor-pointer">123pan</Label>
+                </div>
+              </RadioGroup>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>用户名</Label>
-                <Input
-                  placeholder="user"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>密码</Label>
-                <Input
-                  type="password"
-                  placeholder="••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label>远程路径（留空为根目录）</Label>
-              <Input
-                placeholder="/documents"
-                value={remotePath}
-                onChange={(e) => setRemotePath(e.target.value)}
-              />
-            </div>
+            {sourceType === "webdav" ? (
+              <>
+                <div className="space-y-2">
+                  <Label>WebDAV URL</Label>
+                  <Input
+                    placeholder="https://nas.example.com/webdav/"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>用户名</Label>
+                    <Input
+                      placeholder="user"
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>密码</Label>
+                    <Input
+                      type="password"
+                      placeholder="••••••"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>远程路径（留空为根目录）</Label>
+                  <Input
+                    placeholder="/documents"
+                    value={remotePath}
+                    onChange={(e) => setRemotePath(e.target.value)}
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label>手机号（用户名）</Label>
+                  <Input
+                    placeholder="13812345678"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>密码</Label>
+                  <Input
+                    type="password"
+                    placeholder="••••••"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </div>
+              </>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setShowAdd(false)}>
                 取消
@@ -343,46 +415,87 @@ export function DataSourcesPage() {
             <div className="space-y-2">
               <Label>显示名称</Label>
               <Input
-                placeholder="我的 NAS"
+                placeholder="我的 NAS / 123pan"
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
               />
             </div>
             <div className="space-y-2">
-              <Label>WebDAV URL</Label>
-              <Input
-                placeholder="https://nas.example.com/webdav/"
-                value={editUrl}
-                onChange={(e) => setEditUrl(e.target.value)}
-              />
+              <Label>类型</Label>
+              <RadioGroup
+                value={editSourceType}
+                onValueChange={(v) => { setEditSourceType(v as "webdav" | "123pan"); setEditUrl(""); setEditRemotePath("/") }}
+                className="flex gap-4"
+              >
+                <div className="flex items-center gap-2">
+                  <RadioGroupItem value="webdav" id="edit-type-webdav" />
+                  <Label htmlFor="edit-type-webdav" className="font-normal cursor-pointer">WebDAV</Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <RadioGroupItem value="123pan" id="edit-type-123pan" />
+                  <Label htmlFor="edit-type-123pan" className="font-normal cursor-pointer">123pan</Label>
+                </div>
+              </RadioGroup>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>用户名</Label>
-                <Input
-                  placeholder="user"
-                  value={editUsername}
-                  onChange={(e) => setEditUsername(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>密码（留空不修改）</Label>
-                <Input
-                  type="password"
-                  placeholder="••••••"
-                  value={editPassword}
-                  onChange={(e) => setEditPassword(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label>远程路径</Label>
-              <Input
-                placeholder="/documents"
-                value={editRemotePath}
-                onChange={(e) => setEditRemotePath(e.target.value)}
-              />
-            </div>
+            {editSourceType === "webdav" ? (
+              <>
+                <div className="space-y-2">
+                  <Label>WebDAV URL</Label>
+                  <Input
+                    placeholder="https://nas.example.com/webdav/"
+                    value={editUrl}
+                    onChange={(e) => setEditUrl(e.target.value)}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>用户名</Label>
+                    <Input
+                      placeholder="user"
+                      value={editUsername}
+                      onChange={(e) => setEditUsername(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>密码（留空不修改）</Label>
+                    <Input
+                      type="password"
+                      placeholder="••••••"
+                      value={editPassword}
+                      onChange={(e) => setEditPassword(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>远程路径</Label>
+                  <Input
+                    placeholder="/documents"
+                    value={editRemotePath}
+                    onChange={(e) => setEditRemotePath(e.target.value)}
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label>手机号（用户名）</Label>
+                  <Input
+                    placeholder="13812345678"
+                    value={editUsername}
+                    onChange={(e) => setEditUsername(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>密码（留空不修改）</Label>
+                  <Input
+                    type="password"
+                    placeholder="••••••"
+                    value={editPassword}
+                    onChange={(e) => setEditPassword(e.target.value)}
+                  />
+                </div>
+              </>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setShowEdit(false)}>
                 取消

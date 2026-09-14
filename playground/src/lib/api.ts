@@ -244,7 +244,7 @@ export const api = {
   listSources: (): Promise<ListSourcesResponse> =>
     fetch('/api/v1/sources').then((r) => r.json() as Promise<ListSourcesResponse>),
 
-  createSource: (body: { name: string; type: string; url: string; username: string; password: string; remote_path: string }): Promise<{ source: DataSource }> =>
+  createSource: (body: { name: string; type: string; url?: string; username?: string; password?: string; remote_path?: string }): Promise<{ source: DataSource }> =>
     fetch('/api/v1/sources', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -256,7 +256,7 @@ export const api = {
       if (!r.ok && r.status !== 204) throw new Error('delete failed')
     }),
 
-  updateSource: (id: string, body: { name?: string; url?: string; username?: string; password?: string; remote_path?: string }): Promise<{ source: DataSource }> =>
+  updateSource: (id: string, body: { name?: string; type?: string; url?: string; username?: string; password?: string; remote_path?: string }): Promise<{ source: DataSource }> =>
     fetch(`/api/v1/sources/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
