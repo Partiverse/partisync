@@ -72,4 +72,29 @@ mod tests {
     fn empty_input_is_stable() {
         assert_eq!(content_hash(b""), blake3::hash(b"").to_hex().to_string());
     }
+
+    #[test]
+    fn content_hash_file_matches_bytes_hash() {
+        // D5（变异 miss：content_hash_file 读循环无覆盖）——文件路径与字节路径必须同哈希
+        let dir = std::env::temp_dir().join(format!("cas-hf-{}", partisync_core::Ulid::now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.bin");
+        std::fs::write(&path, b"streaming hash content").unwrap();
+        let h = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(content_hash_file(&path))
+            .unwrap();
+        assert_eq!(h, content_hash(b"streaming hash content"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn production_consts_are_documented_values() {
+        // D5（变异 miss：生产常量无断言）——参数即契约（ADR-0004）
+        let c = CdcConfig::PRODUCTION;
+        assert_eq!(
+            (c.min, c.avg, c.max),
+            (256 * 1024, 1024 * 1024, 4 * 1024 * 1024)
+        );
+    }
 }

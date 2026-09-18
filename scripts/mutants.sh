@@ -7,5 +7,6 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 exec cargo mutants \
   -f 'crates/partisync-core/src/**/*.rs' \
+  -f 'crates/partisync-cas/src/**/*.rs' \
   -e 'xtask/*' -e 'crates/partisync-cli/*' -e 'crates/partisd/*' \
   --in-place --timeout 90 "$@"
