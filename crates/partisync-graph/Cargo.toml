@@ -5,5 +5,17 @@ edition.workspace = true
 license.workspace = true
 description = "PartiGraph 资产图谱：Entry/ContentIdentity/Tag DAG/Sidecar + SQLite/redb 仓储 + oplog"
 
+[dependencies]
+partisync-core = { path = "../partisync-core" }
+partisync-cas = { path = "../partisync-cas" } # ADR-0002 同层裁定：内容身份需要哈希
+sqlx = { workspace = true }
+walkdir = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

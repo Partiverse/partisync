@@ -1,4 +1,9 @@
-//! PartiGraph 资产图谱：Entry/ContentIdentity/Tag DAG/Sidecar + SQLite/redb 仓储 + oplog
+//! PartiGraph 资产图谱——Entry/ContentIdentity（SPEC M0-WP02）。
 //!
-//! 骨架 crate（M-1 bootstrap，调研方案附录 A）。实现按里程碑推进，
-//! 行为契约见 docs/specs/ 对应工作包规格。
+//! 当前内容：SQLite schema v1 + [`store::Store`] 仓储 + [`indexer`]（最小索引器）。
+//! Tag DAG/Sidecar 归 M4，oplog 归 M2。
+
+pub mod indexer;
+pub mod store;
+
+pub use store::{DupGroup, EntryKind, EntryRow, Stats, Store};
