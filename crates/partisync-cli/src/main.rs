@@ -14,6 +14,7 @@ use partisync_cas::ChunkStore;
 use partisync_core::error::PartisyError;
 use partisync_graph::indexer::index_path;
 use partisync_graph::store::Store;
+use partisync_graph::watch::{self, WatchConfig};
 
 const DEFAULT_DB: &str = "./partisync.db";
 const DEFAULT_CAS: &str = "./partisync.cas";
@@ -24,9 +25,10 @@ async fn main() {
     let code = match args.first().map(String::as_str) {
         Some("index") => index_cmd(&args[1..]).await,
         Some("ui") => ui_cmd(&args[1..]).await,
+        Some("watch") => watch_cmd(&args[1..]).await,
         _ => {
             eprintln!(
-                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]",
+                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]",
                 env!("CARGO_PKG_VERSION")
             );
             2
@@ -98,6 +100,61 @@ async fn index_cmd(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+async fn watch_cmd(args: &[String]) -> i32 {
+    let Some(root) = args.first().filter(|a| !a.starts_with("--")) else {
+        eprintln!("用法: partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]");
+        return 2;
+    };
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let cas_dir = flag_value(args, "--cas").unwrap_or_else(|| DEFAULT_CAS.into());
+    let debounce = std::time::Duration::from_millis(
+        flag_value(args, "--debounce-ms")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000),
+    );
+    let root = PathBuf::from(root);
+    let store = match open_db(&db).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let cas = match ChunkStore::open(&PathBuf::from(&cas_dir)).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: 块库: {e}");
+            return 1;
+        }
+    };
+    // 幂等全量索引打底，再进入事件循环
+    if let Err(e) = index_path(&store, Some(&cas), &root).await {
+        eprintln!("error: 初始索引: {e}");
+        return 1;
+    }
+    println!(
+        "watch: {}（去抖 {}ms；Ctrl-C 退出）",
+        root.display(),
+        debounce.as_millis()
+    );
+    // notify 回调线程；Ctrl-C 终止任务——未冲刷的 fs 事件不落 journal，
+    // 但下次 watch 的幂等全量索引会收敛（P8：fs 是事实源）
+    let watch_root = root.clone();
+    let mut watcher_task = tokio::task::spawn_blocking(move || {
+        watch::run_blocking(store, Some(cas), watch_root, WatchConfig { debounce })
+    });
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => println!("\nwatch: 收到 Ctrl-C，退出"),
+        res = &mut watcher_task => match res {
+            Ok(Ok(())) => println!("watch: 事件源断开，退出"),
+            Ok(Err(e)) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {e}"),
+        },
+    }
+    watcher_task.abort();
+    0
 }
 
 async fn ui_cmd(args: &[String]) -> i32 {
