@@ -10,11 +10,13 @@ mod web;
 
 use std::path::PathBuf;
 
+use partisync_cas::ChunkStore;
 use partisync_core::error::PartisyError;
 use partisync_graph::indexer::index_path;
 use partisync_graph::store::Store;
 
 const DEFAULT_DB: &str = "./partisync.db";
+const DEFAULT_CAS: &str = "./partisync.cas";
 
 #[tokio::main]
 async fn main() {
@@ -24,7 +26,7 @@ async fn main() {
         Some("ui") => ui_cmd(&args[1..]).await,
         _ => {
             eprintln!(
-                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>]\n  partisync ui [--db <path>] [--addr 127.0.0.1:8080]",
+                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]",
                 env!("CARGO_PKG_VERSION")
             );
             2
@@ -53,6 +55,7 @@ async fn index_cmd(args: &[String]) -> i32 {
         return 2;
     };
     let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let cas_dir = flag_value(args, "--cas").unwrap_or_else(|| DEFAULT_CAS.into());
     let store = match open_db(&db).await {
         Ok(s) => s,
         Err(e) => {
@@ -60,7 +63,14 @@ async fn index_cmd(args: &[String]) -> i32 {
             return 1;
         }
     };
-    match index_path(&store, &PathBuf::from(root)).await {
+    let cas = match ChunkStore::open(&PathBuf::from(&cas_dir)).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: 块库: {e}");
+            return 1;
+        }
+    };
+    match index_path(&store, Some(&cas), &PathBuf::from(root)).await {
         Ok(report) => {
             let stats = store
                 .stats()
@@ -78,8 +88,8 @@ async fn index_cmd(args: &[String]) -> i32 {
                 .map(|_| 0)
                 .unwrap_or(1);
             println!(
-                "index 完成: root={root} db={db}\n  本次: 文件 {} 目录 {} 跳过符号链接 {}",
-                report.files, report.dirs, report.skipped_symlinks
+                "index 完成: root={root} db={db} cas={cas_dir}\n  本次: 文件 {} 目录 {} 分块 {} 跳过符号链接 {}",
+                report.files, report.dirs, report.chunked_files, report.skipped_symlinks
             );
             stats
         }
@@ -92,6 +102,7 @@ async fn index_cmd(args: &[String]) -> i32 {
 
 async fn ui_cmd(args: &[String]) -> i32 {
     let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let cas_dir = flag_value(args, "--cas").unwrap_or_else(|| DEFAULT_CAS.into());
     let addr = flag_value(args, "--addr").unwrap_or_else(|| "127.0.0.1:8080".into());
     let store = match open_db(&db).await {
         Ok(s) => s,
@@ -100,7 +111,14 @@ async fn ui_cmd(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let app = web::router(store, db.clone());
+    let cas = match ChunkStore::open(&PathBuf::from(&cas_dir)).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: 块库: {e}");
+            return 1;
+        }
+    };
+    let app = web::router(store, cas, db.clone());
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {

@@ -8,6 +8,7 @@ description = "PartiSync 命令行界面：init/index/ls/find/dedupe/serve/sync 
 [dependencies]
 partisync-core = { path = "../partisync-core" }
 partisync-graph = { path = "../partisync-graph" }
+partisync-cas = { path = "../partisync-cas" }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

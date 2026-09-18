@@ -19,7 +19,7 @@ async fn migrate_is_idempotent_on_file_db() {
     let db = dir.join("t.db");
     {
         let s = Store::open(&db).await.unwrap();
-        s.add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None)
+        s.add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None, None)
             .await
             .unwrap();
     }
@@ -35,11 +35,11 @@ async fn migrate_is_idempotent_on_file_db() {
 async fn path_idempotency_returns_same_id() {
     let s = mem_store().await;
     let a = s
-        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None)
+        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None, None)
         .await
         .unwrap();
     let b = s
-        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None)
+        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None, None)
         .await
         .unwrap();
     assert_eq!(a, b, "同 path 重插返回既有 id（索引器幂等的根）");
@@ -81,7 +81,7 @@ proptest! {
             let mut model: HashMap<String, Vec<String>> = HashMap::new();
             let mut id_of: HashMap<String, String> = HashMap::new();
             model.insert("/".into(), vec![]);
-            let root_id = s.add_entry(None, "root", "/", EntryKind::Dir, 0, 0, None).await.unwrap();
+            let root_id = s.add_entry(None, "root", "/", EntryKind::Dir, 0, 0, None, None).await.unwrap();
             id_of.insert("/".into(), root_id);
 
             let mut nodes: Vec<String> = vec!["/".into()];
@@ -97,7 +97,7 @@ proptest! {
                 let content = if is_dir { None } else { Some((hash.as_str(), 1u64)) };
                 let id = s.add_entry(
                     id_of.get(&parent).map(String::as_str),
-                    &name, &path, kind, 1, 0, content,
+                    &name, &path, kind, 1, 0, content, None,
                 ).await.unwrap();
                 model.entry(parent.clone()).or_default().push(path.clone());
                 id_of.insert(path.clone(), id);
@@ -135,7 +135,7 @@ proptest! {
 async fn dedup_stats_math() {
     let s = mem_store().await;
     let root = s
-        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None)
+        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None, None)
         .await
         .unwrap();
     // a(100B) 与 b(100B) 同内容；c(50B) 独立
@@ -147,6 +147,7 @@ async fn dedup_stats_math() {
         100,
         0,
         Some(("H1", 100)),
+        None,
     )
     .await
     .unwrap();
@@ -158,6 +159,7 @@ async fn dedup_stats_math() {
         100,
         0,
         Some(("H1", 100)),
+        None,
     )
     .await
     .unwrap();
@@ -169,6 +171,7 @@ async fn dedup_stats_math() {
         50,
         0,
         Some(("H2", 50)),
+        None,
     )
     .await
     .unwrap();
@@ -194,11 +197,20 @@ async fn dedup_stats_math() {
 async fn children_search_breadcrumb() {
     let s = mem_store().await;
     let root = s
-        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None)
+        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None, None)
         .await
         .unwrap();
     let sub = s
-        .add_entry(Some(&root), "photos", "/photos", EntryKind::Dir, 0, 0, None)
+        .add_entry(
+            Some(&root),
+            "photos",
+            "/photos",
+            EntryKind::Dir,
+            0,
+            0,
+            None,
+            None,
+        )
         .await
         .unwrap();
     s.add_entry(
@@ -209,6 +221,7 @@ async fn children_search_breadcrumb() {
         7,
         0,
         Some(("HC", 7)),
+        None,
     )
     .await
     .unwrap();
@@ -220,6 +233,7 @@ async fn children_search_breadcrumb() {
         3,
         0,
         Some(("HN", 3)),
+        None,
     )
     .await
     .unwrap();
@@ -249,9 +263,9 @@ async fn indexer_is_idempotent() {
     std::fs::write(dir.join("sub").join("b.txt"), b"same").unwrap();
     std::fs::write(dir.join("c.txt"), b"other").unwrap();
 
-    let r1 = index_path(&s, &dir).await.unwrap();
+    let r1 = index_path(&s, None, &dir).await.unwrap();
     let st1 = s.stats().await.unwrap();
-    let _r2 = index_path(&s, &dir).await.unwrap();
+    let _r2 = index_path(&s, None, &dir).await.unwrap();
     let st2 = s.stats().await.unwrap();
 
     assert_eq!(

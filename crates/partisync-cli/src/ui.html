@@ -120,7 +120,7 @@ function timeFmt(ns) {
 async function j(url) { const r = await fetch(url); if (!r.ok) throw new Error(await r.text()); return r.json(); }
 
 async function loadStats() {
-  const s = await j("/api/stats");
+  const [s, cas] = await Promise.all([j("/api/stats"), j("/api/cas-stats")]);
   $("cards").innerHTML = `
     <div class="card"><div class="label">文件</div><div class="value">${s.files}</div></div>
     <div class="card"><div class="label">目录</div><div class="value">${s.dirs}</div></div>
@@ -129,7 +129,9 @@ async function loadStats() {
       <div class="hint">${sizeFmt(s.unique_bytes)}</div></div>
     <div class="card"><div class="label">去重节省</div><div class="value green">${sizeFmt(s.saved_bytes)}</div>
       <div class="hint">${s.total_bytes ? (100*s.saved_bytes/s.total_bytes).toFixed(1) : 0}% 的字节是重复的</div></div>
-    <div class="card"><div class="label">重复组</div><div class="value">${s.duplicate_groups}</div></div>`;
+    <div class="card"><div class="label">重复组</div><div class="value">${s.duplicate_groups}</div></div>
+    <div class="card"><div class="label">块级节省</div><div class="value green">${sizeFmt(cas.saved_bytes)}</div>
+      <div class="hint">${cas.refs} 个块引用 / ${cas.chunks} 个唯一块（CDC 1MiB）</div></div>`;
 }
 
 async function browse(path) {

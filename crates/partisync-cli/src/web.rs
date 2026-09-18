@@ -7,24 +7,27 @@ use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::get;
 use axum::{Json, Router};
+use partisync_cas::{CasStats, ChunkStore};
 use partisync_graph::store::{DupGroup, EntryRow, Stats, Store};
 
 /// 应用状态：仓储句柄 + 库路径（页面徽标展示）。
 #[derive(Clone)]
 pub struct App {
     store: Store,
+    cas: ChunkStore,
     db: String,
 }
 
 /// 组装路由。
-pub fn router(store: Store, db: String) -> Router {
-    let app = App { store, db };
+pub fn router(store: Store, cas: ChunkStore, db: String) -> Router {
+    let app = App { store, cas, db };
     Router::new()
         .route("/", get(index_html))
         .route("/api/stats", get(api_stats))
         .route("/api/list", get(api_list))
         .route("/api/search", get(api_search))
         .route("/api/duplicates", get(api_duplicates))
+        .route("/api/cas-stats", get(api_cas_stats))
         .route("/api/breadcrumb", get(api_breadcrumb))
         .with_state(app)
 }
@@ -48,6 +51,10 @@ async fn api_list(
 ) -> Result<Json<Vec<EntryRow>>, (StatusCode, String)> {
     let path = q.get("path").map_or("/", String::as_str);
     app.store.children(path).await.map(Json).map_err(err500)
+}
+
+async fn api_cas_stats(State(app): State<App>) -> Result<Json<CasStats>, (StatusCode, String)> {
+    app.cas.stats().await.map(Json).map_err(err500)
 }
 
 async fn api_breadcrumb(

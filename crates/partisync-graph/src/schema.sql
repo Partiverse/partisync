@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS entry (
     content_id TEXT REFERENCES content(id),
     size       INTEGER NOT NULL DEFAULT 0,
     mtime_ns   INTEGER NOT NULL DEFAULT 0,
-    state      INTEGER NOT NULL DEFAULT 0  -- 0=materialized
+    state      INTEGER NOT NULL DEFAULT 0, -- 0=materialized
+    chunk_root TEXT                       -- v2：大文件块清单根（SPEC M0-WP03）
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entry_path ON entry(path);
 CREATE INDEX IF NOT EXISTS idx_entry_parent ON entry(parent_id);
@@ -50,3 +51,5 @@ CREATE TABLE IF NOT EXISTS entry_closure (
     PRIMARY KEY (ancestor, descendant)
 );
 CREATE INDEX IF NOT EXISTS idx_closure_desc ON entry_closure(descendant);
+
+-- v2 迁移（旧库升级；新库此列为已建，ALTER 报 duplicate 可忽略——由迁移代码吞掉）

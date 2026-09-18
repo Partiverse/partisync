@@ -27,6 +27,7 @@ pub struct EntryRow {
     pub content_id: Option<String>,
     pub size: i64,
     pub mtime_ns: i64,
+    pub chunk_root: Option<String>,
 }
 
 /// 全局统计（去重口径：saved = Σentry.size − Σcontent.size）。
@@ -102,6 +103,10 @@ impl Store {
             .execute(pool)
             .await
             .map_err(|e| db_err("迁移", e))?;
+        // schema v2（M0-WP03）：旧库防御性补列；新库已含该列，duplicate 错误忽略
+        let _ = sqlx::raw_sql("ALTER TABLE entry ADD COLUMN chunk_root TEXT")
+            .execute(pool)
+            .await;
         Ok(())
     }
 
@@ -146,6 +151,7 @@ impl Store {
         size: u64,
         mtime_ns: u64,
         content: Option<(&str, u64)>, // (blake3 hex, size)
+        chunk_root: Option<&str>,     // v2：大文件块清单根
     ) -> Result<String, PartisyError> {
         // 幂等：path 唯一，重跑直接返回（索引器幂等验收依赖此处）
         if let Some(id) = sqlx::query_scalar::<_, String>("SELECT id FROM entry WHERE path = ?")
@@ -166,8 +172,8 @@ impl Store {
         }
         let id = Ulid::now().to_string();
         sqlx::query(
-            "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(parent_id)
@@ -177,6 +183,7 @@ impl Store {
         .bind(content.map(|(h, _)| h))
         .bind(i64::try_from(size).unwrap_or(i64::MAX))
         .bind(i64::try_from(mtime_ns).unwrap_or(i64::MAX))
+        .bind(chunk_root)
         .execute(&self.pool)
         .await
         .map_err(|e| db_err("插入条目", e))?;
@@ -202,7 +209,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn entry_by_path(&self, path: &str) -> Result<Option<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns FROM entry WHERE path = ?",
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry WHERE path = ?",
         )
         .bind(path)
         .fetch_optional(&self.pool)
@@ -216,7 +223,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn children(&self, parent_path: &str) -> Result<Vec<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns FROM entry
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry
              WHERE parent_id = (SELECT id FROM entry WHERE path = ?)
              ORDER BY kind DESC, name",
         )
@@ -232,7 +239,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn ancestors_of(&self, path: &str) -> Result<Vec<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT e.id, e.kind, e.name, e.path, e.content_id, e.size, e.mtime_ns
+            "SELECT e.id, e.kind, e.name, e.path, e.content_id, e.size, e.mtime_ns, e.chunk_root
              FROM entry e JOIN entry_closure c ON e.id = c.ancestor
              WHERE c.descendant = (SELECT id FROM entry WHERE path = ?) AND c.depth > 0
              ORDER BY c.depth DESC",
@@ -249,7 +256,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns FROM entry
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry
              WHERE name LIKE '%' || ? || '%' ORDER BY kind DESC, name LIMIT ?",
         )
         .bind(q)
@@ -335,7 +342,7 @@ impl Store {
                 .await
                 .map_err(|e| db_err("重复组大小", e))?;
             let copies = sqlx::query_as::<_, EntryRow>(
-                "SELECT id, kind, name, path, content_id, size, mtime_ns FROM entry
+                "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry
                  WHERE content_id = ? ORDER BY path",
             )
             .bind(&content_id)

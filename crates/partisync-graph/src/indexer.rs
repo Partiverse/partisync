@@ -7,18 +7,28 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use partisync_cas::content_hash_file;
+use partisync_cas::chunker::CdcConfig;
+use partisync_cas::{content_hash_file, put_chunks, ChunkStore};
 use partisync_core::error::{classify_io, PartisyError, Severity};
 use walkdir::WalkDir;
 
 use crate::store::{EntryKind, Store};
+
+/// 分块阈值：文件 ≥ min 才进块库（小文件整文件去重更划算）。
+fn chunk_threshold() -> usize {
+    CdcConfig::PRODUCTION.min
+}
 
 /// 递归索引 `root` 下的全部目录与文件。幂等：重复索引 stats 不变。
 ///
 /// # Errors
 /// 根不可读 → 按表驱动分类；单文件哈希失败按 [`classify_io`] 分类
 /// （NotFound 等 Retryable → 整体中止返回，重跑幂等续传）。
-pub async fn index_path(store: &Store, root: &Path) -> Result<IndexReport, PartisyError> {
+pub async fn index_path(
+    store: &Store,
+    cas: Option<&ChunkStore>,
+    root: &Path,
+) -> Result<IndexReport, PartisyError> {
     let root = root.canonicalize().map_err(|e| io_err("定位索引根", e))?;
     let root_name = root
         .file_name()
@@ -26,7 +36,7 @@ pub async fn index_path(store: &Store, root: &Path) -> Result<IndexReport, Parti
     // 根条目路径固定为 "/"：UI 导航的统一锚点
     let mut dir_ids: HashMap<PathBuf, String> = HashMap::new();
     let root_id = store
-        .add_entry(None, &root_name, "/", EntryKind::Dir, 0, 0, None)
+        .add_entry(None, &root_name, "/", EntryKind::Dir, 0, 0, None, None)
         .await?;
     dir_ids.insert(root.clone(), root_id);
 
@@ -68,12 +78,23 @@ pub async fn index_path(store: &Store, root: &Path) -> Result<IndexReport, Parti
                     0,
                     mtime_ns,
                     None,
+                    None,
                 )
                 .await?;
             dir_ids.insert(entry.path().to_owned(), id);
             report.dirs += 1;
         } else if meta.is_file() {
             let hash = content_hash_file(entry.path()).await?;
+            // 大文件分块入库（块级去重/delta 的载体，SPEC M0-WP03 §3）
+            let mut chunk_root = None;
+            if let Some(cas) = cas.filter(|_| meta.len() as usize >= chunk_threshold()) {
+                let data = tokio::fs::read(entry.path())
+                    .await
+                    .map_err(|e| io_err("读文件分块", e))?;
+                let (_, root_hash) = put_chunks(cas, &data, CdcConfig::PRODUCTION).await?;
+                chunk_root = Some(root_hash);
+                report.chunked_files += 1;
+            }
             store
                 .add_entry(
                     parent_id.as_deref(),
@@ -83,6 +104,7 @@ pub async fn index_path(store: &Store, root: &Path) -> Result<IndexReport, Parti
                     meta.len(),
                     mtime_ns,
                     Some((&hash, meta.len())),
+                    chunk_root.as_deref(),
                 )
                 .await?;
             report.files += 1;
@@ -97,6 +119,7 @@ pub struct IndexReport {
     pub files: u64,
     pub dirs: u64,
     pub skipped_symlinks: u64,
+    pub chunked_files: u64,
 }
 
 /// 相对路径 → 虚拟路径（"/" + 分隔符统一为 '/'）。
