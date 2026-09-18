@@ -38,6 +38,7 @@ pub struct JobRow {
     pub id: String,
     pub kind: String,
     pub status: i64,
+    pub status_name: String,
     pub root: String,
     pub checkpoint: Option<String>,
     pub done_files: i64,
@@ -151,7 +152,10 @@ pub async fn mark_interrupted(store: &Store, id: &str, done: u64) -> Result<(), 
 /// DB 错误 → Fatal。
 pub async fn get(store: &Store, id: &str) -> Result<JobRow, PartisyError> {
     sqlx::query_as::<_, JobRow>(
-        "SELECT id, kind, status, root, checkpoint, done_files, error FROM jobs WHERE id = ?",
+        "SELECT id, kind, status,
+                CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted'
+                            WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name,
+                root, checkpoint, done_files, error FROM jobs WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(store.pool_ref())
@@ -169,7 +173,10 @@ pub async fn get(store: &Store, id: &str) -> Result<JobRow, PartisyError> {
 /// DB 错误 → Fatal。
 pub async fn latest_resumable(store: &Store) -> Result<Option<JobRow>, PartisyError> {
     sqlx::query_as::<_, JobRow>(
-        "SELECT id, kind, status, root, checkpoint, done_files, error FROM jobs
+        "SELECT id, kind, status,
+                CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted'
+                            WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name,
+                root, checkpoint, done_files, error FROM jobs
          WHERE status IN (2, 1) ORDER BY updated_ns DESC LIMIT 1",
     )
     .fetch_optional(store.pool_ref())
@@ -183,7 +190,10 @@ pub async fn latest_resumable(store: &Store) -> Result<Option<JobRow>, PartisyEr
 /// DB 错误 → Fatal。
 pub async fn list(store: &Store) -> Result<Vec<JobRow>, PartisyError> {
     sqlx::query_as::<_, JobRow>(
-        "SELECT id, kind, status, root, checkpoint, done_files, error FROM jobs
+        "SELECT id, kind, status,
+                CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted'
+                            WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name,
+                root, checkpoint, done_files, error FROM jobs
          ORDER BY created_ns DESC",
     )
     .fetch_all(store.pool_ref())

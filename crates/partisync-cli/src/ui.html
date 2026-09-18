@@ -79,6 +79,7 @@
     <button data-tab="browse" class="active">浏览</button>
     <button data-tab="search">搜索</button>
     <button data-tab="dups">重复内容</button>
+    <button data-tab="jobs">作业</button>
   </nav>
 
   <div id="view-browse">
@@ -100,6 +101,7 @@
   </div>
 
   <div id="view-dups" style="display:none"></div>
+  <div id="view-jobs" style="display:none"></div>
 
   <footer>PartiSync v0.1（M0 演示）· 内容身份 = BLAKE3 · 绑定 127.0.0.1，公网暴露需鉴权（M1 范围）</footer>
 </div>
@@ -164,6 +166,18 @@ async function doSearch() {
   ).join("") : `<tr><td colspan="3" class="empty">${q ? "无结果" : "输入关键词"}</td></tr>`;
 }
 
+async function loadJobs() {
+  const rows = await j("/api/jobs");
+  $("view-jobs").innerHTML = rows.length ? `
+    <table><thead><tr><th>ID</th><th>类型</th><th>状态</th><th style="width:90px">已处理</th><th>checkpoint</th></tr></thead>
+    <tbody>${rows.map(r => {
+      const color = r.status === 3 ? "var(--green)" : r.status === 2 ? "var(--amber)" : r.status === 4 ? "#f85149" : "var(--dim)";
+      return `<tr><td class="hash">${r.id.slice(0,10)}…</td><td>${r.kind}</td>
+        <td style="color:${color}">${r.status_name || r.status}</td>
+        <td>${r.done_files}</td><td class="hash">${r.checkpoint || "—"}</td></tr>`;
+    }).join("")}</tbody></table>` : `<div class="empty">暂无作业</div>`;
+}
+
 async function loadDups() {
   const groups = await j("/api/duplicates?limit=50");
   $("view-dups").innerHTML = groups.length ? groups.map(g => `
@@ -180,9 +194,10 @@ document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav.tabs button").forEach(x => x.classList.remove("active"));
   b.classList.add("active");
   const t = b.dataset.tab;
-  ["browse", "search", "dups"].forEach(v => $(`view-${v}`).style.display = v === t ? "" : "none");
+  ["browse", "search", "dups", "jobs"].forEach(v => $(`view-${v}`).style.display = v === t ? "" : "none");
   if (t === "browse") browse(curPath);
   if (t === "dups") loadDups();
+  if (t === "jobs") loadJobs();
 });
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
 

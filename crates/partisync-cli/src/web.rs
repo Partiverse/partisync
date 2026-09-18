@@ -8,6 +8,7 @@ use axum::response::Html;
 use axum::routing::get;
 use axum::{Json, Router};
 use partisync_cas::{CasStats, ChunkStore};
+use partisync_graph::jobs;
 use partisync_graph::store::{DupGroup, EntryRow, Stats, Store};
 
 /// 应用状态：仓储句柄 + 库路径（页面徽标展示）。
@@ -28,6 +29,7 @@ pub fn router(store: Store, cas: ChunkStore, db: String) -> Router {
         .route("/api/search", get(api_search))
         .route("/api/duplicates", get(api_duplicates))
         .route("/api/cas-stats", get(api_cas_stats))
+        .route("/api/jobs", get(api_jobs))
         .route("/api/breadcrumb", get(api_breadcrumb))
         .with_state(app)
 }
@@ -55,6 +57,12 @@ async fn api_list(
 
 async fn api_cas_stats(State(app): State<App>) -> Result<Json<CasStats>, (StatusCode, String)> {
     app.cas.stats().await.map(Json).map_err(err500)
+}
+
+async fn api_jobs(
+    State(app): State<App>,
+) -> Result<Json<Vec<jobs::JobRow>>, (StatusCode, String)> {
+    jobs::list(&app.store).await.map(Json).map_err(err500)
 }
 
 async fn api_breadcrumb(
