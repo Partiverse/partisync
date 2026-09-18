@@ -1,6 +1,13 @@
 //! 内容仓库（CAS）——调研方案 §5.9。
 //!
-//! 当前内容：内容寻址主哈希（BLAKE3，hex）。分块/块库/pack 归 M0-WP03。
+//! 当前内容：内容寻址主哈希（BLAKE3）、[`chunker`]（内容定义分块，P1–P3）、
+//! [`store`]（内容寻址块库 + 引用计数，P4）。pack/EC 归 M3。
+
+pub mod chunker;
+pub mod store;
+
+pub use chunker::{chunk_boundaries, chunk_root, CdcConfig, CdcConfigError};
+pub use store::{put_chunks, CasStats, ChunkStore};
 
 use std::fs::File;
 use std::io::Read;
