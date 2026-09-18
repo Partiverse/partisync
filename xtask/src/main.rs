@@ -63,6 +63,9 @@ fn gen_fixture(args: &[String]) -> bool {
     let mut root = None;
     let mut files = 300u64;
     let mut dup_rate = 30u64; // 百分比
+    let mut blobs = 0u64;
+    let mut blob_size = 2u64 * 1024 * 1024;
+    let mut blob_versions = 6u64;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -75,6 +78,16 @@ fn gen_fixture(args: &[String]) -> bool {
                     .next()
                     .and_then(|v| v.parse::<f64>().ok())
                     .map_or(dup_rate, |r| (r * 100.0) as u64);
+            }
+            "--blobs" => blobs = it.next().and_then(|v| v.parse().ok()).unwrap_or(blobs),
+            "--blob-size" => {
+                blob_size = it.next().and_then(|v| v.parse().ok()).unwrap_or(blob_size)
+            }
+            "--blob-versions" => {
+                blob_versions = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(blob_versions)
             }
             other => {
                 eprintln!("未知参数: {other}");
@@ -144,8 +157,33 @@ fn gen_fixture(args: &[String]) -> bool {
             }
         }
     }
+    // checkpoint 场景：大文件版本链（版本间共享 ~95% 内容）
+    let blobs_dir = root.join("blobs");
+    let _ = std::fs::create_dir_all(&blobs_dir);
+    let mut blob_bytes_total = 0u64;
+    for b in 0..blobs {
+        let size = blob_size as usize;
+        let mut base = Vec::with_capacity(size);
+        for chunk in (0..size).step_by(8) {
+            let v = rng.next().to_le_bytes();
+            let n = 8.min(size - chunk);
+            base.extend_from_slice(&v[..n]);
+        }
+        for v in 0..blob_versions {
+            let name = blobs_dir.join(format!("model{b}_v{v}.bin"));
+            if std::fs::write(&name, &base).is_ok() {
+                blob_bytes_total += base.len() as u64;
+            }
+            // 尾部 5% 变异（下一版本基于本版本）
+            let tail = base.len() - base.len() / 20;
+            for (i, byte) in base[tail..].iter_mut().enumerate() {
+                *byte = byte.wrapping_add(v as u8).wrapping_add(i as u8 ^ (b as u8));
+            }
+        }
+    }
+
     println!(
-        "gen-fixture: root={} files={made_files}（其中重复 {made_dups}）dirs≈{} dup_rate={dup_rate}%",
+        "gen-fixture: root={} files={made_files}（其中重复 {made_dups}）dirs≈{} dup_rate={dup_rate}% blobs={blobs}×{blob_versions}（{blob_bytes_total}B）",
         root.display(),
         dirs.len()
     );
