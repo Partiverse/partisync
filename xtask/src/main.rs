@@ -89,13 +89,13 @@ fn report(milestone: &str) -> bool {
         .filter(|r| r.task_id.as_deref().is_some_and(|t| t.starts_with(&prefix)))
         .collect();
     let total = scope.len();
-    let mut tasks: Vec<&str> = scope
-        .iter()
-        .filter_map(|r| r.task_id.as_deref())
-        .collect();
+    let mut tasks: Vec<&str> = scope.iter().filter_map(|r| r.task_id.as_deref()).collect();
     tasks.sort_unstable();
     tasks.dedup();
-    let mut wps: Vec<String> = tasks.iter().filter_map(|t| wp_of(t).map(String::from)).collect();
+    let mut wps: Vec<String> = tasks
+        .iter()
+        .filter_map(|t| wp_of(t).map(String::from))
+        .collect();
     wps.sort();
     wps.dedup();
     let ai = scope.iter().filter(|r| r.ai_assist.is_some()).count();
@@ -205,6 +205,8 @@ fn parse_commits(raw: &str) -> Vec<CommitRecord> {
             let subject = fields.next().unwrap_or_default().trim().to_string();
             let body = fields.next().unwrap_or_default().to_string();
             CommitRecord {
+                hash,
+                subject,
                 task_id: trailer(&body, "Task-ID"),
                 spec: trailer(&body, "Spec"),
                 ai_assist: trailer(&body, "AI-Assist"),
@@ -240,10 +242,7 @@ mod tests {
         assert_eq!(rs[0].subject, "chore(repo): bootstrap [M-1-WP01-T01]");
         assert_eq!(rs[0].task_id.as_deref(), Some("M-1-WP01-T01"));
         assert_eq!(rs[0].spec.as_deref(), Some("docs/specs/M-1-WP01.md"));
-        assert_eq!(
-            rs[0].ai_assist.as_deref(),
-            Some("zcode/GLM-5.3 (scaffold)")
-        );
+        assert_eq!(rs[0].ai_assist.as_deref(), Some("zcode/GLM-5.3 (scaffold)"));
         assert_eq!(rs[1].task_id.as_deref(), Some("M-1-WP07-T01"));
         assert_eq!(rs[1].spec, None);
     }

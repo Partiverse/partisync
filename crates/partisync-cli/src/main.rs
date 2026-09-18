@@ -2,5 +2,8 @@
 //! M1 协议与 serve，M2 sync。规格见 docs/specs/。
 
 fn main() {
-    println!("partisync {}: skeleton (M-1 bootstrap)", env!("CARGO_PKG_VERSION"));
+    println!(
+        "partisync {}: skeleton (M-1 bootstrap)",
+        env!("CARGO_PKG_VERSION")
+    );
 }
