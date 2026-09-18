@@ -21,3 +21,7 @@ cargo xtask trace <TASK-ID>   # 追溯任意任务的全链工件
 ## 许可证
 
 暂定 Apache-2.0（见 ADR-0000 的「临时决策」标记，治理结构确定后复议）。
+
+## CI
+
+五道门禁：fmt / clippy / test(ubuntu+macos) / cargo-deny / task-ids。首跑记录见 docs/reports/。
