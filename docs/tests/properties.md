@@ -26,3 +26,4 @@
 | L2 | core::ulid | ts1 < ts2 ⇒ ulid(ts1,·) < ulid(ts2,·)（字节序=字典序=时间序） | M-1-WP07 |
 | L3 | core::ulid | Display 恒 26 字符且 ∈ Crockford 字母表；timestamp_ms/random_part 提取往返一致 | M-1-WP07 |
 | L4 | graph::store | entry_closure 子树查询 ≡ 朴素递归遍历（任意随机树，模型对照） | M0-WP02 |
+| L5 | graph::jobs | 「中断→resume」最终 stats ≡ 「全量直index」（恢复等价性） | M0-WP05 |
