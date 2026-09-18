@@ -197,8 +197,7 @@ async fn ensure_dir_chain(store: &Store, vpath: &str) -> Result<(), PartisyError
 
 fn parent_vpath(vpath: &str) -> String {
     match vpath.rsplit_once('/') {
-        Some((p, _)) if p.is_empty() => "/".to_string(),
-        Some((p, _)) => p.to_string(),
-        None => "/".to_string(),
+        Some((p, _)) if !p.is_empty() => p.to_string(),
+        _ => "/".to_string(),
     }
 }
