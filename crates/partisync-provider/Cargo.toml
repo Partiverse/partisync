@@ -5,5 +5,15 @@ edition.workspace = true
 license.workspace = true
 description = "Provider SPI：OpenDAL 适配、caps 能力协商、配置加密存储"
 
+[dependencies]
+partisync-core = { path = "../partisync-core" }
+opendal = { workspace = true } # ADR-0006：50+ 后端抽象
+serde = { workspace = true }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

@@ -36,7 +36,8 @@ pub enum MtimePrecision {
     Nanos,
 }
 
-/// Provider 能力声明（`#[non_exhaustive]`：新增能力位不破坏下游 match）。
+/// Provider 能力声明（`#[non_exhaustive]`：新增能力位不破坏下游 match——
+/// 跨 crate 构造请用 [`ProviderCaps::new`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ProviderCaps {
@@ -47,6 +48,31 @@ pub struct ProviderCaps {
     pub presign_put: bool,
     pub event_stream: bool,
     pub multipart: bool,
+}
+
+impl ProviderCaps {
+    /// 显式构造（non_exhaustive 的跨 crate 出口）。
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        hash: HashCaps,
+        mtime: MtimePrecision,
+        atomic_rename: bool,
+        server_side_copy: bool,
+        presign_put: bool,
+        event_stream: bool,
+        multipart: bool,
+    ) -> Self {
+        ProviderCaps {
+            hash,
+            mtime,
+            atomic_rename,
+            server_side_copy,
+            presign_put,
+            event_stream,
+            multipart,
+        }
+    }
 }
 
 /// 变更检测策略降级档位（劣化序：Checksum > SizeMtime > SizeOnly）。
