@@ -76,7 +76,7 @@ async fn index_cmd(args: &[String]) -> i32 {
         }
     };
     // 作业化：index = 可恢复的持久作业（SPEC M0-WP05）
-    let job_id = match jobs::create(&store, "index", &root).await {
+    let job_id = match jobs::create(&store, "index", root).await {
         Ok(id) => id,
         Err(e) => {
             eprintln!("error: {e}");
