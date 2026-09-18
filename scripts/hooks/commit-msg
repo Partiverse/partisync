@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# commit-msg 钩子：本地强制 Task-ID trailer（铁律 2）。
+# 合并提交与初始仓库引导提交豁免（CI 的 PR 级检查覆盖引导后的全部提交）。
+set -euo pipefail
+msgfile="${1:?}"
+pattern='^Task-ID: M-?[0-9]+-WP[0-9]{2}-T[0-9]{2}'
+
+if grep -qE '^Merge ' "${msgfile}"; then
+  exit 0
+fi
+if grep -qE "${pattern}" "${msgfile}"; then
+  exit 0
+fi
+echo "commit-msg: 缺少合规 Task-ID trailer（如 Task-ID: M0-WP01-T01）" >&2
+echo "格式见 AGENTS.md「提交与追溯格式」" >&2
+exit 1

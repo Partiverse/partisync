@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "开发自动化：任务全链追溯（trace）与里程碑报告（report）"
+
+[lints]
+workspace = true

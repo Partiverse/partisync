@@ -13,6 +13,7 @@ members = [
     "crates/partisync-hub",
     "crates/partisd",
     "crates/partisync-cli",
+    "xtask",
 ]
 
 [workspace.package]
