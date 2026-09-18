@@ -286,7 +286,7 @@ async fn ls_cmd(args: &[String]) -> i32 {
                 println!("（空目录或路径不存在）");
                 return 1;
             }
-            println!("{:<8} {:>12}  {:<8}  {}", "TYPE", "SIZE", "CONTENT", "NAME");
+            println!("{:<8} {:>12}  CONTENT  NAME", "TYPE", "SIZE");
             for e in rows {
                 let (t, size, ch) = if e.kind == 1 {
                     ("dir", "—".to_string(), "—".to_string())
