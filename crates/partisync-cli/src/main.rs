@@ -193,8 +193,7 @@ async fn resume_cmd(args: &[String]) -> i32 {
     if !matches!(row.status, 1 | 2) {
         eprintln!(
             "error: 作业 {} 状态为 {}，不可恢复",
-            row.id,
-            row.status_name()
+            row.id, row.status_name
         );
         return 1;
     }
@@ -255,11 +254,7 @@ async fn jobs_cmd(_args: &[String]) -> i32 {
             for r in rows {
                 println!(
                     "{:<27} {:<7} {:<11} {:>7}  {:?}",
-                    r.id,
-                    r.kind,
-                    r.status_name(),
-                    r.done_files,
-                    r.checkpoint
+                    r.id, r.kind, r.status_name, r.done_files, r.checkpoint
                 );
             }
             0
