@@ -1,11 +1,13 @@
 //! 持久作业系统 v1（SPEC M0-WP05）：index 作业的 checkpoint 与恢复。
 //!
 //! L5（恢复等价性）：「中断→resume」与「全量直index」最终 stats 完全相等。
-//! 状态偏离声明：v1 状态即关系列（无需 MessagePack，SPEC §4）。
+//! 状态偏离声明：v1 状态即关系列（无需 MessagePack，SPEC §4）；
+//! checkpoint 粒度 = 批（SPEC v1.1）。
 
 use std::time::UNIX_EPOCH;
 
 use partisync_core::error::{PartisyError, Severity};
+use partisync_core::Ulid;
 use serde::Serialize;
 
 use crate::store::Store;
@@ -20,19 +22,7 @@ pub enum JobStatus {
     Failed = 4,
 }
 
-impl JobStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            JobStatus::Queued => "queued",
-            JobStatus::Running => "running",
-            JobStatus::Interrupted => "interrupted",
-            JobStatus::Completed => "completed",
-            JobStatus::Failed => "failed",
-        }
-    }
-}
-
-/// 作业行视图。
+/// 作业行视图（status_name 由 SQL CASE 产出，供前端直用）。
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct JobRow {
     pub id: String,
@@ -45,18 +35,16 @@ pub struct JobRow {
     pub error: Option<String>,
 }
 
-/// 运行期作业上下文（传给 index_path）。
+/// 运行期作业上下文（传给 index_path_job）。
 #[derive(Debug, Clone)]
 pub struct JobCtx {
     pub id: String,
     /// 续跑划界：vpath ≤ 此值的文件跳过（目录不跳）。
     pub skip_up_to: Option<String>,
-    /// 测试/演练注入点：处理 N 个文件后返回 Interrupted。
+    /// 测试/演练注入点：处理 N 个文件后返回 Interrupted（批粒度）。
     pub stop_after: Option<u64>,
     pub done: u64,
 }
-
-const CHECKPOINT_EVERY: u64 = 200;
 
 fn now_ns() -> i64 {
     std::time::SystemTime::now()
@@ -76,17 +64,19 @@ fn db_err(what: &str, e: sqlx::Error) -> PartisyError {
 /// # Errors
 /// DB 错误 → Fatal。
 pub async fn create(store: &Store, kind: &str, root: &str) -> Result<String, PartisyError> {
-    let id = partisync_core::Ulid::now().to_string();
+    let id = Ulid::now().to_string();
     let ns = now_ns();
-    sqlx::query("INSERT INTO jobs (id, kind, status, root, created_ns, updated_ns) VALUES (?, ?, 0, ?, ?, ?)")
-        .bind(&id)
-        .bind(kind)
-        .bind(root)
-        .bind(ns)
-        .bind(ns)
-        .execute(store.pool_ref())
-        .await
-        .map_err(|e| db_err("创建作业", e))?;
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, status, root, created_ns, updated_ns) VALUES (?, ?, 0, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(kind)
+    .bind(root)
+    .bind(ns)
+    .bind(ns)
+    .execute(store.pool_ref())
+    .await
+    .map_err(|e| db_err("创建作业", e))?;
     Ok(id)
 }
 
@@ -99,7 +89,7 @@ async fn set_status(
     error: Option<&str>,
 ) -> Result<(), PartisyError> {
     sqlx::query(
-        "UPDATE jobs SET status = ?, checkpoint = COALESCE(?, checkpoint),
+        "UPDATE jobs SET status = ?, checkpoint = COALESCE(?, checkpoint), \
          done_files = ?, error = ?, updated_ns = ? WHERE id = ?",
     )
     .bind(status as i64)
@@ -146,16 +136,15 @@ pub async fn mark_interrupted(store: &Store, id: &str, done: u64) -> Result<(), 
     set_status(store, id, JobStatus::Interrupted, None, done as i64, None).await
 }
 
-/// 作业行 + 待续信息；陈旧 running 视同 interrupted（SPEC 风险节）。
+/// 作业行。
 ///
 /// # Errors
 /// DB 错误 → Fatal。
 pub async fn get(store: &Store, id: &str) -> Result<JobRow, PartisyError> {
     sqlx::query_as::<_, JobRow>(
-        "SELECT id, kind, status,
-                CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted'
-                            WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name,
-                root, checkpoint, done_files, error FROM jobs WHERE id = ?",
+        "SELECT id, kind, status, \
+         CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted' WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name, \
+         root, checkpoint, done_files, error FROM jobs WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(store.pool_ref())
@@ -167,16 +156,15 @@ pub async fn get(store: &Store, id: &str) -> Result<JobRow, PartisyError> {
     })
 }
 
-/// 取最新 interrupted（或陈旧 running）作业 id。
+/// 取最新可恢复作业（interrupted 或陈旧 running）。
 ///
 /// # Errors
 /// DB 错误 → Fatal。
 pub async fn latest_resumable(store: &Store) -> Result<Option<JobRow>, PartisyError> {
     sqlx::query_as::<_, JobRow>(
-        "SELECT id, kind, status,
-                CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted'
-                            WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name,
-                root, checkpoint, done_files, error FROM jobs
+        "SELECT id, kind, status, \
+         CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted' WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name, \
+         root, checkpoint, done_files, error FROM jobs \
          WHERE status IN (2, 1) ORDER BY updated_ns DESC LIMIT 1",
     )
     .fetch_optional(store.pool_ref())
@@ -190,28 +178,14 @@ pub async fn latest_resumable(store: &Store) -> Result<Option<JobRow>, PartisyEr
 /// DB 错误 → Fatal。
 pub async fn list(store: &Store) -> Result<Vec<JobRow>, PartisyError> {
     sqlx::query_as::<_, JobRow>(
-        "SELECT id, kind, status,
-                CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted'
-                            WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name,
-                root, checkpoint, done_files, error FROM jobs
+        "SELECT id, kind, status, \
+         CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted' WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name, \
+         root, checkpoint, done_files, error FROM jobs \
          ORDER BY created_ns DESC",
     )
     .fetch_all(store.pool_ref())
     .await
     .map_err(|e| db_err("列作业", e))
-}
-
-impl JobRow {
-    #[must_use]
-    pub fn status_name(&self) -> &'static str {
-        match self.status {
-            0 => JobStatus::Queued.as_str(),
-            1 => JobStatus::Running.as_str(),
-            2 => JobStatus::Interrupted.as_str(),
-            3 => JobStatus::Completed.as_str(),
-            _ => JobStatus::Failed.as_str(),
-        }
-    }
 }
 
 impl JobCtx {
@@ -226,31 +200,15 @@ impl JobCtx {
         }
     }
 
-    /// 达到 checkpoint 提交节奏时落盘进度。
+    /// 随批提交 checkpoint（SPEC v1.1：粒度 = 批）。
     ///
     /// # Errors
     /// DB 错误 → Fatal。
-    pub async fn maybe_flush(&mut self, store: &Store, vpath: &str) -> Result<(), PartisyError> {
-        if self.done.is_multiple_of(CHECKPOINT_EVERY) {
-            sqlx::query(
-                "UPDATE jobs SET checkpoint = ?, done_files = ?, updated_ns = ? WHERE id = ?",
-            )
-            .bind(vpath)
-            .bind(self.done as i64)
-            .bind(now_ns())
-            .bind(&self.id)
-            .execute(store.pool_ref())
-            .await
-            .map_err(|e| db_err("提交 checkpoint", e))?;
-        }
-        Ok(())
-    }
-
-    /// 完成时提交最终 checkpoint。
-    ///
-    /// # Errors
-    /// DB 错误 → Fatal。
-    pub async fn flush_final(&mut self, store: &Store, vpath: &str) -> Result<(), PartisyError> {
+    pub async fn flush_checkpoint(
+        &mut self,
+        store: &Store,
+        vpath: &str,
+    ) -> Result<(), PartisyError> {
         sqlx::query("UPDATE jobs SET checkpoint = ?, done_files = ?, updated_ns = ? WHERE id = ?")
             .bind(vpath)
             .bind(self.done as i64)

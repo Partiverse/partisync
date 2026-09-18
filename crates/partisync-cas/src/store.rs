@@ -58,7 +58,9 @@ impl ChunkStore {
         ))
         .map_err(|e| db_err("连接串", e))?
         .create_if_missing(true)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        // 同 graph Store（SPEC M0-WP07：WAL+NORMAL 提交不 fsync）
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal);
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(opts)

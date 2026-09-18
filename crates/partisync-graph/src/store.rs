@@ -8,7 +8,9 @@ use std::path::Path;
 use partisync_core::error::{PartisyError, Severity};
 use partisync_core::Ulid;
 use serde::Serialize;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
 
 /// entry 类型（v1 仅文件/目录；符号链接在索引器中跳过，SPEC 非目标）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -63,6 +65,18 @@ fn db_err(what: &str, e: sqlx::Error) -> PartisyError {
     }
 }
 
+/// 批量文件插入记录（[`Store::add_file_batch`] 的输入）。
+pub struct FileInsert {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub mtime_ns: u64,
+    pub content: Option<(String, u64)>,
+    pub chunk_root: Option<String>,
+}
+
 impl Store {
     /// 供 journal/watch 等同 crate 模块直接执行 SQL 的池访问。
     pub(crate) fn pool_ref(&self) -> &SqlitePool {
@@ -79,7 +93,10 @@ impl Store {
             .map_err(|e| db_err("连接串解析", e))?
             .create_if_missing(true)
             .foreign_keys(true)
-            .journal_mode(SqliteJournalMode::Wal);
+            .journal_mode(SqliteJournalMode::Wal)
+            // WAL+NORMAL：提交不 fsync（KPI 实测 28m33s→优化，元凶是每语句 fsync）。
+            // 代价：OS 断电可能丢尾部提交；索引可幂等重建，接受（SPEC M0-WP07 留痕）
+            .synchronous(SqliteSynchronous::Normal);
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(opts)
@@ -351,7 +368,68 @@ impl Store {
         }
         Ok(deleted)
     }
+}
 
+impl Store {
+    /// 批量插入文件条目：单事务（KPI 优化，SPEC M0-WP07）——
+    /// 每文件 3 条语句共享一次提交；ON CONFLICT(path) DO UPDATE RETURNING id
+    /// 保持 upsert 语义（旧 id 保留）。调用方须保证父目录行已存在。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn add_file_batch(&self, files: &[FileInsert]) -> Result<(), PartisyError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| db_err("开启批事务", e))?;
+        for f in files {
+            if let Some((hash, csize)) = &f.content {
+                sqlx::query("INSERT OR IGNORE INTO content (id, size) VALUES (?, ?)")
+                    .bind(hash)
+                    .bind(i64::try_from(*csize).unwrap_or(i64::MAX))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| db_err("批量登记内容", e))?;
+            }
+            let id: String = sqlx::query_scalar(
+                "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root)
+                 VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(path) DO UPDATE SET
+                     size = excluded.size, mtime_ns = excluded.mtime_ns,
+                     content_id = excluded.content_id, chunk_root = excluded.chunk_root
+                 RETURNING id",
+            )
+            .bind(&f.id)
+            .bind(f.parent_id.as_deref())
+            .bind(&f.name)
+            .bind(&f.path)
+            .bind(f.content.as_ref().map(|(h, _)| h))
+            .bind(i64::try_from(f.size).unwrap_or(i64::MAX))
+            .bind(i64::try_from(f.mtime_ns).unwrap_or(i64::MAX))
+            .bind(f.chunk_root.as_deref())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| db_err("批量插入条目", e))?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO entry_closure (ancestor, descendant, depth)
+                 SELECT ancestor, ?, depth + 1 FROM entry_closure WHERE descendant = ?
+                 UNION ALL SELECT ?, ?, 0",
+            )
+            .bind(&id)
+            .bind(f.parent_id.as_deref())
+            .bind(&id)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| db_err("批量闭包", e))?;
+        }
+        tx.commit().await.map_err(|e| db_err("提交批事务", e))?;
+        Ok(())
+    }
+}
+
+impl Store {
     /// 名称子串检索（LIKE，上限防全表外溢）。
     ///
     /// # Errors

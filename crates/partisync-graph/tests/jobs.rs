@@ -57,6 +57,7 @@ async fn l5_resume_equivalence() {
         stop_after: Some(15),
         done: 0,
     };
+    let s_ref_files = s_ref.files;
     let err = index_path_job(&store, Some(&cas), &fs, Some(&mut ctx))
         .await
         .unwrap_err();
@@ -69,7 +70,7 @@ async fn l5_resume_equivalence() {
         .await
         .unwrap();
     let row = jobs::get(&store, &job_id).await.unwrap();
-    assert_eq!(row.status_name(), "interrupted");
+    assert_eq!(row.status_name, "interrupted");
     assert!(row.checkpoint.is_some(), "中断必须留下 checkpoint");
     let done_at_interrupt = row.done_files;
 
@@ -82,12 +83,13 @@ async fn l5_resume_equivalence() {
         .unwrap();
     jobs::complete(&store, &job_id, ctx.done).await.unwrap();
     let row = jobs::get(&store, &job_id).await.unwrap();
-    assert_eq!(row.status_name(), "completed");
-    assert_eq!(
-        row.done_files, ctx.done as i64,
-        "resume 后 done 从续点累计（≥ 中断时的 15）"
+    assert_eq!(row.status_name, "completed");
+    // 批语义（SPEC v1.1）：done 按批累计；中断批内全批处理，续点后只处理剩余
+    assert_eq!(row.done_files, ctx.done as i64);
+    assert!(
+        row.done_files + done_at_interrupt >= s_ref_files,
+        "两段处理覆盖全量"
     );
-    assert!(row.done_files >= done_at_interrupt);
 
     // L5 核心：两组 stats 完全相等
     let s_resume = store.stats().await.unwrap();
@@ -106,18 +108,12 @@ async fn l5_resume_equivalence() {
 async fn job_status_lifecycle_recorded() {
     let (store, dir) = file_store("lifecycle").await;
     let id = jobs::create(&store, "index", "/tmp/x").await.unwrap();
-    assert_eq!(
-        jobs::get(&store, &id).await.unwrap().status_name(),
-        "queued"
-    );
+    assert_eq!(jobs::get(&store, &id).await.unwrap().status_name, "queued");
     jobs::start(&store, &id).await.unwrap();
-    assert_eq!(
-        jobs::get(&store, &id).await.unwrap().status_name(),
-        "running"
-    );
+    assert_eq!(jobs::get(&store, &id).await.unwrap().status_name, "running");
     jobs::fail(&store, &id, "disk full").await.unwrap();
     let row = jobs::get(&store, &id).await.unwrap();
-    assert_eq!(row.status_name(), "failed");
+    assert_eq!(row.status_name, "failed");
     assert_eq!(row.error.as_deref(), Some("disk full"));
     assert_eq!(jobs::list(&store).await.unwrap().len(), 1);
     std::fs::remove_dir_all(&dir).ok();
