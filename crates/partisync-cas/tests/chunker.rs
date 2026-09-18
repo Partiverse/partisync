@@ -89,7 +89,7 @@ proptest! {
         // 末块是余数（可短于 min，CDC 标准行为）；其余块必须在 [min,max]
         for (i, &(offset, len)) in chunks.iter().enumerate() {
             if i + 1 < chunks.len() {
-                prop_assert!(*&len >= cfg.min && len <= cfg.max, "块长 {len} 越界 @ {offset}");
+                prop_assert!(len >= cfg.min && len <= cfg.max, "块长 {len} 越界 @ {offset}");
             } else {
                 prop_assert!(len <= cfg.max, "末块 {len} 超过 max @ {offset}");
             }
