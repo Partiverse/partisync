@@ -1,4 +1,4 @@
-# M0 里程碑报告（累计：WP00–WP04）
+# M0 里程碑报告（累计：WP00–WP05）
 
 生成：`cargo xtask report M0` · 日期：2026-09-18 · 范围说明：本报告累计覆盖 M0 前三批
 （质量基建 / 核心类型 / 元数据存储与演示面）；WP04–WP07（watcher/作业系统/CLI 矩阵/达标）进行中。
@@ -115,3 +115,20 @@ WP03 CAS（fastcdc/blake3，P1–P4 属性测试）→ WP04 扫描 → WP05 作�
 
 **债务与下一步**：M0-WP05（作业系统持久化）未开始，顺延为下批首项；块引用在
 「修改后旧块」上仍有孤儿（M3 GC 既定口径）；rename 以 removed+created 对处理。
+
+## 追加批四（M0-WP05，2026-09-18 第五次更新）
+
+| 任务 | 结果 |
+|---|---|
+| M0-WP05-T01 | SPEC + L5 登记（含 MessagePack 偏离声明：v1 状态即关系列） |
+| M0-WP05-T02 | jobs 表（schema v4）+ 作业 API + indexer 作业感知；**处理序缺陷在写测试前抓住**：walkdir DFS 序 ≠ 字典序（`/a.txt < /a/b` 但 DFS 先访 `/a/`），checkpoint 划界会漏文件 → 改为全局字典序处理（流式归 WP07） |
+| M0-WP05-T03 | CLI：index 作业化（Ctrl-C 优雅中断）、resume、jobs |
+| M0-WP05-T04 | 真实 SIGINT 演示 + L5 生产对照（见下） |
+
+**断点续扫端到端证据（3000 文件 / 98.7MB）**：
+`kill -INT` 于 1000 文件处 → exit 130、status=interrupted、checkpoint=`/d2/d0/f3_0161.bin`
+→ resume 跳过 1000、续处理 2000 → completed。
+**L5 生产对照**：resume 结果 vs 独立全量 index——files/total_bytes/unique_contents/unique_bytes
+四元组**全等**（3000 / 103,537,450 / 2,471 / 84,467,253）。
+
+**流程备注**：clippy 1.94 新 lint（is_multiple_of）随工具链升级生效，属机械修正。
