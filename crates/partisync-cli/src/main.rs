@@ -172,7 +172,7 @@ async fn resume_cmd(args: &[String]) -> i32 {
     let row = match flag_value(args, "--job") {
         Some(id) => jobs::get(&store, &id).await,
         None => jobs::latest_resumable(&store).await.and_then(|o| {
-            o.map(|r| Ok(r)).unwrap_or_else(|| {
+            o.map(Ok).unwrap_or_else(|| {
                 Err(PartisyError {
                     severity: partisync_core::error::Severity::Fatal,
                     source: Some("无可恢复作业".into()),
