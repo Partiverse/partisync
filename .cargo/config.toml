@@ -1,0 +1,4 @@
+# cargo 别名：xtask 模式（SPEC M-1-WP05）
+# 用法：cargo xtask <trace <TASK-ID> | report <MILESTONE>>
+[alias]
+xtask = "run -p xtask --"
