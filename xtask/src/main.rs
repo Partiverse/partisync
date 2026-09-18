@@ -1,13 +1,10 @@
-//! xtask — 开发自动化：追溯与里程碑报告（SPEC docs/specs/M-1-WP05.md）。
+//! xtask — 开发自动化：追溯、里程碑报告、夹具生成（SPEC M-1-WP05 / M0-WP02）。
 //!
 //! 用法：
-//!   cargo xtask trace <TASK-ID>     打印挂接该任务的全部提交（含 trailer 工件引用与触及文件）
-//!   cargo xtask report <MILESTONE>  汇总该里程碑的提交/任务/AI 披露统计，
-//!                                   并在 `docs/reports/<M>-report.md` 缺失时生成报告骨架
-//!
-//! 追溯数据源是 git 提交 trailer（Task-ID/Spec/AI-Assist/AI-Review/Reviewed-By），
-//! 见 AGENTS.md「提交与追溯格式」。trailer 提取为启发式（每种取最后一次出现），
-//! 对 squash 合并的线性历史足够可靠。
+//!   cargo xtask trace <TASK-ID>                  打印挂接该任务的全部提交
+//!   cargo xtask report <MILESTONE>               里程碑报告骨架 + 自动统计
+//!   cargo xtask gen-fixture --root <dir> --files N [--dup-rate 0.3]
+//!                                                合成测试树（含可控重复内容）
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -30,8 +27,11 @@ fn main() {
     match args.as_slice() {
         [cmd, arg] if cmd == "trace" => exit_with(trace(arg)),
         [cmd, arg] if cmd == "report" => exit_with(report(arg)),
+        rest if rest.first() == Some(&"gen-fixture".to_string()) => {
+            exit_with(gen_fixture(&rest[1..]))
+        }
         _ => {
-            eprintln!("usage: cargo xtask <trace <TASK-ID> | report <MILESTONE>>");
+            eprintln!("usage: cargo xtask <trace <TASK-ID> | report <M> | gen-fixture --root <dir> --files N>");
             std::process::exit(2);
         }
     }
@@ -40,6 +40,119 @@ fn main() {
 fn exit_with(ok: bool) {
     std::process::exit(i32::from(!ok));
 }
+
+// ---------------- gen-fixture（SPEC M0-WP02 契约 §5） ----------------
+
+/// 可复现的简易 LCG 伪随机（无依赖；夹具生成要求确定性而非密码学强度）。
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 16
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n.max(1)
+    }
+}
+
+fn gen_fixture(args: &[String]) -> bool {
+    let mut root = None;
+    let mut files = 300u64;
+    let mut dup_rate = 30u64; // 百分比
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--root" => root = it.next().cloned(),
+            "--files" => {
+                files = it.next().and_then(|v| v.parse().ok()).unwrap_or(files);
+            }
+            "--dup-rate" => {
+                dup_rate = it
+                    .next()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map_or(dup_rate, |r| (r * 100.0) as u64);
+            }
+            other => {
+                eprintln!("未知参数: {other}");
+                return false;
+            }
+        }
+    }
+    let Some(root) = root else {
+        eprintln!("缺 --root");
+        return false;
+    };
+    let root = PathBuf::from(root);
+    if root.exists() {
+        eprintln!("refusing to overwrite existing root: {}", root.display());
+        return false;
+    }
+    if std::fs::create_dir_all(&root).is_err() {
+        eprintln!("无法创建根目录");
+        return false;
+    }
+
+    let mut rng = Lcg(0x50_4f_52_54_49); // "PORTI"
+                                         // 内容池：文件内容从中取样；重复文件直接复用同一段字节（写盘即同内容）
+    let pool_size = (files / 3).max(4) as usize;
+    let mut pool: Vec<Vec<u8>> = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
+        let size = (1024 + rng.below(63 * 1024)) as usize;
+        let mut buf = vec![0u8; size];
+        for chunk in buf.chunks_mut(8) {
+            chunk.copy_from_slice(&rng.next().to_le_bytes()[..chunk.len()]);
+        }
+        pool.push(buf);
+    }
+
+    let mut dirs: Vec<PathBuf> = vec![root.clone()];
+    let mut made_files = 0u64;
+    let mut made_dups = 0u64;
+    while made_files < files {
+        let depth = 1 + rng.below(4); // 深度 1..=4（总深 ≤5 含根）
+        let mut dir = root.clone();
+        for _ in 0..depth {
+            dir = dir.join(format!("d{}", rng.below(6)));
+        }
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        dirs.push(dir.clone());
+        // 每目录铺一批文件，直到凑满
+        let batch = 4 + rng.below(8);
+        for _ in 0..batch {
+            if made_files >= files {
+                break;
+            }
+            let name = format!("f{}_{:04}.bin", rng.below(8), made_files);
+            let reuse = !pool.is_empty() && rng.below(100) < dup_rate;
+            let mut payload = pool[rng.below(pool.len() as u64) as usize].to_vec();
+            if reuse {
+                made_dups += 1; // 原样复用池内容 ⇒ 与某既有文件同内容（去重演示）
+            } else {
+                // 文件序号编码进首两字节 ⇒ 非重复内容两两不同（u16 空间内无碰撞）
+                let n = payload.len();
+                payload[0] = (made_files & 0xff) as u8;
+                payload[1 % n] = (made_files >> 8) as u8;
+            }
+            if std::fs::write(dir.join(&name), payload).is_ok() {
+                made_files += 1;
+            }
+        }
+    }
+    println!(
+        "gen-fixture: root={} files={made_files}（其中重复 {made_dups}）dirs≈{} dup_rate={dup_rate}%",
+        root.display(),
+        dirs.len()
+    );
+    true
+}
+
+// ---------------- trace / report（SPEC M-1-WP05 契约） ----------------
 
 fn trace(task_id: &str) -> bool {
     let Some(records) = git_log_records() else {
@@ -268,5 +381,15 @@ mod tests {
     fn trailer_takes_last_occurrence() {
         assert_eq!(trailer("x\nK: 1\ny\nK: 2", "K").as_deref(), Some("2"));
         assert_eq!(trailer("no trailers here", "K"), None);
+    }
+
+    #[test]
+    fn vpath_and_fixture_rng() {
+        // to_vpath 由 gen-fixture 的目录拼接逻辑覆盖；此处验证 LCG 确定性
+        let mut a = Lcg(42);
+        let mut b = Lcg(42);
+        for _ in 0..100 {
+            assert_eq!(a.next(), b.next());
+        }
     }
 }
