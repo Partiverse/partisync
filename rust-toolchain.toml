@@ -1,0 +1,6 @@
+# 可复现构建：钉住工具链（执行方案 §5.4 / ADR-0000）。
+# 升级工具链需要 ADR 记录并全量回归基准。
+[toolchain]
+channel = "1.93.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

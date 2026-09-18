@@ -1,0 +1,25 @@
+# cargo-deny 配置（执行方案 §5.1 依赖治理）。
+# 许可证白名单：与调研方案 §6 选型兼容；新增条目需 ADR。
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+version = 2
+yanked = "deny"

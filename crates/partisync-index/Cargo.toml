@@ -1,0 +1,9 @@
+[package]
+name = "partisync-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "检索引擎：tantivy 全文 + usearch 向量 + sidecar 管线调度"
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "partisync-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hub：分片元数据(fjall)、openraft 复制、联邦路由、分层与 EC"
+
+[lints]
+workspace = true

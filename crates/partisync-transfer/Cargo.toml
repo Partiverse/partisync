@@ -1,0 +1,9 @@
+[package]
+name = "partisync-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "传输引擎：设备/云/hub 三通道、MPU、泛化 delta、限速、分块流水线"
+
+[lints]
+workspace = true

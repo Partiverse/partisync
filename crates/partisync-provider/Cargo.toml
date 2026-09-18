@@ -1,0 +1,9 @@
+[package]
+name = "partisync-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider SPI：OpenDAL 适配、caps 能力协商、配置加密存储"
+
+[lints]
+workspace = true

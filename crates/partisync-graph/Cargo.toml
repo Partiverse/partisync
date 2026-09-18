@@ -1,0 +1,9 @@
+[package]
+name = "partisync-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PartiGraph 资产图谱：Entry/ContentIdentity/Tag DAG/Sidecar + SQLite/redb 仓储 + oplog"
+
+[lints]
+workspace = true

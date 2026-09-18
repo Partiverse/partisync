@@ -1,0 +1,9 @@
+[package]
+name = "partisync-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "同步引擎：watcher、scan_journal、域分离 oplog、bisync、Merkle 对账"
+
+[lints]
+workspace = true

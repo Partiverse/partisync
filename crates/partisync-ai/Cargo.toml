@@ -1,0 +1,9 @@
+[package]
+name = "partisync-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AI 层：fastembed/whisper 推理、MCP server(rmcp)、数据集出口、C2PA"
+
+[lints]
+workspace = true

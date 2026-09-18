@@ -1,0 +1,9 @@
+[package]
+name = "partisd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PartiSync 守护进程：组装 core/graph/cas/sync 等子系统并暴露 RPC"
+
+[lints]
+workspace = true

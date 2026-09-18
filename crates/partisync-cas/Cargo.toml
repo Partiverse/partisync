@@ -1,0 +1,9 @@
+[package]
+name = "partisync-cas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "内容仓库：fastcdc 分块、BLAKE3、块库、pack 打包、分代 GC"
+
+[lints]
+workspace = true

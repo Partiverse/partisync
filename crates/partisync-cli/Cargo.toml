@@ -1,0 +1,9 @@
+[package]
+name = "partisync-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PartiSync 命令行界面：init/index/ls/find/dedupe/serve/sync 等子命令"
+
+[lints]
+workspace = true

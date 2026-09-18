@@ -1,0 +1,9 @@
+[package]
+name = "partisync-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "共享值类型：ULID/HLC、错误分类学、ProviderCaps（M-1 起承载 ULID 演练）"
+
+[lints]
+workspace = true

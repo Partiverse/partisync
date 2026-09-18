@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/partisync-core",
+    "crates/partisync-graph",
+    "crates/partisync-cas",
+    "crates/partisync-provider",
+    "crates/partisync-transfer",
+    "crates/partisync-sync",
+    "crates/partisync-index",
+    "crates/partisync-ai",
+    "crates/partisync-gateway",
+    "crates/partisync-hub",
+    "crates/partisd",
+    "crates/partisync-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://example.invalid/partisync" # 占位：仓库远端待定（ADR-0000）
+
+[workspace.dependencies]
+proptest = "1"
+
+[workspace.lints.rust]
+# 安全政策（执行方案 §5.2）：默认全局禁止 unsafe；确需 unsafe 的 crate 必须在
+# 其自身 Cargo.toml 中以 ADR 为前提显式放宽（forbid 无法局部 allow，故放宽
+# 需改用 deny 并附 ADR 编号）。
+unsafe_code = "forbid"
+
+[profile.release]
+debug = 1 # 基准与线上诊断需要符号
