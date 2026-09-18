@@ -8,8 +8,18 @@ description = "共享值类型：ULID/HLC、错误分类学、ProviderCaps（M-1
 [dependencies]
 getrandom = { workspace = true } # ADR-0001：OS 熵源（Ulid::now）
 
+# lib 本身无 #[bench]；阻止 cargo 为 lib 生成默认 libtest bench 目标
+# （其会先于 criterion 目标运行并拒绝 --save-baseline，SPEC M0-WP00）
+[lib]
+bench = false
+
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true } # SPEC M0-WP00
+
+[[bench]]
+name = "core_bench"
+harness = false
 
 [lints]
 workspace = true
