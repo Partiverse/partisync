@@ -3,3 +3,4 @@
 .DS_Store
 coverage/
 *.profraw
+*.proptest-regressions

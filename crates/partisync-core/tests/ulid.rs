@@ -109,6 +109,23 @@ fn parse_is_case_insensitive() {
 }
 
 #[test]
+fn error_display_messages() {
+    // S5（D5 变异抽检 miss #1）：错误文案是用户可见契约，须有断言
+    assert_eq!(
+        UlidError::InvalidLength { len: 3 }.to_string(),
+        "invalid ULID length: 3 (expected 26)"
+    );
+    assert_eq!(
+        UlidError::InvalidChar('!').to_string(),
+        "invalid ULID character: '!'"
+    );
+    assert_eq!(
+        UlidError::Overflow.to_string(),
+        "ULID value overflows 128 bits (first char decodes > 7)"
+    );
+}
+
+#[test]
 fn field_extraction_roundtrip() {
     let ts = 0x1234_5678_9ABC_u64;
     let rnd = 0x0123_4567_89AB_CDEF_0123_u128;
