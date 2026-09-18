@@ -1,4 +1,7 @@
-//! 共享值类型：ULID/HLC、错误分类学、ProviderCaps（M-1 起承载 ULID 演练）
+//! 共享值类型与基础契约（crate 地图最底层，不依赖任何其他 partisync crate）。
 //!
-//! 骨架 crate（M-1 bootstrap，调研方案附录 A）。实现按里程碑推进，
-//! 行为契约见 docs/specs/ 对应工作包规格。
+//! 当前内容：[`ulid`]——PartiGraph 实体主键（SPEC M-1-WP07）。
+
+pub mod ulid;
+
+pub use ulid::{Ulid, UlidError};

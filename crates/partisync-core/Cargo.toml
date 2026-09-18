@@ -5,5 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "共享值类型：ULID/HLC、错误分类学、ProviderCaps（M-1 起承载 ULID 演练）"
 
+[dependencies]
+getrandom = { workspace = true } # ADR-0001：OS 熵源（Ulid::now）
+
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true
