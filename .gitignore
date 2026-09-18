@@ -5,3 +5,6 @@ coverage/
 *.profraw
 *.proptest-regressions
 mutants.out*/
+partisync.db*
+partisync.cas/
+mutants.out*/

@@ -35,9 +35,18 @@ async fn p4_put_same_content_increments_refcount() {
     let data = b"identical chunk payload";
     let h1 = s.put(data).await.unwrap();
     let st1 = s.stats().await.unwrap();
+    assert_eq!(
+        st1.saved_bytes, 0,
+        "单引用无节省（绝对值断言：-/+ 变异的击杀点）"
+    );
     let h2 = s.put(data).await.unwrap();
     assert_eq!(h1, h2);
     let st2 = s.stats().await.unwrap();
+    assert_eq!(
+        st2.saved_bytes,
+        data.len() as i64,
+        "两引用一唯一块 ⇒ 恰省一份"
+    );
     assert_eq!(st2.chunks, st1.chunks, "不新增块");
     assert_eq!(st2.refs, st1.refs + 1, "refcount+1");
     assert_eq!(st2.saved_bytes, st1.saved_bytes + data.len() as i64);
@@ -56,7 +65,11 @@ async fn p4_decr_to_zero_deletes_object() {
     assert!(!obj.exists(), "归零后对象删除");
     let st = s.stats().await.unwrap();
     assert_eq!((st.chunks, st.refs), (0, 0));
-    assert!(s.get(&h).await.is_err(), "删除后 get 报错");
+    let err = s.get(&h).await.unwrap_err();
+    assert!(
+        err.to_string().contains("块不存在"),
+        "删除后 get 的错误应区分 NotFound（当前: {err}）"
+    );
     let h2 = s.put(b"to be deleted").await.unwrap();
     assert_eq!(h, h2, "内容寻址：重建得同哈希");
     std::fs::remove_dir_all(&dir).ok();
