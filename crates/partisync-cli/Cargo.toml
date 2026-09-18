@@ -5,5 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "PartiSync 命令行界面：init/index/ls/find/dedupe/serve/sync 等子命令"
 
+[dependencies]
+partisync-core = { path = "../partisync-core" }
+partisync-graph = { path = "../partisync-graph" }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+
 [lints]
 workspace = true

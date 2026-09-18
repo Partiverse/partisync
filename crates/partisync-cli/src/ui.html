@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PartiSync · 资产图谱演示</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #21262d;
+    --fg: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --amber: #d29922; --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px 0; }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .5px; }
+  header .logo { color: var(--accent); font-family: var(--mono); font-weight: 700; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 48px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: var(--dim); font-size: 12px; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; font-family: var(--mono); }
+  .card .value.green { color: var(--green); }
+  .card .hint { color: var(--dim); font-size: 11px; margin-top: 2px; }
+
+  nav.tabs { display: flex; gap: 4px; margin-top: 24px; border-bottom: 1px solid var(--border); }
+  nav.tabs button { background: none; border: none; color: var(--dim); padding: 8px 16px;
+                    cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; }
+  nav.tabs button.active { color: var(--fg); border-bottom-color: var(--accent); }
+
+  .crumbs { padding: 12px 0; color: var(--dim); font-family: var(--mono); font-size: 13px; }
+  .crumbs a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .crumbs .sep { margin: 0 6px; color: var(--border); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+          border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th { text-align: left; color: var(--dim); font-weight: 500; font-size: 12px;
+       padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  tr.row-dir { cursor: pointer; }
+  tr.row-dir:hover td { background: #1c2330; }
+  tr.row-file:hover td { background: #161d29; }
+  .icon-dir { color: var(--accent); } .icon-file { color: var(--dim); }
+  td.hash { color: var(--dim); }
+
+  .searchbar { display: flex; gap: 8px; margin: 12px 0; }
+  .searchbar input { flex: 1; background: var(--panel); border: 1px solid var(--border);
+                     color: var(--fg); border-radius: 8px; padding: 8px 12px; font-size: 14px; outline: none; }
+  .searchbar input:focus { border-color: var(--accent); }
+  .searchbar button { background: var(--accent); border: none; color: #0d1117; font-weight: 600;
+                      border-radius: 8px; padding: 8px 20px; cursor: pointer; }
+
+  .dup { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+         margin-bottom: 14px; overflow: hidden; }
+  .dup .head { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex;
+               justify-content: space-between; align-items: center; }
+  .dup .hash { font-family: var(--mono); color: var(--amber); font-size: 12px; }
+  .dup .badge { color: var(--amber); font-size: 12px; white-space: nowrap; }
+  .dup ul { margin: 0; padding: 8px 14px; list-style: none; }
+  .dup li { font-family: var(--mono); font-size: 13px; padding: 3px 0; color: var(--dim); }
+
+  .empty { color: var(--dim); text-align: center; padding: 40px 0; }
+  footer { color: var(--dim); font-size: 11px; text-align: center; margin-top: 32px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="logo">partisync</span> 资产图谱</h1>
+  <span class="sub" id="db-badge">M0 演示面 · 本机</span>
+</header>
+<div class="wrap">
+  <div class="cards" id="cards"></div>
+
+  <nav class="tabs">
+    <button data-tab="browse" class="active">浏览</button>
+    <button data-tab="search">搜索</button>
+    <button data-tab="dups">重复内容</button>
+  </nav>
+
+  <div id="view-browse">
+    <div class="crumbs" id="crumbs"></div>
+    <table>
+      <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:110px">大小</th>
+        <th style="width:170px">修改时间</th><th>内容身份</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div id="view-search" style="display:none">
+    <div class="searchbar">
+      <input id="q" placeholder="按文件名搜索（如 png、report、f3…）">
+      <button onclick="doSearch()">搜索</button>
+    </div>
+    <table><thead><tr><th>名称</th><th>路径</th><th style="width:110px">大小</th></tr></thead>
+      <tbody id="srows"></tbody></table>
+  </div>
+
+  <div id="view-dups" style="display:none"></div>
+
+  <footer>PartiSync v0.1（M0 演示）· 内容身份 = BLAKE3 · 绑定 127.0.0.1，公网暴露需鉴权（M1 范围）</footer>
+</div>
+<script>
+let curPath = "/";
+const $ = (id) => document.getElementById(id);
+
+function sizeFmt(n) {
+  const u = ["B","KB","MB","GB","TB"]; let v = n, i = 0;
+  while (v >= 1024 && i < 4) { v /= 1024; i++; }
+  return i === 0 ? `${n} B` : `${v.toFixed(1)} ${u[i]}`;
+}
+function timeFmt(ns) {
+  if (!ns) return "—";
+  const d = new Date(ns / 1e6);
+  return d.toLocaleString("zh-CN", { hour12: false });
+}
+async function j(url) { const r = await fetch(url); if (!r.ok) throw new Error(await r.text()); return r.json(); }
+
+async function loadStats() {
+  const s = await j("/api/stats");
+  $("cards").innerHTML = `
+    <div class="card"><div class="label">文件</div><div class="value">${s.files}</div></div>
+    <div class="card"><div class="label">目录</div><div class="value">${s.dirs}</div></div>
+    <div class="card"><div class="label">总容量</div><div class="value">${sizeFmt(s.total_bytes)}</div></div>
+    <div class="card"><div class="label">唯一内容</div><div class="value">${s.unique_contents}</div>
+      <div class="hint">${sizeFmt(s.unique_bytes)}</div></div>
+    <div class="card"><div class="label">去重节省</div><div class="value green">${sizeFmt(s.saved_bytes)}</div>
+      <div class="hint">${s.total_bytes ? (100*s.saved_bytes/s.total_bytes).toFixed(1) : 0}% 的字节是重复的</div></div>
+    <div class="card"><div class="label">重复组</div><div class="value">${s.duplicate_groups}</div></div>`;
+}
+
+async function browse(path) {
+  curPath = path || "/";
+  const [rows, crumbs] = await Promise.all([
+    j(`/api/list?path=${encodeURIComponent(curPath)}`),
+    j(`/api/breadcrumb?path=${encodeURIComponent(curPath)}`),
+  ]);
+  $("crumbs").innerHTML = crumbs.map((e, i) =>
+    `<a onclick="browse('${e.path.replace(/'/g,"\\'")}')">${e.name === "/" ? "根" : e.name}</a>`
+  ).join(`<span class="sep">›</span>`) + `<span class="sep">›</span><b>${curPath === "/" ? "根" : curPath.split("/").pop()}</b>`;
+  $("rows").innerHTML = rows.length ? rows.map(e => {
+    const dir = e.kind === 1;
+    const icon = dir ? "▸" : "·";
+    const cls = dir ? "row-dir" : "row-file";
+    const nav = dir ? ` onclick="browse('${e.path.replace(/'/g,"\\'")}')" : ""` : "";
+    return `<tr class="${cls}"${dir ? `onclick="browse('${e.path.replace(/'/g,"\\'")}')"` : ""}>
+      <td class="${dir ? "icon-dir" : "icon-file"}">${icon}</td>
+      <td>${e.name}</td><td>${dir ? "—" : sizeFmt(e.size)}</td>
+      <td>${timeFmt(e.mtime_ns)}</td>
+      <td class="hash">${e.content_id ? e.content_id.slice(0, 8) + "…" : ""}</td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="empty">空目录</td></tr>`;
+}
+
+async function doSearch() {
+  const q = $("q").value.trim();
+  const rows = q ? await j(`/api/search?q=${encodeURIComponent(q)}`) : [];
+  $("srows").innerHTML = rows.length ? rows.map(e =>
+    `<tr class="row-file"><td>${e.name}</td><td class="hash">${e.path}</td><td>${sizeFmt(e.size)}</td></tr>`
+  ).join("") : `<tr><td colspan="3" class="empty">${q ? "无结果" : "输入关键词"}</td></tr>`;
+}
+
+async function loadDups() {
+  const groups = await j("/api/duplicates?limit=50");
+  $("view-dups").innerHTML = groups.length ? groups.map(g => `
+    <div class="dup">
+      <div class="head">
+        <span class="hash">content:${g.content_id.slice(0, 16)}…</span>
+        <span class="badge">${g.copies.length} 份副本 · 每份 ${sizeFmt(g.size)}</span>
+      </div>
+      <ul>${g.copies.map(c => `<li>${c.path}</li>`).join("")}</ul>
+    </div>`).join("") : `<div class="empty">没有发现重复内容</div>`;
+}
+
+document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav.tabs button").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  const t = b.dataset.tab;
+  ["browse", "search", "dups"].forEach(v => $(`view-${v}`).style.display = v === t ? "" : "none");
+  if (t === "browse") browse(curPath);
+  if (t === "dups") loadDups();
+});
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+
+loadStats();
+browse("/");
+</script>
+</body>
+</html>
