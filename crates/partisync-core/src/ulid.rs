@@ -80,7 +80,8 @@ impl Ulid {
     /// 当前时刻 + OS 熵生成。
     ///
     /// 不保证同毫秒单调（排序需求由 oplog/HLC 承担，SPEC 非目标）。
-    /// OS 熵不可用属不可恢复环境错误，直接 panic。
+    /// OS 熵不可用属不可恢复环境错误，直接 panic；
+    /// 系统时钟早于 Unix 纪元时时间戳饱和为 0（AI 审查 F2：显式文档化）。
     #[must_use]
     pub fn now() -> Ulid {
         let ms = SystemTime::now()
