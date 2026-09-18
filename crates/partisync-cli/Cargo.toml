@@ -9,6 +9,10 @@ description = "PartiSync 命令行界面：init/index/ls/find/dedupe/serve/sync 
 partisync-core = { path = "../partisync-core" }
 partisync-graph = { path = "../partisync-graph" }
 partisync-cas = { path = "../partisync-cas" }
+md-5 = { workspace = true } # S3 ETag
+base64 = "0.22"
+percent-encoding = "2.3"
+axum-extra = { version = "0.12", features = ["query"], default-features = false }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
