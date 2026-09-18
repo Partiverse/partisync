@@ -147,3 +147,37 @@ fn hash_intersect_symmetry_and_specificity() {
     let blake3_only = caps((false, false, false, true), MtimePrecision::None);
     assert!(blake3_only.intersect(blake3_only));
 }
+
+#[test]
+fn hash_intersect_exhaustive_two_bit_truth_table() {
+    // S5（D5 变异抽检）：intersect 的布尔算子变异缺测试区分。
+    // 对 {md5, sha256} 两 bit 穷举 4×4 组合，期望值 = 逐哈希 AND 的逻辑或
+    // ——任意 `||`↔`&&` 变异都改变至少一个组合的结果。
+    for l_md5 in [false, true] {
+        for l_sha in [false, true] {
+            for r_md5 in [false, true] {
+                for r_sha in [false, true] {
+                    let l = caps((l_md5, l_sha, false, false), MtimePrecision::None);
+                    let r = caps((r_md5, r_sha, false, false), MtimePrecision::None);
+                    let expected = (l_md5 && r_md5) || (l_sha && r_sha);
+                    assert_eq!(
+                        l.intersect(r),
+                        expected,
+                        "l=({l_md5},{l_sha}) r=({r_md5},{r_sha})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn hash_intersect_crc_and_blake3_terms() {
+    // 覆盖第 3/4 项：单独命中与混合命中
+    let crc = caps((false, false, true, false), MtimePrecision::None);
+    let blake = caps((false, false, false, true), MtimePrecision::None);
+    let crc_blake = caps((false, false, true, true), MtimePrecision::None);
+    assert!(!crc.intersect(blake));
+    assert!(crc.intersect(crc_blake));
+    assert!(blake.intersect(crc_blake));
+}

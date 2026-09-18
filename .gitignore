@@ -4,3 +4,4 @@
 coverage/
 *.profraw
 *.proptest-regressions
+mutants.out*/

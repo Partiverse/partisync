@@ -1,8 +1,5 @@
-# cargo-mutants 配置（SPEC M0-WP00，D5 变异抽检；键名经 v27.1.0 src/config.rs 核验）。
+# cargo-mutants 配置（SPEC M0-WP00，D5 变异抽检；键名经 v27.1.0 src/config.rs 核验，扁平结构）。
 # 范围：随实现落地逐 crate 纳入；当前仅 partisync-core（M0 门槛 ≥60%）。
-# 运行：cargo mutants --in-place --timeout 60（约 2 分钟）
+# 运行：cargo mutants --in-place（约 3 分钟）
 examine_globs = ["crates/partisync-core/src/**/*.rs"]
-
-[timeout]
-# 单变异体测试超时（秒）；proptest 套件较大，放宽避免误报 timeout
 minimum_test_timeout = 60
