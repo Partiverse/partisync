@@ -29,9 +29,12 @@ async fn main() {
         Some("watch") => watch_cmd(&args[1..]).await,
         Some("resume") => resume_cmd(&args[1..]).await,
         Some("jobs") => jobs_cmd(&args[1..]).await,
+        Some("ls") => ls_cmd(&args[1..]).await,
+        Some("find") => find_cmd(&args[1..]).await,
+        Some("dedupe") => dedupe_cmd(&args[1..]).await,
         _ => {
             eprintln!(
-                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs",
+                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]",
                 env!("CARGO_PKG_VERSION")
             );
             2
@@ -259,6 +262,104 @@ async fn jobs_cmd(_args: &[String]) -> i32 {
                     r.checkpoint
                 );
             }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+async fn ls_cmd(args: &[String]) -> i32 {
+    let Some(path) = args.first().filter(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("用法: partisync ls <path> [--db <path>]");
+        return 2;
+    };
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let Ok(store) = open_db(&db).await else {
+        return 1;
+    };
+    match store.children(&path).await {
+        Ok(rows) => {
+            if rows.is_empty() {
+                println!("（空目录或路径不存在）");
+                return 1;
+            }
+            println!("{:<8} {:>12}  {:<8}  {}", "TYPE", "SIZE", "CONTENT", "NAME");
+            for e in rows {
+                let (t, size, ch) = if e.kind == 1 {
+                    ("dir", "—".to_string(), "—".to_string())
+                } else {
+                    (
+                        "file",
+                        fmt_bytes(e.size),
+                        e.content_id.map_or("—".into(), |c| c[..8].to_string()),
+                    )
+                };
+                println!("{:<8} {:>12}  {:<8}  {}", t, size, ch, e.name);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+async fn find_cmd(args: &[String]) -> i32 {
+    let Some(q) = args.first().filter(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("用法: partisync find <q> [--db <path>]");
+        return 2;
+    };
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let Ok(store) = open_db(&db).await else {
+        return 1;
+    };
+    match store.search(&q, 200).await {
+        Ok(rows) => {
+            let n = rows.len();
+            for e in &rows {
+                println!("{:>12}  {}", fmt_bytes(e.size), e.path);
+            }
+            println!("（{n} 条，上限 200）");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+async fn dedupe_cmd(args: &[String]) -> i32 {
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let top = flag_value(args, "--top")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let Ok(store) = open_db(&db).await else {
+        return 1;
+    };
+    match store.duplicates(top).await {
+        Ok(groups) => {
+            let saved = store.stats().await.map(|s| s.saved_bytes).unwrap_or(0);
+            for g in &groups {
+                println!(
+                    "{} × {}  [{}]",
+                    g.copies.len(),
+                    fmt_bytes(g.size),
+                    &g.content_id[..12]
+                );
+                for c in &g.copies {
+                    println!("    {}", c.path);
+                }
+            }
+            println!(
+                "── 共 {} 组（显示前 {top}）；文件级去重节省 {}",
+                groups.len(),
+                fmt_bytes(saved)
+            );
             0
         }
         Err(e) => {

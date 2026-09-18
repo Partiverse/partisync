@@ -59,9 +59,7 @@ async fn api_cas_stats(State(app): State<App>) -> Result<Json<CasStats>, (Status
     app.cas.stats().await.map(Json).map_err(err500)
 }
 
-async fn api_jobs(
-    State(app): State<App>,
-) -> Result<Json<Vec<jobs::JobRow>>, (StatusCode, String)> {
+async fn api_jobs(State(app): State<App>) -> Result<Json<Vec<jobs::JobRow>>, (StatusCode, String)> {
     jobs::list(&app.store).await.map(Json).map_err(err500)
 }
 
