@@ -33,7 +33,11 @@ fn from_raw_roundtrip() {
 fn tick_wall_advance_resets_logic() {
     let mut h = Hlc::from_wall(1, 100);
     h.tick(200).unwrap();
-    assert_eq!((h.phys_ms(), h.logic()), (200, 0), "墙钟前进 ⇒ phys 更新、logic 归零");
+    assert_eq!(
+        (h.phys_ms(), h.logic()),
+        (200, 0),
+        "墙钟前进 ⇒ phys 更新、logic 归零"
+    );
 }
 
 #[test]
@@ -43,7 +47,11 @@ fn tick_wall_regression_keeps_phys_and_bumps_logic() {
     h.tick(100).unwrap();
     assert_eq!((h.phys_ms(), h.logic()), (100, 1), "同毫秒 ⇒ logic+1");
     h.tick(50).unwrap();
-    assert_eq!((h.phys_ms(), h.logic()), (100, 2), "回拨 ⇒ 保持 phys、logic 续增");
+    assert_eq!(
+        (h.phys_ms(), h.logic()),
+        (100, 2),
+        "回拨 ⇒ 保持 phys、logic 续增"
+    );
 }
 
 #[test]
@@ -73,19 +81,36 @@ fn tick_overflow_returns_err() {
 
 #[test]
 fn recv_merge_semantics() {
-    // c = max(w, phys, r.phys) 三分支逐一验证
+    // c = max(w, phys, r.phys) 四分支逐一验证（v1.1：wall 领先分支由属性测试发现）
     let mut a = Hlc::from_wall(1, 100);
     let r = Hlc::from_raw(2, 300, 5);
     a.recv(200, r).unwrap();
-    assert_eq!((a.phys_ms(), a.logic()), (300, 6), "r.phys 最大 ⇒ logic = r.logic+1");
+    assert_eq!(
+        (a.phys_ms(), a.logic()),
+        (300, 6),
+        "r.phys 最大 ⇒ logic = r.logic+1"
+    );
 
     let mut b = Hlc::from_wall(1, 500);
     b.recv(200, r).unwrap();
-    assert_eq!((b.phys_ms(), b.logic()), (500, 1), "自身 phys 最大 ⇒ logic+1");
+    assert_eq!(
+        (b.phys_ms(), b.logic()),
+        (500, 1),
+        "自身 phys 最大 ⇒ logic+1"
+    );
 
     let mut c = Hlc::from_raw(1, 300, 7);
     c.recv(200, Hlc::from_raw(2, 300, 5)).unwrap();
     assert_eq!((c.phys_ms(), c.logic()), (300, 8), "同 phys ⇒ max(logic)+1");
+
+    // v1.1 新增：wall 同时领先双方 ⇒ 新纪元 logic = 1（接收事件本身计数）
+    let mut d = Hlc::from_wall(1, 100);
+    d.recv(900, Hlc::from_raw(2, 300, 5)).unwrap();
+    assert_eq!(
+        (d.phys_ms(), d.logic()),
+        (900, 1),
+        "wall 领先 ⇒ phys=wall、logic=1"
+    );
 }
 
 #[test]
@@ -101,6 +126,8 @@ fn recv_overflow_returns_err() {
     let mut a = Hlc::from_raw(1, 100, u32::MAX);
     let r = Hlc::from_raw(2, 100, 5);
     assert_eq!(a.recv(100, r), Err(HlcError::CounterOverflow));
+    // 操作原子性：失败后状态不变（同 tick_overflow_returns_err）
+    assert_eq!((a.phys_ms(), a.logic()), (100, u32::MAX));
 }
 
 // ---------- 跨设备全序（P5 后半） ----------

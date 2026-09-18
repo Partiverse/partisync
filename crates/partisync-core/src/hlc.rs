@@ -1,6 +1,10 @@
 //! HLC——混合逻辑时钟（SPEC M0-WP01；P5：严格单调 + 跨设备全序）。
 //!
-//! **本文件当前为 S3 测试先行的桩实现**（SOP 执行方案 §3.1）。
+//! 语义（Lamport/Mattern 式定义，Spacedrive HLC 先例）：
+//! - `tick(w)`：墙钟前进 ⇒ `phys=w, logic=0`；否则 `logic+=1`（回拨靠逻辑位保序）；
+//! - `recv(w, r)`：`c = max(w, phys, r.phys)`；logic 按 c 的来源分支合并；
+//! - 每次操作后 self 严格大于操作前，且 recv 后严格大于 remote（oplog 去重需要）；
+//! - `device` 参与排序键 ⇒ 跨设备全序（对端须持不同 device id，由 oplog 注册表保证）。
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Hlc {
@@ -11,6 +15,7 @@ pub struct Hlc {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HlcError {
+    /// 同一 phys 毫秒内逻辑位打满 2³²（调用方按 Fatal 分类处置）。
     CounterOverflow,
 }
 
@@ -43,12 +48,36 @@ impl Hlc {
         }
     }
 
-    pub fn tick(&mut self, _wall_ms: u64) -> Result<(), HlcError> {
-        Ok(()) // S4
+    /// 本地事件。操作原子：溢出时返回 Err 且状态不变。
+    pub fn tick(&mut self, wall_ms: u64) -> Result<(), HlcError> {
+        if wall_ms > self.phys_ms {
+            self.phys_ms = wall_ms;
+            self.logic = 0;
+            return Ok(());
+        }
+        self.logic = self.logic.checked_add(1).ok_or(HlcError::CounterOverflow)?;
+        Ok(())
     }
 
-    pub fn recv(&mut self, _wall_ms: u64, _remote: Hlc) -> Result<(), HlcError> {
-        Ok(()) // S4
+    /// 远端事件合并。操作原子：溢出时返回 Err 且状态不变。
+    pub fn recv(&mut self, wall_ms: u64, remote: Hlc) -> Result<(), HlcError> {
+        let c_phys = wall_ms.max(self.phys_ms).max(remote.phys_ms);
+        // SPEC v1.1 修正：c 的来源有四种——self、remote、双方相等、**仅 wall 领先**
+        // （v1.0 契约漏数了 wall 这个操作数，由 P5 属性测试发现）
+        let next_logic = if c_phys > self.phys_ms && c_phys > remote.phys_ms {
+            0 // 仅墙钟领先 ⇒ 新纪元，logic 归零
+        } else if c_phys == self.phys_ms && c_phys == remote.phys_ms {
+            self.logic.max(remote.logic)
+        } else if c_phys == self.phys_ms {
+            self.logic
+        } else {
+            remote.logic
+        };
+        // 先验证再提交，保证原子性（溢出时 self 不变）
+        let committed = next_logic.checked_add(1).ok_or(HlcError::CounterOverflow)?;
+        self.phys_ms = c_phys;
+        self.logic = committed;
+        Ok(())
     }
 
     #[must_use]
