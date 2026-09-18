@@ -114,7 +114,15 @@ async fn watch_cmd(args: &[String]) -> i32 {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1000),
     );
-    let root = PathBuf::from(root);
+    // macOS /tmp 为符号链接：FSEvents 上报规范路径，必须先规范化（否则事件被
+    // to_vpath 静默丢弃——本次实测踩坑）
+    let root = PathBuf::from(root)
+        .canonicalize()
+        .map_err(|e| {
+            eprintln!("error: 解析路径: {e}");
+            std::process::exit(1);
+        })
+        .unwrap();
     let store = match open_db(&db).await {
         Ok(s) => s,
         Err(e) => {

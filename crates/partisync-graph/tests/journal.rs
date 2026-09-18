@@ -49,7 +49,11 @@ async fn apply_lifecycle_and_replay_idempotent() {
     );
     let st1 = store.stats().await.unwrap();
     assert_eq!(st1.files, st0.files, "-1 +1 净零");
-    assert_eq!(st1.unique_contents, st0.unique_contents + 1, "-1 +1 净零");
+    // 孤儿清理语义：a 的旧内容随 upsert 清除 → +新(a') +新(new.txt) −旧(a) −b = 净 0
+    assert_eq!(
+        st1.unique_contents, st0.unique_contents,
+        "改/增/删相抵（含孤儿清理）"
+    );
     // 修改生效：a.txt 的 content 已更新（大小变化可查）
     let a = store.entry_by_path("/a.txt").await.unwrap().unwrap();
     assert_eq!(a.size, 12);

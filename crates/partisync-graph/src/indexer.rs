@@ -85,9 +85,18 @@ pub async fn index_path(
             report.dirs += 1;
         } else if meta.is_file() {
             let hash = content_hash_file(entry.path()).await?;
+            // 内容未变的既有条目跳过分块重入库（否则 put 的引用计数在幂等重跑中膨胀
+            // ——本次实测踩坑：43 refs → 86）
+            let unchanged = match store.entry_by_path(&vpath).await? {
+                Some(prev) => prev.content_id.as_deref() == Some(hash.as_str()),
+                None => false,
+            };
             // 大文件分块入库（块级去重/delta 的载体，SPEC M0-WP03 §3）
             let mut chunk_root = None;
-            if let Some(cas) = cas.filter(|_| meta.len() as usize >= chunk_threshold()) {
+            if let Some(cas) = cas
+                .filter(|_| meta.len() as usize >= chunk_threshold())
+                .filter(|_| !unchanged)
+            {
                 let data = tokio::fs::read(entry.path())
                     .await
                     .map_err(|e| io_err("读文件分块", e))?;

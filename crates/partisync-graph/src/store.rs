@@ -166,6 +166,15 @@ impl Store {
             .await
             .map_err(|e| db_err("查询条目", e))?
         {
+            // 旧内容孤儿清理：内容变化后旧 content 行若无引用则删除
+            // （否则 Σcontent 虚增，saved_bytes 变负——实测踩坑）
+            let old_content: Option<Option<String>> =
+                sqlx::query_scalar("SELECT content_id FROM entry WHERE path = ?")
+                    .bind(path)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| db_err("查旧内容", e))?;
+            let new_hash = content.map(|(h, _)| h);
             if let Some((hash, csize)) = content {
                 sqlx::query("INSERT OR IGNORE INTO content (id, size) VALUES (?, ?)")
                     .bind(hash)
@@ -180,12 +189,24 @@ impl Store {
             )
             .bind(i64::try_from(size).unwrap_or(i64::MAX))
             .bind(i64::try_from(mtime_ns).unwrap_or(i64::MAX))
-            .bind(content.map(|(h, _)| h))
+            .bind(new_hash)
             .bind(chunk_root)
             .bind(path)
             .execute(&self.pool)
             .await
             .map_err(|e| db_err("更新条目", e))?;
+            if let Some(old) = old_content.flatten() {
+                if new_hash != Some(old.as_str()) {
+                    sqlx::query(
+                        "DELETE FROM content WHERE id = ?
+                         AND NOT EXISTS (SELECT 1 FROM entry WHERE content_id = content.id)",
+                    )
+                    .bind(&old)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| db_err("清理旧内容", e))?;
+                }
+            }
             return Ok(id);
         }
         if let Some((hash, csize)) = content {
