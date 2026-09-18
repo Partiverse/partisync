@@ -64,6 +64,11 @@ fn db_err(what: &str, e: sqlx::Error) -> PartisyError {
 }
 
 impl Store {
+    /// 供 journal/watch 等同 crate 模块直接执行 SQL 的池访问。
+    pub(crate) fn pool_ref(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// 打开（或创建）库并执行幂等迁移。
     ///
     /// # Errors
@@ -153,13 +158,34 @@ impl Store {
         content: Option<(&str, u64)>, // (blake3 hex, size)
         chunk_root: Option<&str>,     // v2：大文件块清单根
     ) -> Result<String, PartisyError> {
-        // 幂等：path 唯一，重跑直接返回（索引器幂等验收依赖此处）
+        // upsert（SPEC M0-WP04 修订）：path 已存在时保留 id 与位置、刷新可变字段
+        // （幂等 + 新鲜度；索引器重跑与 watch 应用共用此路径）
         if let Some(id) = sqlx::query_scalar::<_, String>("SELECT id FROM entry WHERE path = ?")
             .bind(path)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| db_err("查询条目", e))?
         {
+            if let Some((hash, csize)) = content {
+                sqlx::query("INSERT OR IGNORE INTO content (id, size) VALUES (?, ?)")
+                    .bind(hash)
+                    .bind(i64::try_from(csize).unwrap_or(i64::MAX))
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| db_err("登记内容", e))?;
+            }
+            sqlx::query(
+                "UPDATE entry SET size = ?, mtime_ns = ?, content_id = ?, chunk_root = ?
+                 WHERE path = ?",
+            )
+            .bind(i64::try_from(size).unwrap_or(i64::MAX))
+            .bind(i64::try_from(mtime_ns).unwrap_or(i64::MAX))
+            .bind(content.map(|(h, _)| h))
+            .bind(chunk_root)
+            .bind(path)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("更新条目", e))?;
             return Ok(id);
         }
         if let Some((hash, csize)) = content {
@@ -248,6 +274,61 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| db_err("祖先链", e))
+    }
+
+    /// 删除条目（级联：子树整体 + 相关闭包行；无引用的 content 行随删；
+    /// 块库孤儿块留待 M3 GC——SPEC M0-WP03 风险节）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn remove_entry(&self, path: &str) -> Result<u64, PartisyError> {
+        let subtree: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT e.id, e.content_id FROM entry e
+             JOIN entry_closure c ON e.id = c.descendant
+             WHERE c.ancestor = (SELECT id FROM entry WHERE path = ?)
+             ORDER BY c.depth DESC", // 深度降序：子先于父删（parent_id FK）
+        )
+        .bind(path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("子树收集", e))?;
+        if subtree.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<&str> = subtree.iter().map(|(id, _)| id.as_str()).collect();
+        // 先删 entry（content 清理需以「entry 已删」为前提）
+        let mut deleted = 0u64;
+        for id in &ids {
+            deleted += sqlx::query("DELETE FROM entry WHERE id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("删除条目", e))?
+                .rows_affected();
+        }
+        // 闭包行：涉及子树任一节点的全部行
+        for id in &ids {
+            sqlx::query("DELETE FROM entry_closure WHERE descendant = ? OR ancestor = ?")
+                .bind(id)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("删除闭包", e))?;
+        }
+        // 孤儿 content：无 entry 引用者删行
+        for (_, content_id) in &subtree {
+            if let Some(cid) = content_id {
+                sqlx::query(
+                    "DELETE FROM content WHERE id = ?
+                     AND NOT EXISTS (SELECT 1 FROM entry WHERE content_id = content.id)",
+                )
+                .bind(cid)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("清理内容", e))?;
+            }
+        }
+        Ok(deleted)
     }
 
     /// 名称子串检索（LIKE，上限防全表外溢）。

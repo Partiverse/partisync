@@ -53,3 +53,11 @@ CREATE TABLE IF NOT EXISTS entry_closure (
 CREATE INDEX IF NOT EXISTS idx_closure_desc ON entry_closure(descendant);
 
 -- v2 迁移（旧库升级；新库此列为已建，ALTER 报 duplicate 可忽略——由迁移代码吞掉）
+
+-- v3（M0-WP04）：scan_journal 事件队列——应用成功后删行（队列语义）
+CREATE TABLE IF NOT EXISTS scan_journal (
+    seq   INTEGER PRIMARY KEY AUTOINCREMENT,
+    path  TEXT NOT NULL,
+    kind  INTEGER NOT NULL,      -- 0=created, 1=modified, 2=removed
+    at_ns INTEGER NOT NULL
+);
