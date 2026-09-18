@@ -4,6 +4,7 @@
 //! Tag DAG/Sidecar 归 M4，oplog 归 M2。
 
 pub mod indexer;
+pub mod jobs;
 pub mod journal;
 pub mod store;
 pub mod watch;

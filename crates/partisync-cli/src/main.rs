@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use partisync_cas::ChunkStore;
 use partisync_core::error::PartisyError;
-use partisync_graph::indexer::index_path;
+use partisync_graph::indexer::index_path_job;
+use partisync_graph::jobs::{self, JobCtx};
 use partisync_graph::store::Store;
 use partisync_graph::watch::{self, WatchConfig};
 
@@ -26,9 +27,11 @@ async fn main() {
         Some("index") => index_cmd(&args[1..]).await,
         Some("ui") => ui_cmd(&args[1..]).await,
         Some("watch") => watch_cmd(&args[1..]).await,
+        Some("resume") => resume_cmd(&args[1..]).await,
+        Some("jobs") => jobs_cmd(&args[1..]).await,
         _ => {
             eprintln!(
-                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]",
+                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs",
                 env!("CARGO_PKG_VERSION")
             );
             2
@@ -72,8 +75,43 @@ async fn index_cmd(args: &[String]) -> i32 {
             return 1;
         }
     };
-    match index_path(&store, Some(&cas), &PathBuf::from(root)).await {
-        Ok(report) => {
+    // 作业化：index = 可恢复的持久作业（SPEC M0-WP05）
+    let job_id = match jobs::create(&store, "index", &root).await {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let _ = jobs::start(&store, &job_id).await;
+    let mut ctx = JobCtx {
+        id: job_id.clone(),
+        skip_up_to: None,
+        stop_after: None,
+        done: 0,
+    };
+    let run_store = store.clone();
+    let root_pb = PathBuf::from(&root);
+    let run = tokio::task::spawn(async move {
+        let res = index_path_job(&run_store, Some(&cas), &root_pb, Some(&mut ctx)).await;
+        (res, ctx.done)
+    });
+    let result = tokio::select! {
+        r = run => match r {
+            Ok((inner, done)) => inner.map(|rep| (rep, done)),
+            Err(e) => Err(PartisyError::with_source(
+                partisync_core::error::Severity::Fatal,
+                Box::new(e),
+            )),
+        },
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nindex: 收到 Ctrl-C，进度已持久化（checkpoint 每 200 文件提交）");
+            Err(PartisyError::new(partisync_core::error::Severity::Interrupted))
+        }
+    };
+    match result {
+        Ok((report, done)) => {
+            let _ = jobs::complete(&store, &job_id, done).await;
             let stats = store
                 .stats()
                 .await
@@ -90,13 +128,141 @@ async fn index_cmd(args: &[String]) -> i32 {
                 .map(|_| 0)
                 .unwrap_or(1);
             println!(
-                "index 完成: root={root} db={db} cas={cas_dir}\n  本次: 文件 {} 目录 {} 分块 {} 跳过符号链接 {}",
+                "index 完成: root={root} db={db} cas={cas_dir} job={job_id}\n  本次: 文件 {} 目录 {} 分块 {} 跳过符号链接 {}",
                 report.files, report.dirs, report.chunked_files, report.skipped_symlinks
             );
             stats
         }
+        Err(e) if e.severity == partisync_core::error::Severity::Interrupted => {
+            let done = jobs::get(&store, &job_id)
+                .await
+                .map(|r| r.done_files)
+                .unwrap_or(0);
+            let _ = jobs::mark_interrupted(&store, &job_id, done as u64).await;
+            eprintln!(
+                "index 中断: 已提交 {done} 个文件（job={job_id}）；恢复: partisync resume --job {job_id}"
+            );
+            130
+        }
         Err(e) => {
+            let _ = jobs::fail(&store, &job_id, &e.to_string()).await;
             eprintln!("index 失败: {e}（severity={:?}）", e.severity);
+            1
+        }
+    }
+}
+
+async fn resume_cmd(args: &[String]) -> i32 {
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let cas_dir = flag_value(args, "--cas").unwrap_or_else(|| DEFAULT_CAS.into());
+    let store = match open_db(&db).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let cas = match ChunkStore::open(&PathBuf::from(&cas_dir)).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: 块库: {e}");
+            return 1;
+        }
+    };
+    let row = match flag_value(args, "--job") {
+        Some(id) => jobs::get(&store, &id).await,
+        None => jobs::latest_resumable(&store).await.and_then(|o| {
+            o.map(|r| Ok(r)).unwrap_or_else(|| {
+                Err(PartisyError {
+                    severity: partisync_core::error::Severity::Fatal,
+                    source: Some("无可恢复作业".into()),
+                })
+            })
+        }),
+    };
+    let row = match row {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    if !matches!(row.status, 1 | 2) {
+        eprintln!(
+            "error: 作业 {} 状态为 {}，不可恢复",
+            row.id,
+            row.status_name()
+        );
+        return 1;
+    }
+    println!(
+        "resume: job={} checkpoint={:?}（已跳过 {} 文件）",
+        row.id, row.checkpoint, row.done_files
+    );
+    jobs::start(&store, &row.id).await.unwrap();
+    let mut ctx = JobCtx::for_resume(&row, None);
+    let root = PathBuf::from(&row.root);
+    match index_path_job(&store, Some(&cas), &root, Some(&mut ctx)).await {
+        Ok(_report) => {
+            let _ = jobs::complete(&store, &row.id, ctx.done).await;
+            let s = store.stats().await.unwrap();
+            println!(
+                "resume 完成: 本次处理 {} 文件（续点前已有 {}）\n  图谱: {} 文件 / {} 目录 · 总量 {} · 去重节省 {}",
+                ctx.done,
+                row.done_files,
+                s.files,
+                s.dirs,
+                fmt_bytes(s.total_bytes),
+                fmt_bytes(s.saved_bytes)
+            );
+            0
+        }
+        Err(e) if e.severity == partisync_core::error::Severity::Interrupted => {
+            let _ = jobs::mark_interrupted(&store, &row.id, ctx.done).await;
+            eprintln!("resume 再次中断: {} 文件", ctx.done);
+            130
+        }
+        Err(e) => {
+            let _ = jobs::fail(&store, &row.id, &e.to_string()).await;
+            eprintln!("resume 失败: {e}");
+            1
+        }
+    }
+}
+
+async fn jobs_cmd(_args: &[String]) -> i32 {
+    let db = flag_value(_args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let store = match open_db(&db).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match jobs::list(&store).await {
+        Ok(rows) => {
+            if rows.is_empty() {
+                println!("（无作业）");
+                return 0;
+            }
+            println!(
+                "{:<27} {:<7} {:<11} {:>7}  checkpoint",
+                "ID", "KIND", "STATUS", "DONE"
+            );
+            for r in rows {
+                println!(
+                    "{:<27} {:<7} {:<11} {:>7}  {:?}",
+                    r.id,
+                    r.kind,
+                    r.status_name(),
+                    r.done_files,
+                    r.checkpoint
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
             1
         }
     }
@@ -138,7 +304,7 @@ async fn watch_cmd(args: &[String]) -> i32 {
         }
     };
     // 幂等全量索引打底，再进入事件循环
-    if let Err(e) = index_path(&store, Some(&cas), &root).await {
+    if let Err(e) = index_path_job(&store, Some(&cas), &root, None).await {
         eprintln!("error: 初始索引: {e}");
         return 1;
     }

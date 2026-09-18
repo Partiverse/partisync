@@ -61,3 +61,16 @@ CREATE TABLE IF NOT EXISTS scan_journal (
     kind  INTEGER NOT NULL,      -- 0=created, 1=modified, 2=removed
     at_ns INTEGER NOT NULL
 );
+
+-- v4（M0-WP05）：持久作业——checkpoint 每 200 文件提交；陈旧 running 视同 interrupted
+CREATE TABLE IF NOT EXISTS jobs (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    status     INTEGER NOT NULL, -- 0=queued,1=running,2=interrupted,3=completed,4=failed
+    root       TEXT NOT NULL,
+    checkpoint TEXT,
+    done_files INTEGER NOT NULL DEFAULT 0,
+    error      TEXT,
+    created_ns INTEGER NOT NULL,
+    updated_ns INTEGER NOT NULL
+);
