@@ -53,6 +53,16 @@
 新增：D7 覆盖率工具接线（CI）· D8 索引器流式外排（内存峰值 1M 路径 ~100MB，M1）·
 D9 fmt_bytes MiB 标注 · 块库孤儿（修改后旧块）归 M3 GC（既定口径）。
 
+**M0 关门后追加（2026-09-19）**：
+- **D1 部分关闭**：远端已建（github.com/Partiverse/partisync），main 已推（54 提交），
+  原 Go 原型完整保留于 `legacy/go-prototype` 分支（SHA 原样，零丢失）；
+- **D10 CI 计费闸门（新）**：Actions 首跑被拒——`recent account payments have failed or
+  spending limit needs to be increased`（六 job 均未启动，非代码问题）。
+  两个解法：① 仓库转公开（Actions 对公开仓库免费，符合 ADR-0000 Apache-2.0 开源定位）；
+  ② 修复账户计费/提高 spending limit（Settings → Billing & plans）。
+  本地等效门禁（fmt/clippy/test/deny 等价命令 + task-id 区间校验）全绿，
+  闸门解除后 `gh run rerun` 即可首跑。
+
 ## 6. AI 使用披露（自动统计，`cargo xtask report M0`）
 
 - 挂接 M0-* 提交 36+（本次累计 45+ 提交全链可追溯：`scripts/check-task-ids.sh` OK）；
