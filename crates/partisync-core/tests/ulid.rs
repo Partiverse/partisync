@@ -48,6 +48,20 @@ fn overflow_vector() {
 }
 
 #[test]
+fn overflow_applies_to_first_char_only() {
+    // S5 回归（对抗审查发现）：大译值仅在首字符构成溢出；
+    // 非首位置的大译值合法（"008…" = 8·2^115 < 2^128），不得误判。
+    assert!(
+        Ulid::from_str("00800000000000000000000000").is_ok(),
+        "非首字符译值 8 合法"
+    );
+    assert!(
+        Ulid::from_str("08800000000000000000000000").is_ok(),
+        "第二字符译值 8 合法（8·2^120 < 2^128）"
+    );
+}
+
+#[test]
 fn length_must_be_exactly_26() {
     assert_eq!(
         Ulid::from_str(&ZERO[..25]),
@@ -57,18 +71,22 @@ fn length_must_be_exactly_26() {
         Ulid::from_str(&format!("{ZERO}0")),
         Err(UlidError::InvalidLength { len: 27 })
     );
-    assert_eq!(
-        Ulid::from_str(""),
-        Err(UlidError::InvalidLength { len: 0 })
-    );
+    assert_eq!(Ulid::from_str(""), Err(UlidError::InvalidLength { len: 0 }));
 }
 
 #[test]
 fn excluded_and_non_ascii_chars_rejected() {
     // Crockford 排除 I/L/O/U（不做别名映射，SPEC 严格解析决策）
     for c in ['I', 'L', 'O', 'U', 'i', 'l', 'o', 'u'] {
-        let s: String = std::iter::once(c).chain(std::iter::repeat('0')).take(26).collect();
-        assert_eq!(Ulid::from_str(&s), Err(UlidError::InvalidChar(c)), "char {c}");
+        let s: String = std::iter::once(c)
+            .chain(std::iter::repeat('0'))
+            .take(26)
+            .collect();
+        assert_eq!(
+            Ulid::from_str(&s),
+            Err(UlidError::InvalidChar(c)),
+            "char {c}"
+        );
     }
     // 非一切字母表字符与非 ASCII
     assert_eq!(
@@ -76,7 +94,7 @@ fn excluded_and_non_ascii_chars_rejected() {
         Err(UlidError::InvalidChar('!'))
     );
     assert_eq!(
-        Ulid::from_str("中00000000000000000000000000"),
+        Ulid::from_str(&format!("中{}", "0".repeat(25))),
         Err(UlidError::InvalidChar('中'))
     );
 }
@@ -116,7 +134,10 @@ fn order_is_timestamp_then_random() {
     let b = Ulid::from_parts(2, 0);
     let c = Ulid::from_parts(3, u128::MAX);
     assert!(a < b && b < c, "时间戳严格更小 ⇒ Ulid 更小，随机段不影响");
-    assert!(Ulid::from_parts(5, 0) < Ulid::from_parts(5, 1), "同毫秒按随机段排序");
+    assert!(
+        Ulid::from_parts(5, 0) < Ulid::from_parts(5, 1),
+        "同毫秒按随机段排序"
+    );
 }
 
 // ---------- now() 冒烟 ----------
@@ -137,7 +158,11 @@ fn now_smoke() {
         "now() 时间戳应落在生成时刻附近: {} ∉ [{t0}, {t1}]",
         u.timestamp_ms()
     );
-    assert_ne!(u.random_part(), 0, "OS 熵下随机段全零概率 2^-80，出现即失败");
+    assert_ne!(
+        u.random_part(),
+        0,
+        "OS 熵下随机段全零概率 2^-80，出现即失败"
+    );
     assert!(is_crockford(&u.to_string()));
 }
 
