@@ -10,6 +10,7 @@ partisync-core = { path = "../partisync-core" }
 partisync-cas = { path = "../partisync-cas" } # ADR-0002 同层裁定：内容身份需要哈希
 sqlx = { workspace = true }
 walkdir = { workspace = true }
+notify = { workspace = true } # ADR-0005：文件事件源
 tokio = { workspace = true }
 serde = { workspace = true }
 
