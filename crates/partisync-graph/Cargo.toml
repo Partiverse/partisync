@@ -8,6 +8,7 @@ description = "PartiGraph 资产图谱：Entry/ContentIdentity/Tag DAG/Sidecar +
 [dependencies]
 partisync-core = { path = "../partisync-core" }
 partisync-cas = { path = "../partisync-cas" } # ADR-0002 同层裁定：内容身份需要哈希
+partisync-provider = { path = "../partisync-provider" } # ADR-0007 同层裁定：远端索引缝合点
 sqlx = { workspace = true }
 walkdir = { workspace = true }
 notify = { workspace = true } # ADR-0005：文件事件源

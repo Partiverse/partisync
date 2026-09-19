@@ -5,6 +5,7 @@
 //! 路径约定：provider 内部路径 **不带前导 /**（OpenDAL 惯例），图谱层负责转换。
 
 pub mod config;
+pub mod http_transport;
 
 pub use config::{ProviderConfig, ProviderScheme};
 
@@ -17,6 +18,7 @@ pub struct ProviderEntry {
     pub path: String, // provider 内部路径（无前导 /）
     pub is_dir: bool,
     pub size: u64,
+    pub mtime_ns: u64, // 后端不提供时为 0（caps.mtime==None 的一致口径）
 }
 
 /// 统一存储 Provider：OpenDAL Operator 的薄封装。
@@ -46,6 +48,8 @@ impl Provider {
     /// # Errors
     /// 未知 scheme 或 builder 失败 → Fatal。
     pub fn from_config(cfg: &ProviderConfig) -> Result<Self, PartisyError> {
+        // HTTP 后端（s3/webdav）需要进程级传输（first-wins 幂等）
+        http_transport::install_default();
         let op = match cfg.scheme {
             ProviderScheme::Fs => {
                 let mut b = opendal::services::Fs::default();
@@ -59,9 +63,12 @@ impl Provider {
                     .bucket(cfg.str_param("bucket").unwrap_or_default())
                     .root(cfg.str_param("root").unwrap_or("/"))
                     .endpoint(cfg.str_param("endpoint").unwrap_or(""))
-                    .region(cfg.str_param("region").unwrap_or(""))
-                    .access_key_id(cfg.str_param("access_key_id").unwrap_or(""))
-                    .secret_access_key(cfg.str_param("secret_access_key").unwrap_or(""));
+                    // 自定义端点（MinIO/rclone 类）无 region 概念，OpenDAL 仍强制要求——
+                    // 默认 us-east-1（S3 生态惯例）
+                    .region(cfg.str_param("region").unwrap_or("us-east-1"))
+                    // 空凭证会让 reqsign 拒签（实测踩坑）——与自家网关的无鉴权口径对齐
+                    .access_key_id(cfg.str_param("access_key_id").unwrap_or("partisync"))
+                    .secret_access_key(cfg.str_param("secret_access_key").unwrap_or("partisync"));
                 opendal::Operator::new(b).map_err(|e| perr("构造 s3 provider", e))?
             }
             ProviderScheme::Webdav => {
@@ -114,10 +121,17 @@ impl Provider {
                 let meta = e.metadata();
                 let is_dir = meta.is_dir();
                 let path = e.path().trim_end_matches('/').to_string();
+                // OpenDAL 0.59 Timestamp → SystemTime（From 实现，源码核验）
+                let mtime_ns = meta.last_modified().map_or(0, |t| {
+                    let st: std::time::SystemTime = t.into();
+                    st.duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos() as u64)
+                });
                 ProviderEntry {
                     path,
                     is_dir,
                     size: meta.content_length(),
+                    mtime_ns,
                 }
             })
             .filter(|e| !e.path.is_empty() && e.path != dir)

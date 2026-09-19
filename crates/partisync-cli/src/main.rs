@@ -15,8 +15,11 @@ use partisync_cas::ChunkStore;
 use partisync_core::error::PartisyError;
 use partisync_graph::indexer::index_path_job;
 use partisync_graph::jobs::{self, JobCtx};
+use partisync_graph::remote_index::index_provider;
 use partisync_graph::store::Store;
 use partisync_graph::watch::{self, WatchConfig};
+use partisync_provider::config::{ProviderConfig, ProviderScheme};
+use partisync_provider::Provider;
 
 const DEFAULT_DB: &str = "./partisync.db";
 const DEFAULT_CAS: &str = "./partisync.cas";
@@ -30,12 +33,13 @@ async fn main() {
         Some("watch") => watch_cmd(&args[1..]).await,
         Some("resume") => resume_cmd(&args[1..]).await,
         Some("jobs") => jobs_cmd(&args[1..]).await,
+        Some("index-remote") => index_remote_cmd(&args[1..]).await,
         Some("ls") => ls_cmd(&args[1..]).await,
         Some("find") => find_cmd(&args[1..]).await,
         Some("dedupe") => dedupe_cmd(&args[1..]).await,
         _ => {
             eprintln!(
-                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]",
+                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]",
                 env!("CARGO_PKG_VERSION")
             );
             2
@@ -262,6 +266,77 @@ async fn jobs_cmd(_args: &[String]) -> i32 {
         }
         Err(e) => {
             eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+async fn index_remote_cmd(args: &[String]) -> i32 {
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let scheme = flag_value(args, "--scheme").unwrap_or_else(|| "s3".into());
+    let mut params = serde_json::Map::new();
+    for (flag, key) in [
+        ("--bucket", "bucket"),
+        ("--endpoint", "endpoint"),
+        ("--region", "region"),
+        ("--root", "root"),
+        ("--username", "username"),
+        ("--password", "password"),
+    ] {
+        if let Some(v) = flag_value(args, flag) {
+            params.insert(key.into(), serde_json::json!(v));
+        }
+    }
+    let prefix = flag_value(args, "--prefix").unwrap_or_else(|| "/".into());
+    let cfg = ProviderConfig {
+        scheme: match scheme.as_str() {
+            "s3" => ProviderScheme::S3,
+            "webdav" => ProviderScheme::Webdav,
+            "fs" => ProviderScheme::Fs,
+            other => {
+                eprintln!("error: 未知 scheme: {other}");
+                return 2;
+            }
+        },
+        params,
+    };
+    let provider = match Provider::from_config(&cfg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let store = match open_db(&db).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match index_provider(&store, &provider, &prefix).await {
+        Ok(report) => {
+            let stats = store
+                .stats()
+                .await
+                .map(|s| {
+                    println!(
+                        "  图谱: {} 文件 / {} 目录 · 去重节省 {}",
+                        s.files,
+                        s.dirs,
+                        fmt_bytes(s.saved_bytes)
+                    );
+                })
+                .map(|_| 0)
+                .unwrap_or(1);
+            println!(
+                "index-remote 完成: scheme={scheme} prefix={prefix} db={db}\n  本次: 文件 {} 目录 {} 哈希字节 {}",
+                report.files, report.dirs, fmt_bytes(report.bytes_hashed as i64)
+            );
+            stats
+        }
+        Err(e) => {
+            eprintln!("index-remote 失败: {e}（severity={:?}）", e.severity);
             1
         }
     }
