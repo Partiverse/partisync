@@ -11,4 +11,6 @@ pub mod store;
 pub mod watch;
 
 pub use journal::{apply_pending, record, Applied, EventKind, JournalEvent};
-pub use store::{DupGroup, EntryKind, EntryRow, Stats, Store};
+pub use store::{
+    ApplyConflict, ApplyOutcome, ConflictRow, DupGroup, EntryKind, EntryRow, Stats, Store, TagRow,
+};

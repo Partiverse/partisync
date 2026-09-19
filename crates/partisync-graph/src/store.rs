@@ -47,6 +47,45 @@ pub struct OplogRow {
     pub at_ns: i64,
 }
 
+/// 远端条目应用结果（M2-WP02）：`path` 为最终落位；
+/// `conflict = Some` 表示触发「保留两者」改挂（P11 血缘由 session 落档）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyOutcome {
+    pub path: String,
+    pub conflict: Option<ApplyConflict>,
+}
+
+/// 一次冲突改挂的血缘对：双方主张的同一路径 + 来方版本的实际落位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyConflict {
+    pub base_path: String,
+    pub incoming_path: String,
+}
+
+/// Tag 行（M2-WP02 共享域；墓碑行不参与业务查询）。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct TagRow {
+    pub id: String,
+    pub space_id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub deleted: i64,
+    pub updated_hlc: Option<String>,
+}
+
+/// 冲突血缘记录（P11：同名双改 → 两者皆可寻址，血缘可查）。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ConflictRow {
+    pub id: String,
+    pub space_id: String,
+    pub base_path: String,
+    pub local_path: String,
+    pub incoming_path: String,
+    pub origin_device: String,
+    pub detected_hlc: String,
+    pub at_ns: i64,
+}
+
 /// 设备 id 字符串 → u64 哈希（HLC device 段；FNV-1a，无依赖确定性）。
 #[must_use]
 pub fn hash_u64(s: &str) -> u64 {
@@ -539,6 +578,66 @@ impl Store {
         Ok(key)
     }
 
+    /// 以**给定 hlc key** 记录 oplog 行（M2-WP02 中继专用：一个写入全网同一个键，
+    /// `INSERT OR IGNORE` 对同写多径到达天然去重）。插入前对本端时钟做
+    /// [`Hlc::recv`](partisync_core::Hlc::recv) 因果更新——此后本端新写入严格晚于
+    /// 一切已见远端写（LWW 全序前提）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；hlc key 非法 → Fatal。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_oplog_raw(
+        &self,
+        hlc_key: &str,
+        space_id: &str,
+        domain: i64,
+        entity: &str,
+        entity_id: &str,
+        op: &str,
+        origin_device: &str,
+        payload: &str,
+        at_ns: i64,
+    ) -> Result<(), PartisyError> {
+        let remote = partisync_core::Hlc::from_key(hlc_key).ok_or_else(|| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("oplog hlc key 非法: {hlc_key}").into()),
+        })?;
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let local = self
+            .device_id()
+            .await
+            .unwrap_or_else(|_| "device-local".into());
+        {
+            let mut clock = self.oplog_clock.lock().await;
+            let mut h =
+                clock.unwrap_or_else(|| partisync_core::Hlc::from_wall(hash_u64(&local), wall));
+            h.recv(wall, remote).map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("oplog 时钟合并失败: {e:?}").into()),
+            })?;
+            *clock = Some(h);
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO sync_oplog (hlc, space_id, domain, entity, entity_id, op, origin_device, payload, at_ns)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(hlc_key)
+        .bind(space_id)
+        .bind(domain)
+        .bind(entity)
+        .bind(entity_id)
+        .bind(op)
+        .bind(origin_device)
+        .bind(payload)
+        .bind(at_ns)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("中继 oplog", e))?;
+        Ok(())
+    }
+
     /// 全部待同步 oplog 行（HLC 全序）。
     ///
     /// # Errors
@@ -570,10 +669,12 @@ impl Store {
         Ok(n)
     }
 
-    /// 应用远端同步条目（设备自有域全量行；冲突 = 保留两者 + 血缘后缀，P11 前置）。
+    /// 应用远端同步条目（设备自有域全量行；冲突 = 保留两者 + 血缘后缀，P11）。
     ///
     /// owner_device 随 payload 走（单写者：非属主不产生本地图谱修改语义——
-    /// 远端行就是属主行的投影）。
+    /// 远端行就是属主行的投影）。冲突后缀防覆盖：候选 `{path}.conflict-{owner}`
+    /// 已存在且同 content → 幂等复用（重复投递安全）；内容不同 → `-2`、`-3`…
+    /// 递增找空位（防后缀名恰被他人文件占用导致覆盖丢数据）。
     ///
     /// # Errors
     /// DB 错误 → Fatal。
@@ -588,16 +689,46 @@ impl Store {
         content: Option<(&str, u64)>,
         chunk_root: Option<&str>,
         owner_device: &str,
-    ) -> Result<String, PartisyError> {
+    ) -> Result<ApplyOutcome, PartisyError> {
         // 同路径不同属主 = 双端独立创建冲突 → 保留两者：来方改挂冲突后缀
         let mut final_path = path.to_string();
+        let mut conflict = None;
         if let Some(existing) = self.entry_by_path(path).await? {
             let existing_owner = existing
                 .owner_device
                 .clone()
                 .unwrap_or_else(|| "unknown".into());
             if existing_owner != owner_device {
-                final_path = format!("{path}.conflict-{owner_device}");
+                let incoming_content = content.map(|(h, _)| h);
+                let mut i = 0u32;
+                loop {
+                    let cand = if i == 0 {
+                        format!("{path}.conflict-{owner_device}")
+                    } else {
+                        format!("{path}.conflict-{owner_device}-{i}")
+                    };
+                    match self.entry_by_path(&cand).await? {
+                        None => {
+                            final_path = cand;
+                            break;
+                        }
+                        // 同内容复用：同版本重复投递（幂等），不另开副本
+                        Some(c) if c.content_id.as_deref() == incoming_content => {
+                            final_path = cand;
+                            break;
+                        }
+                        Some(_) => i += 1,
+                    }
+                    if i > 64 {
+                        // 病态多版本兜底：ULID 后缀保证终止（版本回收归 WP08）
+                        final_path = format!("{path}.conflict-{owner_device}-{}", Ulid::now());
+                        break;
+                    }
+                }
+                conflict = Some(ApplyConflict {
+                    base_path: path.to_string(),
+                    incoming_path: final_path.clone(),
+                });
             }
         }
         // 父目录链（远端树的目录由 oplog 目录条目或此处 ensure 保证）
@@ -638,7 +769,10 @@ impl Store {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| db_err("应用远端条目", e))?;
-        Ok(id)
+        Ok(ApplyOutcome {
+            path: final_path,
+            conflict,
+        })
     }
 
     /// 名称子串检索（LIKE，上限防全表外溢）。
@@ -747,6 +881,300 @@ impl Store {
             });
         }
         Ok(out)
+    }
+}
+
+impl Store {
+    // ---- Tag 共享域（M2-WP02：HLC LWW，墓碑防复活）----
+
+    /// 新建 tag（本地写；LWW 水位由 capture 在 oplog 落笔后回填）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn add_tag(&self, name: &str, color: Option<&str>) -> Result<String, PartisyError> {
+        let id = Ulid::now().to_string();
+        sqlx::query("INSERT INTO tag (id, name, color) VALUES (?, ?, ?)")
+            .bind(&id)
+            .bind(name)
+            .bind(color)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("新建 tag", e))?;
+        Ok(id)
+    }
+
+    /// 更新 tag 字段（本地写）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn update_tag(
+        &self,
+        id: &str,
+        name: &str,
+        color: Option<&str>,
+    ) -> Result<(), PartisyError> {
+        sqlx::query("UPDATE tag SET name = ?, color = ? WHERE id = ?")
+            .bind(name)
+            .bind(color)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("更新 tag", e))?;
+        Ok(())
+    }
+
+    /// 删除 tag（墓碑：deleted=1，行保留——晚到的旧 upsert 靠 LWW 水位拒绝）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn delete_tag(&self, id: &str) -> Result<(), PartisyError> {
+        sqlx::query("UPDATE tag SET deleted = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("删除 tag", e))?;
+        Ok(())
+    }
+
+    /// 打标签（本地写；entry 以 path 为跨节点身份，悬空软引用合法）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn tag_entry(&self, tag_id: &str, entry_path: &str) -> Result<(), PartisyError> {
+        sqlx::query(
+            "INSERT INTO entry_tag (tag_id, entry_path, deleted) VALUES (?, ?, 0)
+             ON CONFLICT(tag_id, entry_path) DO UPDATE SET deleted = 0",
+        )
+        .bind(tag_id)
+        .bind(entry_path)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("打标签", e))?;
+        Ok(())
+    }
+
+    /// 摘标签（墓碑 upsert——防晚到 link 复活）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn untag_entry(&self, tag_id: &str, entry_path: &str) -> Result<(), PartisyError> {
+        sqlx::query(
+            "INSERT INTO entry_tag (tag_id, entry_path, deleted) VALUES (?, ?, 1)
+             ON CONFLICT(tag_id, entry_path) DO UPDATE SET deleted = 1",
+        )
+        .bind(tag_id)
+        .bind(entry_path)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("摘标签", e))?;
+        Ok(())
+    }
+
+    /// 按 id 取 tag（含墓碑——LWW 判定需要看到墓碑行）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn tag_by_id(&self, id: &str) -> Result<Option<TagRow>, PartisyError> {
+        sqlx::query_as::<_, TagRow>(
+            "SELECT id, space_id, name, color, deleted, updated_hlc FROM tag WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("查询 tag", e))
+    }
+
+    /// 存活 tag 列表（墓碑不参与）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn list_tags(&self) -> Result<Vec<TagRow>, PartisyError> {
+        sqlx::query_as::<_, TagRow>(
+            "SELECT id, space_id, name, color, deleted, updated_hlc FROM tag
+             WHERE deleted = 0 ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("列 tag", e))
+    }
+
+    /// 条目的存活标签（悬空链接与墓碑 JOIN 过滤）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn tags_of_entry(&self, entry_path: &str) -> Result<Vec<TagRow>, PartisyError> {
+        sqlx::query_as::<_, TagRow>(
+            "SELECT g.id, g.space_id, g.name, g.color, g.deleted, g.updated_hlc
+             FROM tag g JOIN entry_tag t ON t.tag_id = g.id
+             WHERE t.entry_path = ? AND t.deleted = 0 AND g.deleted = 0 ORDER BY g.name",
+        )
+        .bind(entry_path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("查条目标签", e))
+    }
+
+    /// 标签下的存活条目。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn entries_for_tag(&self, tag_id: &str) -> Result<Vec<EntryRow>, PartisyError> {
+        sqlx::query_as::<_, EntryRow>(
+            "SELECT e.id, e.kind, e.name, e.path, e.content_id, e.size, e.mtime_ns, e.chunk_root, e.owner_device
+             FROM entry e JOIN entry_tag t ON t.entry_path = e.path
+             WHERE t.tag_id = ? AND t.deleted = 0 ORDER BY e.path",
+        )
+        .bind(tag_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("查标签条目", e))
+    }
+
+    /// 应用远端 tag 写（共享域 LWW：`existing.updated_hlc >= hlc_key` → 跳过；
+    /// HLC key 定宽 hex，字符串序 == 时间序）。`deleted=true` 为墓碑应用。
+    /// 返回是否实际生效（落选/已见 = false，session 据此决定是否转发）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn apply_remote_tag(
+        &self,
+        id: &str,
+        name: &str,
+        color: Option<&str>,
+        deleted: bool,
+        hlc_key: &str,
+    ) -> Result<bool, PartisyError> {
+        let existing = self.tag_by_id(id).await?;
+        if let Some(row) = existing {
+            if row.updated_hlc.as_deref().is_some_and(|h| h >= hlc_key) {
+                return Ok(false);
+            }
+            sqlx::query(
+                "UPDATE tag SET name = ?, color = ?, deleted = ?, updated_hlc = ? WHERE id = ?",
+            )
+            .bind(name)
+            .bind(color)
+            .bind(i64::from(deleted))
+            .bind(hlc_key)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("应用远端 tag", e))?;
+        } else {
+            sqlx::query(
+                "INSERT INTO tag (id, name, color, deleted, updated_hlc) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(color)
+            .bind(i64::from(deleted))
+            .bind(hlc_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("应用远端 tag", e))?;
+        }
+        Ok(true)
+    }
+
+    /// 应用远端 link/unlink（同 [`Store::apply_remote_tag`] 的 LWW 口径）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn apply_remote_tag_link(
+        &self,
+        tag_id: &str,
+        entry_path: &str,
+        deleted: bool,
+        hlc_key: &str,
+    ) -> Result<bool, PartisyError> {
+        let existing: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT deleted, updated_hlc FROM entry_tag WHERE tag_id = ? AND entry_path = ?",
+        )
+        .bind(tag_id)
+        .bind(entry_path)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("查询链接", e))?;
+        if let Some((_, hlc)) = existing {
+            if hlc.as_deref().is_some_and(|h| h >= hlc_key) {
+                return Ok(false);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO entry_tag (tag_id, entry_path, deleted, updated_hlc) VALUES (?, ?, ?, ?)
+             ON CONFLICT(tag_id, entry_path) DO UPDATE SET deleted = excluded.deleted, updated_hlc = excluded.updated_hlc",
+        )
+        .bind(tag_id)
+        .bind(entry_path)
+        .bind(i64::from(deleted))
+        .bind(hlc_key)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("应用远端链接", e))?;
+        Ok(true)
+    }
+}
+
+impl Store {
+    // ---- 冲突血缘（P11：同名双改 → 两者皆可寻址，血缘可查）----
+
+    /// 落档一次冲突血缘（同 base/incoming/detected_hlc 重复落档幂等返回既有 id）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn record_conflict(
+        &self,
+        space_id: &str,
+        base_path: &str,
+        local_path: &str,
+        incoming_path: &str,
+        origin_device: &str,
+        detected_hlc: &str,
+    ) -> Result<String, PartisyError> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO sync_conflict (id, space_id, base_path, local_path, incoming_path, origin_device, detected_hlc, at_ns)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Ulid::now().to_string())
+        .bind(space_id)
+        .bind(base_path)
+        .bind(local_path)
+        .bind(incoming_path)
+        .bind(origin_device)
+        .bind(detected_hlc)
+        .bind(i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        )
+        .unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("落档冲突血缘", e))?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM sync_conflict WHERE base_path = ? AND incoming_path = ? AND detected_hlc = ?",
+        )
+        .bind(base_path)
+        .bind(incoming_path)
+        .bind(detected_hlc)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| db_err("查冲突血缘", e))
+    }
+
+    /// 冲突血缘列表（新→旧）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn list_conflicts(&self, limit: u32) -> Result<Vec<ConflictRow>, PartisyError> {
+        sqlx::query_as::<_, ConflictRow>(
+            "SELECT id, space_id, base_path, local_path, incoming_path, origin_device, detected_hlc, at_ns
+             FROM sync_conflict ORDER BY at_ns DESC, id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("列冲突血缘", e))
     }
 }
 

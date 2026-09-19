@@ -96,3 +96,38 @@ CREATE TABLE IF NOT EXISTS sync_oplog (
     at_ns         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_oplog_hlc ON sync_oplog(hlc);
+
+-- v7（M2-WP02）：共享域实体（Tag）+ 冲突血缘（P11「保留两者 + 血缘可查」）
+-- tag.id 随创建 oplog 传播 = 全局共享身份；删除 = 墓碑（LWW 防复活）。
+CREATE TABLE IF NOT EXISTS tag (
+    id          TEXT PRIMARY KEY,   -- ULID
+    space_id    TEXT NOT NULL DEFAULT 'default',
+    name        TEXT NOT NULL,
+    color       TEXT,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    updated_hlc TEXT                -- 本行最后生效写入的 oplog HLC key（LWW 水位）
+);
+-- 链接不用 FK、以 entry path 为身份：entry ULID 每节点各自生成（设备自有域），
+-- 不可做跨节点身份；path 唯一且随 entry oplog 收敛。悬空行（entry/tag 未到位）
+-- 合法，查询 JOIN 自然过滤；unlink 亦为墓碑（防晚到 link 复活）。
+CREATE TABLE IF NOT EXISTS entry_tag (
+    tag_id      TEXT NOT NULL,
+    entry_path  TEXT NOT NULL,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    updated_hlc TEXT,
+    PRIMARY KEY (tag_id, entry_path)
+);
+CREATE INDEX IF NOT EXISTS idx_entry_tag_path ON entry_tag(entry_path);
+-- 冲突血缘：base/local/incoming/origin + 触发 oplog 行（中继保键 ⇒ 全局同一键，可去重）
+CREATE TABLE IF NOT EXISTS sync_conflict (
+    id            TEXT PRIMARY KEY,  -- ULID
+    space_id      TEXT NOT NULL DEFAULT 'default',
+    base_path     TEXT NOT NULL,
+    local_path    TEXT NOT NULL,
+    incoming_path TEXT NOT NULL,
+    origin_device TEXT NOT NULL,
+    detected_hlc  TEXT NOT NULL,
+    at_ns         INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conflict_dedup
+    ON sync_conflict(base_path, incoming_path, detected_hlc);
