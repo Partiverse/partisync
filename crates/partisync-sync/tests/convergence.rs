@@ -241,6 +241,53 @@ async fn replay_is_idempotent() {
     assert_eq!(s1, s2, "重放/空推送不改状态（P8 幂等）");
 }
 
+#[tokio::test]
+async fn batch_indexed_entries_capture_local_origin() {
+    // KPI 基准（M2-WP00）实测暴露：add_file_batch 落库 owner 缺失时，
+    // capture 的 oplog origin 曾退化为 "unknown" → 对端回环防护永不命中
+    // → bisync 乒乓放大（每轮全量重投直至 max_rounds）。
+    // 回归契约：捕获 origin 必须是本机 device id，与 owner 列无关。
+    let a = node("og-a", "dev-a").await;
+    let root = a
+        .add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None, None)
+        .await
+        .unwrap();
+    a.add_file_batch(&[partisync_graph::store::FileInsert {
+        id: Ulid::now().to_string(),
+        parent_id: Some(root),
+        name: "f1".into(),
+        path: "/f1".into(),
+        size: 10,
+        mtime_ns: 1,
+        content: Some(("HB".to_string(), 10)),
+        chunk_root: None,
+    }])
+    .await
+    .unwrap();
+    capture::record_entry_upsert(&a, "/f1").await.unwrap();
+    let rows = a.pending_oplog().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].origin_device, "dev-a",
+        "捕获 origin 必须为本机 device id（回环防护依赖）"
+    );
+    // 端到端：batch 数据经 push → 对端中继行回投不再被重投应用（2 轮内不动点）
+    let b = node("og-b", "dev-b").await;
+    b.add_entry(None, "r", "/", EntryKind::Dir, 0, 0, None, None)
+        .await
+        .unwrap();
+    let s1 = session::push(&a, &b).await.unwrap();
+    assert_eq!(s1.applied, 1);
+    let bs = session::bisync(&a, &b, session::BisyncOpts::default())
+        .await
+        .unwrap();
+    assert!(
+        bs.rounds <= 2,
+        "稳态 bisync 必须 ≤2 轮收敛（乒乓时会打满 8 轮）"
+    );
+    assert_eq!(bs.pushed + bs.pulled, 0, "无新变更时零应用");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
 

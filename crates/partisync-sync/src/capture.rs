@@ -19,14 +19,19 @@ fn fatal(what: impl Into<String>) -> PartisyError {
 
 /// 记录一次 entry upsert 变更（设备自有域，全量行 payload）。
 ///
+/// origin = 本机 device（oplog 语义：谁广播本行）。不得用 `row.owner_device`
+/// 兜底——属主列缺失（旧索引数据）会让 origin 变 unknown，对端回环防护失效
+/// （M2 KPI 基准实测暴露的乒乓放大根因之一）。
+///
 /// # Errors
-/// 条目不存在（此为 remove 误用）→ Fatal；DB 错误 → Fatal。
+/// 条目不存在（此为 remove 误用）→ Fatal；device 未登记 / DB 错误 → Fatal。
 pub async fn record_entry_upsert(store: &Store, path: &str) -> Result<(), PartisyError> {
     let row = store
         .entry_by_path(path)
         .await?
         .ok_or_else(|| fatal(format!("捕获目标不存在: {path}")))?;
-    let owner = row.owner_device.clone().unwrap_or_else(|| "unknown".into());
+    let origin = store.device_id().await?;
+    let owner = row.owner_device.clone().unwrap_or_else(|| origin.clone());
     let payload = serde_json::json!({
         "path": row.path, "name": row.name, "kind": row.kind,
         "size": row.size, "mtime_ns": row.mtime_ns,
@@ -40,7 +45,7 @@ pub async fn record_entry_upsert(store: &Store, path: &str) -> Result<(), Partis
             "entry",
             &row.id,
             "upsert",
-            &owner,
+            &origin,
             &payload.to_string(),
         )
         .await

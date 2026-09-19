@@ -558,6 +558,13 @@ impl Store {
     /// # Errors
     /// DB 错误 → Fatal。
     pub async fn add_file_batch(&self, files: &[FileInsert]) -> Result<(), PartisyError> {
+        // 本机扫描 = 本机属主（M2-WP01 设备自有域）：owner 缺失会让捕获侧 origin
+        // 退化为 unknown，对端回环防护失效（M2 KPI 基准实测暴露的乒乓放大）。
+        // 未登记 device 的纯索引流程退回 'device-local'（与 record_oplog_raw 同款兜底）
+        let owner = self
+            .device_id()
+            .await
+            .unwrap_or_else(|_| "device-local".into());
         let mut tx = self
             .pool
             .begin()
@@ -573,8 +580,8 @@ impl Store {
                     .map_err(|e| db_err("批量登记内容", e))?;
             }
             let id: String = sqlx::query_scalar(
-                "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root)
-                 VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)
+                "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device)
+                 VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(path) DO UPDATE SET
                      size = excluded.size, mtime_ns = excluded.mtime_ns,
                      content_id = excluded.content_id, chunk_root = excluded.chunk_root
@@ -588,6 +595,7 @@ impl Store {
             .bind(i64::try_from(f.size).unwrap_or(i64::MAX))
             .bind(i64::try_from(f.mtime_ns).unwrap_or(i64::MAX))
             .bind(f.chunk_root.as_deref())
+            .bind(&owner)
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| db_err("批量插入条目", e))?;
