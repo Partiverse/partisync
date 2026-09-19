@@ -2064,10 +2064,14 @@ dependencies = [
 name = "partisync-hub"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "blake3",
  "fjall",
  "partisync-core",
  "proptest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

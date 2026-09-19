@@ -108,6 +108,12 @@ impl Ulid {
     pub const fn random_part(&self) -> u128 {
         u128::from_be_bytes(self.0) & RND_MASK
     }
+
+    /// 原生 16 字节（BE）——平面 ID 分片路由与二进制键编码用（M3-WP01）。
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
 }
 
 impl fmt::Display for Ulid {

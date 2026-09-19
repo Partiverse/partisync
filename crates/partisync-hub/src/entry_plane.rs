@@ -81,6 +81,35 @@ impl HashPlane {
         Ok(())
     }
 
+    /// 分片驻留计数（内省/演示面用）：按分片号升序返回 256 项。
+    ///
+    /// # Errors
+    /// 任一分片扫描失败。
+    pub fn stats(&self) -> Result<Vec<u64>> {
+        let mut counts = Vec::with_capacity(SHARD_COUNT);
+        for ks in &self.keyspaces {
+            counts.push(ks.iter().count() as u64);
+        }
+        Ok(counts)
+    }
+
+    /// 全平面扫描（内省/演示面用）：按分片序产出全部行（含墓碑）。
+    ///
+    /// # Errors
+    /// 引擎读取失败或值损坏。
+    pub fn iter_entries(&self) -> Result<Vec<EntryRow>> {
+        let mut rows = Vec::new();
+        for ks in &self.keyspaces {
+            for guard in ks.iter() {
+                let (k, v) = guard.into_inner().map_err(HubError::from)?;
+                let mut row = decode_entry_row(&v)?;
+                row.entry_id.copy_from_slice(&k);
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
     /// 写入（upsert）entry 权威行。
     ///
     /// # Errors
