@@ -6,7 +6,7 @@ license.workspace = true
 description = "内容仓库：fastcdc 分块、BLAKE3、块库、pack 打包、分代 GC"
 
 [dependencies]
-partisync-core = { path = "../partisync-core" }
+partisync-core = { path = "../partisync-core", version = "0.1.0" }
 blake3 = { workspace = true } # ADR-0002：内容寻址主哈希
 fastcdc = { workspace = true } # ADR-0004：内容定义分块
 sqlx = { workspace = true } # ADR-0004：块索引（引用计数）复用 L0 引擎

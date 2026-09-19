@@ -6,13 +6,13 @@ license.workspace = true
 description = "传输引擎：设备/云/hub 三通道、MPU、泛化 delta、限速、分块流水线"
 
 [dependencies]
-partisync-core = { path = "../partisync-core" } # M2-WP05 chunk_plan 错误分类
+partisync-core = { path = "../partisync-core", version = "0.1.0" } # M2-WP05 chunk_plan 错误分类
 blake3 = { workspace = true } # M2-WP05 块根哈希（如需 blake3-based chunk_root 校验）
 serde = { workspace = true } # M2-WP05 ChunkPlan JSON 序列化（可选）
 
 [dev-dependencies]
 tokio = { workspace = true } # M2-WP05 execute_plan 异步测试
-partisync-core = { path = "../partisync-core" } # M2-WP05 错误类型（验收测试断言）
+partisync-core = { path = "../partisync-core", version = "0.1.0" } # M2-WP05 错误类型（验收测试断言）
 
 [lints]
 workspace = true

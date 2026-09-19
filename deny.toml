@@ -16,6 +16,7 @@ allow = [
     "CC0-1.0",
     "0BSD", # ADR-0011：varint-rs（fjall 传递依赖）
     "BSL-1.0", # ADR-0011：xxhash-rust（fjall 传递依赖）
+    "CDLA-Permissive-2.0", # ADR-0012：webpki-root-certs（rustls-platform-verifier 链）
 ]
 
 [bans]
