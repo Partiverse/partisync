@@ -139,3 +139,190 @@ proptest::proptest! {
         prop_assert_eq!(back.flags, row.flags);
     }
 }
+
+// ============ T04：children range 平面 + 动态分裂 ============
+
+use partisync_hub::{ChildRow, EntryRow, Hub, KIND_DIR, KIND_FILE};
+
+fn t04_root(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("wp01-t04-{tag}-{}", partisync_core::Ulid::now()))
+}
+
+fn dir_row(id: u8, name: &str) -> EntryRow {
+    let mut entry_id = [0u8; 16];
+    entry_id[0] = id;
+    EntryRow {
+        entry_id,
+        parent_id: None,
+        kind: KIND_DIR,
+        name: name.into(),
+        content_id: None,
+        size: 0,
+        mtime_ns: 0,
+        flags: 0,
+    }
+}
+
+fn child_row(dir: &EntryRow, name: &str, seq: u16) -> EntryRow {
+    let mut entry_id = [0u8; 16];
+    entry_id[0] = dir.entry_id[0];
+    entry_id[14..].copy_from_slice(&seq.to_be_bytes());
+    EntryRow {
+        entry_id,
+        parent_id: Some(dir.entry_id),
+        kind: KIND_FILE,
+        name: name.into(),
+        content_id: None,
+        size: seq as u64,
+        mtime_ns: 0,
+        flags: 0,
+    }
+}
+
+/// 全量 keyset 遍历一个目录（用 cursor 翻页直到尽头）。
+fn walk_all(hub: &Hub, dir_id: &[u8; 16], limit: u32) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = hub
+            .list_children(dir_id, cursor.as_ref(), limit)
+            .expect("list");
+        let n = page.items.len();
+        names.extend(page.items.iter().map(|i| i.name.clone()));
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+        if n == 0 {
+            break; // 防御：游标推进但空页（不应发生）
+        }
+    }
+    names
+}
+
+#[test]
+fn t04_projection_consistency_and_tombstone() {
+    let hub = Hub::open(&t04_root("proj")).expect("open");
+    let dir = dir_row(1, "root-dir");
+    hub.put_entry(&dir).expect("put dir");
+    let a = child_row(&dir, "alpha.txt", 1);
+    let b = child_row(&dir, "beta.txt", 2);
+    hub.put_entry(&a).expect("put a");
+    hub.put_entry(&b).expect("put b");
+
+    let page = hub.list_children(&dir.entry_id, None, 100).expect("list");
+    let names: Vec<_> = page.items.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, vec!["alpha.txt", "beta.txt"]);
+    assert!(page.next_cursor.is_none());
+
+    // 删除 = 权威墓碑 + 投影行删除（列表不再可见）
+    hub.remove_entry(&a.entry_id).expect("remove");
+    assert!(hub
+        .get_entry(&a.entry_id)
+        .expect("get")
+        .expect("tombstone")
+        .is_deleted());
+    let page = hub.list_children(&dir.entry_id, None, 100).expect("list");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].name, "beta.txt");
+
+    // 根条目（无 parent）不产生投影
+    let root = dir_row(9, "orphan-check");
+    hub.put_entry(&root).expect("put root");
+    assert!(hub
+        .list_children(&root.entry_id, None, 10)
+        .expect("list")
+        .items
+        .is_empty());
+}
+
+#[test]
+fn t04_list_pagination_completeness_10k() {
+    let hub = Hub::open(&t04_root("pager")).expect("open");
+    let dir = dir_row(2, "big-dir");
+    hub.put_entry(&dir).expect("put dir");
+    let n = 10_000u32;
+    for seq in 0..n {
+        let name = format!("child-{seq:05}");
+        hub.put_entry(&child_row(&dir, &name, seq as u16))
+            .expect("put");
+    }
+    // 分页完备：limit=137 走全遍历 == 有序全量集合，无重复无遗漏
+    let walked = walk_all(&hub, &dir.entry_id, 137);
+    let expected: Vec<String> = (0..n).map(|s| format!("child-{s:05}")).collect();
+    assert_eq!(walked, expected);
+    // 从中间页续传：cursor 之前的不再现
+    let mid = hub
+        .list_children(&dir.entry_id, None, 5000)
+        .expect("first half");
+    let cursor = mid.next_cursor.expect("cursor at 5000");
+    let rest = hub
+        .list_children(&dir.entry_id, Some(&cursor), 6000)
+        .expect("rest");
+    assert_eq!(mid.items.len(), 5000);
+    assert_eq!(rest.items.len(), (n - 5000) as usize);
+    assert!(rest.items[0].name > mid.items[4999].name);
+}
+
+#[test]
+fn t04_split_property_small_threshold_multi_round() {
+    // 注入小阈值触发多轮分裂：分裂前后全量键集相等、无丢键无重键、
+    // 跨分区的单目录 children 列表仍完整有序
+    let root = t04_root("split");
+    let hub = Hub::open_with_threshold(&root, 300).expect("open");
+    let dirs = [dir_row(1, "d1"), dir_row(2, "d2"), dir_row(3, "d3")];
+    for d in &dirs {
+        hub.put_entry(d).expect("put dir");
+    }
+    // 随机键序写入（伪 LCG 洗牌），3 目录 × 700 子项 = 2100 行 → 必然多轮分裂
+    let mut rng: u64 = 0x5EED_2026;
+    let mut names: Vec<(usize, String, u16)> = (0..3usize)
+        .flat_map(|d| (0..700u16).map(move |s| (d, format!("item-{s:04}"), s)))
+        .collect();
+    for i in (1..names.len()).rev() {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let j = (rng >> 33) as usize % (i + 1);
+        names.swap(i, j);
+    }
+    for (d, name, s) in &names {
+        hub.put_entry(&child_row(&dirs[*d], name, *s)).expect("put");
+    }
+
+    // 分区数 > 1 且无 splitting 残留
+    let parts = hub.tree.partition_info();
+    assert!(
+        parts.len() > 1,
+        "expected multiple partitions after splits: {parts:?}"
+    );
+    assert!(parts.iter().all(|(_, _, splitting, _)| !splitting));
+
+    // 每目录 children 全量 keyset 遍历 == 有序全量集合（跨分区边界完整）
+    for (d, dir) in dirs.iter().enumerate() {
+        let walked = walk_all(&hub, &dir.entry_id, 97);
+        let expected: Vec<String> = (0..700u16).map(|s| format!("item-{s:04}")).collect();
+        assert_eq!(walked, expected, "dir {d} children incomplete after splits");
+    }
+
+    // reopen：路由表与数据恢复一致（meta 持久化生效）
+    drop(hub);
+    let hub = Hub::open_with_threshold(&root, 300).expect("reopen");
+    let dir = &dirs[0];
+    let walked = walk_all(&hub, &dir.entry_id, 97);
+    assert_eq!(walked.len(), 700);
+}
+
+#[test]
+fn t04_childrow_roundtrip() {
+    let row = ChildRow {
+        entry_id: [7u8; 16],
+        kind: KIND_DIR,
+        deleted: true,
+    };
+    let buf = row.encode();
+    assert_eq!(buf.len(), 18);
+    assert_eq!(ChildRow::decode(&buf).expect("decode"), row);
+    assert_eq!(
+        ChildRow::decode(&buf[..17]),
+        Err(partisync_hub::EncodeError::UnexpectedEof)
+    );
+}

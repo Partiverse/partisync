@@ -19,6 +19,8 @@ pub enum HubError {
     Fjall(fjall::Error),
     /// 行编码错误。
     Encode(crate::encode::EncodeError),
+    /// 路由命中的分区 keyspace 缺失（内部不变量破坏，不可恢复）。
+    PartitionMissing(u64),
 }
 
 impl core::fmt::Display for HubError {
@@ -26,6 +28,7 @@ impl core::fmt::Display for HubError {
         match self {
             Self::Fjall(e) => write!(f, "hub storage: {e}"),
             Self::Encode(e) => write!(f, "hub storage: {e}"),
+            Self::PartitionMissing(pid) => write!(f, "hub storage: partition {pid} missing"),
         }
     }
 }
@@ -63,7 +66,14 @@ impl HashPlane {
     /// # Errors
     /// 引擎打开或 keyspace 创建失败时返回 [`HubError::Fjall`]。
     pub fn open(root: &Path) -> Result<Self> {
-        let db = Database::open(fjall::Config::new(root))?;
+        Self::attach(Database::open(fjall::Config::new(root))?)
+    }
+
+    /// 挂接到既有 Database（Hub 单库多平面共享，fjall 单路径排他锁）。
+    ///
+    /// # Errors
+    /// keyspace 创建失败时返回 [`HubError::Fjall`]。
+    pub fn attach(db: Database) -> Result<Self> {
         let mut keyspaces = Vec::with_capacity(SHARD_COUNT);
         for shard in 0..SHARD_COUNT {
             let ks = db.keyspace(&keyspace_name(shard), KeyspaceCreateOptions::default)?;

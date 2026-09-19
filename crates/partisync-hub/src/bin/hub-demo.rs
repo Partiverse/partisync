@@ -11,11 +11,9 @@ use std::sync::Arc;
 use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
 use axum::response::Html;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use partisync_hub::{shard_of, EntryRow, HashPlane, KIND_DIR, KIND_FILE};
-
-const BUDGET_BYTES: usize = 300;
 
 #[derive(Clone)]
 struct App {
@@ -132,7 +130,9 @@ async fn create_entry(
     Ok(Json(view(&row)))
 }
 
-async fn list_entries(State(app): State<App>) -> Result<Json<Vec<EntryView>>, (StatusCode, String)> {
+async fn list_entries(
+    State(app): State<App>,
+) -> Result<Json<Vec<EntryView>>, (StatusCode, String)> {
     let rows = app.plane.iter_entries().map_err(err500)?;
     Ok(Json(rows.iter().map(view).collect()))
 }
@@ -153,7 +153,9 @@ async fn shard_stats(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let counts = app.plane.stats().map_err(err500)?;
     let total: u64 = counts.iter().sum();
-    Ok(Json(serde_json::json!({ "counts": counts, "total": total })))
+    Ok(Json(
+        serde_json::json!({ "counts": counts, "total": total }),
+    ))
 }
 
 fn err500(e: partisync_hub::HubError) -> (StatusCode, String) {
