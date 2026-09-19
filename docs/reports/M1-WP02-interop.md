@@ -34,3 +34,20 @@
 - SigV4 签名验证（当前接受任意凭证——仅限本机）；bucket 版本化；ListObjectsV2
   的 encoding-type/url 解码；并发 LIST 分页边界压力（cutover token 精确性）；
 - bisync 的空目录/重命名边角（rclone 自认 S3 后端的已知限制面）。
+
+## 追加：WebDAV 服务面互操作（M1-WP05 第二协议，2026-09-19）
+
+- 端点：`partisync-cli ui --dav 127.0.0.1:8082`（与 S3 共用 `--data` 数据根）
+- rclone 配置：`type = webdav / vendor = other`（pass 需 `rclone obscure`——实测踩坑）
+
+| 操作 | 结果 |
+|---|---|
+| OPTIONS（DAV: 1,2 能力头） | ✅ |
+| PROPFIND 根/桶（Depth 0/1，207 multistatus） | ✅ |
+| copy 上行/下行 | ✅ |
+| check | ✅ 8 matching files |
+| moveto（MOVE）/deletefile | ✅ |
+| **跨协议**：WebDAV PUT → S3 GET | ✅ 同一数据根即时可见 |
+
+实现缺陷修复：根路径 Path 提取器 500（双路由化）、or-pattern guard 绑定、
+响应构造器 body 移动。语义声明：Lock 未实现（占位 200）、目录 MOVE 未支持（405）。

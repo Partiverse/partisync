@@ -6,6 +6,7 @@
 //!
 //! 完整子命令矩阵（ls/find/dedupe/serve/sync）随 M0-WP06 与 M1/M2 落地。
 
+mod dav;
 mod s3api;
 mod web;
 
@@ -525,6 +526,8 @@ async fn ui_cmd(args: &[String]) -> i32 {
     let s3_addr = flag_value(args, "--s3").unwrap_or_else(|| "127.0.0.1:8081".into());
     let data_root = PathBuf::from(flag_value(args, "--data").unwrap_or_else(|| "./s3data".into()));
     let s3_app = s3api::router(data_root.clone());
+    let dav_addr = flag_value(args, "--dav").unwrap_or_else(|| "127.0.0.1:8082".into());
+    let dav_app = dav::router(data_root.clone());
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -539,13 +542,21 @@ async fn ui_cmd(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let dav_listener = match tokio::net::TcpListener::bind(&dav_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: 绑定 {dav_addr} 失败: {e}");
+            return 1;
+        }
+    };
     println!(
-        "PartiSync: 演示面 http://{addr} · S3 网关 http://{s3_addr}（数据 {}；无鉴权，仅本机）",
+        "PartiSync: 演示面 http://{addr} · S3 http://{s3_addr} · WebDAV http://{dav_addr}（数据 {}；无鉴权，仅本机）",
         data_root.display()
     );
     tokio::select! {
         r = axum::serve(listener, app) => r.map_err(|e| e.to_string()),
         r = axum::serve(s3_listener, s3_app) => r.map_err(|e| e.to_string()),
+        r = axum::serve(dav_listener, dav_app) => r.map_err(|e| e.to_string()),
     }
     .map(|_| 0)
     .unwrap_or_else(|e| {

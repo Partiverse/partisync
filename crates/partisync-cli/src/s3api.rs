@@ -76,7 +76,7 @@ const MONTHS: [&str; 12] = [
 
 /// RFC1123 HTTP date（GET/HEAD 响应头口径——Go 的 time.Parse(ANSIC) 期望此格式，
 /// ISO8601 会让 rclone 解析失败——实测踩坑）。
-fn http_date(system: std::time::SystemTime) -> String {
+pub(crate) fn http_date(system: std::time::SystemTime) -> String {
     let dur = system.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = dur.as_secs();
     let days = (secs / 86_400) as i64;
@@ -128,7 +128,7 @@ fn last_modified(path: &FsPath) -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".into())
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
