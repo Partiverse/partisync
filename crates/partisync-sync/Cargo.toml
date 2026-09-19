@@ -15,6 +15,8 @@ x25519-dalek = { version = "3", features = ["static_secrets"] } # M2-WP04 ECDH �
 ed25519-dalek = "3" # M2-WP04 设备身份签名（确定性 from_bytes，不需 rand_core）
 zeroize = { version = "1", features = ["zeroize_derive"] } # M2-WP04/WP07 密钥内存擦除
 getrandom = "0.4" # M2-WP04 X25519 私钥随机源（与 workspace 0.2 共存；非顶层依赖）
+chacha20poly1305 = "0.11" # M2-WP07 XChaCha20-Poly1305 AEAD（ADR-0010 选型）
+argon2 = "0.6" # M2-WP07 主密钥 KDF（ADR-0010 选型）
 
 [dev-dependencies]
 proptest = { workspace = true }

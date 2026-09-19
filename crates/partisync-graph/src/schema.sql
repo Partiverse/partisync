@@ -144,6 +144,16 @@ CREATE TABLE IF NOT EXISTS entry_version (
 CREATE INDEX IF NOT EXISTS idx_version_path ON entry_version(path);
 CREATE INDEX IF NOT EXISTS idx_version_expires ON entry_version(expires_at_ns);
 
+-- v12（M2-WP07）：空间加密元数据
+-- space_id=主 key；kek_hash = blake3(master_key) 的 hex 截位——证明本机已掌握 master_key
+--   而不暴露 master_key 本身；alg 留作未来切换算法（v1 = "xchacha20-blake3-v1"）
+CREATE TABLE IF NOT EXISTS space_crypto (
+    space_id TEXT PRIMARY KEY,
+    kek_hash TEXT NOT NULL,
+    alg      TEXT NOT NULL DEFAULT 'xchacha20-blake3-v1',
+    created_ns INTEGER NOT NULL
+);
+
 -- v11（M2-WP04）：设备网络与助记词配对
 -- device 表 endpoint / pairing_state 由 migrate() 防御性补列
 CREATE TABLE IF NOT EXISTS pairing_session (

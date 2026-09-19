@@ -1671,6 +1671,15 @@ impl Store {
     }
 }
 
+/// 空间加密元数据（M2-WP07：登记 master_key 持有证明）。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct SpaceCryptoRow {
+    pub space_id: String,
+    pub kek_hash: String,
+    pub alg: String,
+    pub created_ns: i64,
+}
+
 /// 配对会话行（M2-WP04：助记词配对状态机）。
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct PairingSessionRow {
@@ -1821,6 +1830,54 @@ impl Store {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| db_err("查配对 id", e))
+    }
+}
+
+impl Store {
+    // ---- 空间加密元数据（M2-WP07）----
+
+    /// 登记空间加密元数据：kek_hash = blake3(master_key) 的 hex（证明掌握 master）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；已存在 → 幂等覆盖（轮换场景）。
+    pub async fn register_space_crypto(
+        &self,
+        space_id: &str,
+        kek_hash: &str,
+        alg: &str,
+    ) -> Result<(), PartisyError> {
+        sqlx::query(
+            "INSERT INTO space_crypto (space_id, kek_hash, alg, created_ns) VALUES (?, ?, ?, ?)
+             ON CONFLICT(space_id) DO UPDATE SET
+                 kek_hash = excluded.kek_hash,
+                 alg = excluded.alg,
+                 created_ns = excluded.created_ns",
+        )
+        .bind(space_id)
+        .bind(kek_hash)
+        .bind(alg)
+        .bind(self.now_ns())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("登记 space_crypto", e))?;
+        Ok(())
+    }
+
+    /// 查询空间加密元数据。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；不存在 → None。
+    pub async fn space_crypto(
+        &self,
+        space_id: &str,
+    ) -> Result<Option<SpaceCryptoRow>, PartisyError> {
+        sqlx::query_as::<_, SpaceCryptoRow>(
+            "SELECT space_id, kek_hash, alg, created_ns FROM space_crypto WHERE space_id = ?",
+        )
+        .bind(space_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("查 space_crypto", e))
     }
 }
 
