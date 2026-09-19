@@ -1265,14 +1265,14 @@ impl Store {
 
     // ---- 状态导出（M2-WP03 Merkle 叶集合扫描）----
 
-    /// entry 状态叶：(path, kind, content_id, owner)。
+    /// entry 状态叶：(path, kind, content_id, owner, size, mtime_ns)——对账可比性需全字段。
     ///
     /// # Errors
     /// DB 错误 → Fatal。
     pub async fn entry_state_leaves(
         &self,
-    ) -> Result<Vec<(String, i64, Option<String>, Option<String>)>, PartisyError> {
-        sqlx::query_as("SELECT path, kind, content_id, owner_device FROM entry")
+    ) -> Result<Vec<(String, i64, Option<String>, Option<String>, i64, i64)>, PartisyError> {
+        sqlx::query_as("SELECT path, kind, content_id, owner_device, size, mtime_ns FROM entry")
             .fetch_all(&self.pool)
             .await
             .map_err(|e| db_err("扫 entry 叶", e))
@@ -1295,7 +1295,7 @@ impl Store {
     ///
     /// # Errors
     /// DB 错误 → Fatal。
-    pub async fn link_state_leaves(&self) -> Result<Vec<(String, i64)>, PartisyError> {
+    pub async fn link_state_leaves(&self) -> Result<Vec<(String, String, i64)>, PartisyError> {
         sqlx::query_as("SELECT tag_id, entry_path, deleted FROM entry_tag")
             .fetch_all(&self.pool)
             .await

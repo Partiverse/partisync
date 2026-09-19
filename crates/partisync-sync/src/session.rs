@@ -102,6 +102,8 @@ pub async fn push_opts(
             continue;
         }
         apply_row(dst, row, &mut stats).await?;
+        // 水位记账（M2-WP03）：每行推进 origin 的 last_hlc（单调）
+        dst.note_applied(&row.origin_device, &row.hlc).await?;
         acked.push(row.hlc.clone());
     }
     src.trim_oplog(&acked).await?;

@@ -3,6 +3,8 @@
 //! 设计取舍（与规格同步）：
 //! - 叶哈希 = blake3(canonical 状态编码) —— 三类叶各一种编码器
 //!   （entry / tag / entry_tag），均不包含水位簿记字段；
+//! - entry 叶包含全部可比字段（size/mtime/content_id/owner）——对账协议需要
+//!   状态完备可比才能做"分歧区间修复"（规格 §3）；
 //! - 分桶位宽：4bit(16) / 8bit(256) / 12bit(4096) —— 三层足够定位到「KPI 量级」的
 //!   差异区间，再回到叶面按键集合差分；
 //! - 全量叶即时计算（无增量节点）—— 10⁵ 叶亚秒级，留给增量树作为 KPI 不达标时的
@@ -11,21 +13,6 @@
 use blake3::Hasher;
 use partisync_cas::content_hash;
 
-/// 桶位宽档位（用于按档下钻；bit 数越大越精确）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BucketBits {
-    B4 = 4,
-    B8 = 8,
-    B12 = 12,
-}
-
-impl BucketBits {
-    #[must_use]
-    pub const fn mask(self) -> u32 {
-        (1u32 << (self as u32)) - 1
-    }
-}
-
 /// 单条叶的「key + 桶内哈希」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Leaf {
@@ -33,8 +20,15 @@ pub struct Leaf {
     pub hash: String,
 }
 
-/// entry 状态叶（不含水位）。
-pub fn entry_leaf(path: &str, kind: i64, content_id: Option<&str>, owner: Option<&str>) -> Leaf {
+/// entry 状态叶（含全部可比字段；不含水位）。
+pub fn entry_leaf(
+    path: &str,
+    kind: i64,
+    content_id: Option<&str>,
+    owner: Option<&str>,
+    size: u64,
+    mtime_ns: u64,
+) -> Leaf {
     let mut h = Hasher::new();
     h.update(b"E\x1f");
     h.update(path.as_bytes());
@@ -44,6 +38,10 @@ pub fn entry_leaf(path: &str, kind: i64, content_id: Option<&str>, owner: Option
     h.update(content_id.unwrap_or("").as_bytes());
     h.update(b"\x1f");
     h.update(owner.unwrap_or("").as_bytes());
+    h.update(b"\x1f");
+    h.update(&size.to_le_bytes());
+    h.update(b"\x1f");
+    h.update(&mtime_ns.to_le_bytes());
     Leaf {
         key: path.to_string(),
         hash: h.finalize().to_hex().to_string(),
@@ -86,10 +84,10 @@ pub fn link_leaf(tag_id: &str, entry_path: &str, deleted: bool) -> Leaf {
 /// 桶哈希：桶内叶哈希升序拼接 → blake3 hex（顺序无关性：保证双方排序后一致）。
 #[must_use]
 pub fn bucket_hash(leaves: &[Leaf]) -> String {
-    let mut hashes: Vec<&str> = leaves.iter().map(|l| l.hash.as_str()).collect();
-    hashes.sort_unstable();
     let mut h = Hasher::new();
     h.update(b"B\x1f");
+    let mut hashes: Vec<&str> = leaves.iter().map(|l| l.hash.as_str()).collect();
+    hashes.sort_unstable();
     h.update(hashes.join("\x1e").as_bytes());
     h.finalize().to_hex().to_string()
 }
@@ -99,11 +97,7 @@ pub fn bucket_hash(leaves: &[Leaf]) -> String {
 pub fn bucket_leaves(leaves: &[Leaf], bits: BucketBits) -> Vec<(u32, Vec<Leaf>)> {
     let n = 1u32 << (bits as u32);
     let mut buckets: std::collections::BTreeMap<u32, Vec<Leaf>> =
-        std::iter::repeat_with(Vec::new)
-            .take(n as usize)
-            .enumerate()
-            .map(|(i, v)| (i as u32, v))
-            .collect();
+        (0..n).map(|i| (i, Vec::new())).collect();
     for l in leaves {
         let key_hash = content_hash(l.key.as_bytes());
         // hex 高位字符对应 hash 高位字节
@@ -114,22 +108,23 @@ pub fn bucket_leaves(leaves: &[Leaf], bits: BucketBits) -> Vec<(u32, Vec<Leaf>)>
     buckets.into_iter().collect()
 }
 
-/// 全树根（单层 16 桶 → blake3 升序拼接），不依赖 store，调用方供叶集合。
+/// 桶位宽档位（用于按档下钻；bit 数越大越精确）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketBits {
+    B4 = 4,
+    B8 = 8,
+    B12 = 12,
+}
+
+impl BucketBits {
+    #[must_use]
+    pub const fn mask(self) -> u32 {
+        (1u32 << (self as u32)) - 1
+    }
+}
+
+/// 全树根（叶集合 → 桶哈希；单层 16 桶够用：下钻由 reconcile 内部按桶号处理）。
 #[must_use]
 pub fn merkle_root(leaves: &[Leaf]) -> String {
     bucket_hash(leaves)
-}
-
-/// 桶内键集合（字符串升序）。
-#[must_use]
-pub fn bucket_keys(leaves: &[Leaf], bits: BucketBits, prefix: u32) -> Vec<String> {
-    bucket_leaves(leaves, bits)
-        .into_iter()
-        .find(|(k, _)| *k == prefix)
-        .map(|(_, v)| {
-            let mut k = v.into_iter().map(|l| l.key).collect::<Vec<_>>();
-            k.sort();
-            k
-        })
-        .unwrap_or_default()
 }

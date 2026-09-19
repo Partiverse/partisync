@@ -1819,6 +1819,7 @@ dependencies = [
 name = "partisync-sync"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "partisync-core",
  "partisync-graph",
  "proptest",
