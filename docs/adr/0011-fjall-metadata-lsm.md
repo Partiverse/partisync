@@ -23,10 +23,13 @@ M3-WP01 把 hub 元数据平面抬到 10⁹ 条目：需要 LSM 型 KV（顺序�
 
 1. `partisync-hub` 依赖 `fjall = "3.1"`（具体 3.1.x 由 Cargo.lock 锁定，进场后
    dependabot/cargo deny 常规跟踪）。
-2. keyspace 使用模型（SPEC M3-WP01 §风险 已留收敛余地）：256 哈希分片各一
-   keyspace + range 分区组；若 T03 实测单实例多 keyspace 资源开销超预期，
-   允许收敛为「共享 fjall 实例 + 分片键前缀」，行为契约不变（不影响本 ADR）。
-3. fjall 仅作存储引擎：分片路由哈希仍用 blake3（项目自有代码，非 KDF 用途）；
+2. keyspace 使用模型：**单 Database + N keyspace**（fjall 顶层是 `Database`，跨
+   Database 无 `OwnedWriteBatch` 原子批——WP01 分裂协议的原子批主张以此为前提）。
+   256 哈希分片 + range 分区组均为同一 Database 内的 keyspace；若 T03 实测单库
+   多 keyspace 资源开销超预期，允许收敛为「共享 keyspace + 分片键前缀」，
+   行为契约不变（不影响本 ADR）。
+3. fjall 仅作存储引擎：分片路由哈希一律 `blake3::hash`（一次性哈希，项目自有
+   代码，非 KDF 用途）；**禁止 `blake3::derive_key`**（KDF 冻结面，D1）；
    引擎不承载任何密码学语义——与 D1/KDF 冻结面无关。
 
 ## 备选
