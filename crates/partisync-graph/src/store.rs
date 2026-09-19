@@ -1561,6 +1561,15 @@ impl Store {
         };
         crate::journal::ensure_dir_chain_pub(self, path).await?;
         let parent_id = self.entry_by_path(&parent).await?.map(|e| e.id);
+        // content 行需预先存在（FK 约束）
+        if let Some(cid) = &v.content_id {
+            sqlx::query("INSERT OR IGNORE INTO content (id, size) VALUES (?, ?)")
+                .bind(cid)
+                .bind(v.size)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("resurrect 登记内容", e))?;
+        }
         let id = Ulid::now().to_string();
         let kind = 0;
         sqlx::query(
@@ -1624,13 +1633,15 @@ impl Store {
                 .map_err(|e| db_err("GC trash", e))?
                 .rows_affected();
         sqlx::query(
-            "DELETE FROM entry_version WHERE state = 0 AND id IN (
-                SELECT id FROM entry_version v
-                WHERE state = 0 AND (
-                    SELECT COUNT(*) FROM entry_version v2
-                    WHERE v2.path = v.path AND v2.state = 0 AND v2.retired_at_ns >= v.retired_at_ns
-                ) > 5
-             )",
+            "DELETE FROM entry_version WHERE state = 0 AND id NOT IN (
+                SELECT id FROM entry_version
+                WHERE state = 0 AND id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY path ORDER BY retired_at_ns DESC) AS rn
+                        FROM entry_version WHERE state = 0
+                    ) WHERE rn <= 5
+                )
+            )",
         )
         .execute(&mut *tx)
         .await
