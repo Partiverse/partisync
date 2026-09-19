@@ -1919,6 +1919,12 @@ dependencies = [
 [[package]]
 name = "partisync-transfer"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "partisync-core",
+ "serde",
+ "tokio",
+]
 
 [[package]]
 name = "percent-encoding"
