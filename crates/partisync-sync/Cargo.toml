@@ -10,6 +10,7 @@ partisync-core = { path = "../partisync-core" }
 partisync-graph = { path = "../partisync-graph" }
 serde_json = { workspace = true }
 blake3 = { workspace = true } # M2-WP03 reconcile.rs 桶哈希（与 graph merkle.rs 同源）
+tokio = { workspace = true } # M2-WP09 chaos.rs tokio::time::sleep（路由表控制延迟模拟）
 bip39 = "3" # M2-WP04 助记词词表（RustCrypto 生态）
 x25519-dalek = { version = "3", features = ["static_secrets"] } # M2-WP04 ECDH 配对
 ed25519-dalek = "3" # M2-WP04 设备身份签名（确定性 from_bytes，不需 rand_core）
