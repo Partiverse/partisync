@@ -129,6 +129,21 @@ CREATE TABLE IF NOT EXISTS sync_conflict (
     detected_hlc  TEXT NOT NULL,
     at_ns         INTEGER NOT NULL
 );
+-- v10（M2-WP08）：版本回收——staggered 版本化与 trash-can
+CREATE TABLE IF NOT EXISTS entry_version (
+    id            TEXT PRIMARY KEY,  -- 版本 ULID
+    path          TEXT NOT NULL,
+    content_id    TEXT,
+    size          INTEGER NOT NULL,
+    mtime_ns      INTEGER NOT NULL,
+    owner_device  TEXT,
+    state         INTEGER NOT NULL DEFAULT 0,  -- 0=staggered-versioned, 1=trashed
+    retired_at_ns INTEGER NOT NULL,
+    expires_at_ns INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_version_path ON entry_version(path);
+CREATE INDEX IF NOT EXISTS idx_version_expires ON entry_version(expires_at_ns);
+
 -- v9（M2-WP06）：占位符骨架同步与按需 hydrate
 -- entry.state 0=materialized, 1=placeholder；content_hydrated_at_ns 是内容到位时间戳；
 -- pin_count 是本端 pin 引用数（WP08 回收使用）。ALTER 列由 migrate() 防御性补列执行，

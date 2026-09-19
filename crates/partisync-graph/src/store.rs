@@ -1457,4 +1457,196 @@ impl Store {
     }
 }
 
+/// 条目版本记录（M2-WP08：staggered 版本化 + trash-can）。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct EntryVersionRow {
+    pub id: String,
+    pub path: String,
+    pub content_id: Option<String>,
+    pub size: i64,
+    pub mtime_ns: i64,
+    pub owner_device: Option<String>,
+    /// 0=staggered-versioned, 1=trashed
+    pub state: i64,
+    pub retired_at_ns: i64,
+    pub expires_at_ns: i64,
+}
+
+impl Store {
+    // ---- 版本回收（M2-WP08）----
+
+    /// 覆盖写前自动调用：把 entry 表当前行复制到 entry_version（staggered-versioned）。
+    /// 已存在版本行的不重复添加（幂等）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn retire_for_overwrite(&self, path: &str) -> Result<(), PartisyError> {
+        if let Some(row) = self.entry_by_path(path).await? {
+            sqlx::query(
+                "INSERT OR IGNORE INTO entry_version
+                    (id, path, content_id, size, mtime_ns, owner_device, state, retired_at_ns, expires_at_ns)
+                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+            )
+            .bind(Ulid::now().to_string())
+            .bind(path)
+            .bind(&row.content_id)
+            .bind(row.size)
+            .bind(row.mtime_ns)
+            .bind(&row.owner_device)
+            .bind(self.now_ns())
+            .bind(i64::MAX) // staggered 不自动过期——只受 K=5 滚动裁剪
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("退役条目快照", e))?;
+        }
+        Ok(())
+    }
+
+    /// trash：标记 entry 删除 + 在 entry_version 留 trashed 行（ttl_ns 后可物理删）。
+    /// pin_count > 0 时不 trash（pin 防回收）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；path 不存在 → no-op。
+    pub async fn trash_entry(&self, path: &str, ttl_ns: i64) -> Result<(), PartisyError> {
+        if let Some(row) = self.entry_by_path(path).await? {
+            if row.pin_count > 0 {
+                return Ok(()); // pin 防回收
+            }
+            let now = self.now_ns();
+            sqlx::query(
+                "INSERT INTO entry_version
+                    (id, path, content_id, size, mtime_ns, owner_device, state, retired_at_ns, expires_at_ns)
+                 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            )
+            .bind(Ulid::now().to_string())
+            .bind(path)
+            .bind(&row.content_id)
+            .bind(row.size)
+            .bind(row.mtime_ns)
+            .bind(&row.owner_device)
+            .bind(now)
+            .bind(now.saturating_add(ttl_ns))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("trash", e))?;
+            self.remove_entry(path).await?;
+        }
+        Ok(())
+    }
+
+    /// resurrect：从 entry_version 找最近一次 trashed 行，重新插入 entry。
+    ///
+    /// # Errors
+    /// path 已有 entry → Fatal（防覆盖）；无 trashed 版本 → no-op 返回空串。
+    pub async fn resurrect(&self, path: &str) -> Result<String, PartisyError> {
+        if self.entry_by_path(path).await?.is_some() {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("resurrect 目标路径已存在: {path}").into()),
+            });
+        }
+        let v: Option<EntryVersionRow> = sqlx::query_as(
+            "SELECT id, path, content_id, size, mtime_ns, owner_device, state, retired_at_ns, expires_at_ns
+             FROM entry_version WHERE path = ? AND state = 1
+             ORDER BY retired_at_ns DESC LIMIT 1",
+        )
+        .bind(path)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("resurrect 查询", e))?;
+        let Some(v) = v else { return Ok(String::new()) };
+        let parent = match v.path.rsplit_once('/') {
+            Some((p, _)) if !p.is_empty() => p.to_string(),
+            _ => "/".to_string(),
+        };
+        crate::journal::ensure_dir_chain_pub(self, path).await?;
+        let parent_id = self.entry_by_path(&parent).await?.map(|e| e.id);
+        let id = Ulid::now().to_string();
+        let kind = 0;
+        sqlx::query(
+            "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, owner_device, state)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(&id)
+        .bind(&parent_id)
+        .bind(kind)
+        .bind(v.path.rsplit('/').next().unwrap_or(&v.path))
+        .bind(path)
+        .bind(&v.content_id)
+        .bind(v.size)
+        .bind(v.mtime_ns)
+        .bind(&v.owner_device)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("resurrect 插入", e))?;
+        sqlx::query(
+            "INSERT INTO entry_closure (ancestor, descendant, depth)
+             SELECT ancestor, ?, depth + 1 FROM entry_closure WHERE descendant = ?
+             UNION ALL SELECT ?, ?, 0",
+        )
+        .bind(&id)
+        .bind(parent_id)
+        .bind(&id)
+        .bind(&id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("resurrect 闭包", e))?;
+        Ok(id)
+    }
+
+    /// 列某 path 的版本（按 retired_at_ns DESC）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn list_versions(&self, path: &str) -> Result<Vec<EntryVersionRow>, PartisyError> {
+        sqlx::query_as::<_, EntryVersionRow>(
+            "SELECT id, path, content_id, size, mtime_ns, owner_device, state, retired_at_ns, expires_at_ns
+             FROM entry_version WHERE path = ? ORDER BY retired_at_ns DESC",
+        )
+        .bind(path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("列版本", e))
+    }
+
+    /// GC：删 expires_at_ns < now 的 trashed 行；staggered 滚动裁剪（K=5）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn gc_expired(&self) -> Result<u64, PartisyError> {
+        let now = self.now_ns();
+        let mut tx = self.pool.begin().await.map_err(|e| db_err("GC tx", e))?;
+        let n_trashed =
+            sqlx::query("DELETE FROM entry_version WHERE state = 1 AND expires_at_ns < ?")
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| db_err("GC trash", e))?
+                .rows_affected();
+        sqlx::query(
+            "DELETE FROM entry_version WHERE state = 0 AND id IN (
+                SELECT id FROM entry_version v
+                WHERE state = 0 AND (
+                    SELECT COUNT(*) FROM entry_version v2
+                    WHERE v2.path = v.path AND v2.state = 0 AND v2.retired_at_ns >= v.retired_at_ns
+                ) > 5
+             )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_err("GC stagger", e))?;
+        tx.commit().await.map_err(|e| db_err("GC 提交", e))?;
+        Ok(n_trashed)
+    }
+
+    fn now_ns(&self) -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        )
+        .unwrap_or(i64::MAX)
+    }
+}
+
 use std::str::FromStr as _;
