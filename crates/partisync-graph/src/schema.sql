@@ -147,22 +147,27 @@ CREATE INDEX IF NOT EXISTS idx_version_expires ON entry_version(expires_at_ns);
 -- v12（M2-WP07）：空间加密元数据
 -- space_id=主 key；kek_hash = blake3(master_key) 的 hex 截位——证明本机已掌握 master_key
 --   而不暴露 master_key 本身；alg 留作未来切换算法（v1 = "xchacha20-blake3-v1"）
+-- v12（M2-WP07）：空间加密元数据
+-- v14（SEC-AUDIT-2026-M2-001 P2-3）：kdf_salt = 16 字节 CSPRNG 持久盐（首次初始化生成，
+-- 生产 master_key 派生必须用它；NULL = 旧库未初始化，防御性补列由 migrate() 执行）
 CREATE TABLE IF NOT EXISTS space_crypto (
     space_id TEXT PRIMARY KEY,
     kek_hash TEXT NOT NULL,
     alg      TEXT NOT NULL DEFAULT 'xchacha20-blake3-v1',
+    kdf_salt BLOB,
     created_ns INTEGER NOT NULL
 );
 
 -- v11（M2-WP04）：设备网络与助记词配对
 -- device 表 endpoint / pairing_state 由 migrate() 防御性补列
+-- v13（SEC-AUDIT-2026-M2-001 P1-2）：ephemeral_sk 不再落盘（PFS）——临时私钥仅驻留
+-- 发起方进程内存，会话行只存公钥；旧库由 migrate() 重建为最终形态
 CREATE TABLE IF NOT EXISTS pairing_session (
     id              TEXT PRIMARY KEY,   -- ULID
     code            TEXT NOT NULL,      -- 12 词助记词（空格串）
     initiator_dev   TEXT NOT NULL,
     responder_dev   TEXT,
     state           INTEGER NOT NULL DEFAULT 0,  -- 0=open, 1=accepted, 2=closed
-    ephemeral_sk    BLOB NOT NULL,       -- 发起方临时 X25519 私钥
     ephemeral_pk    BLOB NOT NULL,
     shared_secret   BLOB,
     created_ns      INTEGER NOT NULL,

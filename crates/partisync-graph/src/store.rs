@@ -277,6 +277,36 @@ impl Store {
         let _ = sqlx::raw_sql("ALTER TABLE device ADD COLUMN last_endpoint_update_ns INTEGER")
             .execute(pool)
             .await;
+        // v13（SEC-AUDIT-2026-M2-001 P1-2，PFS）：pairing_session 重建为无私钥形态。
+        // 旧库含 ephemeral_sk NOT NULL 列——临时私钥曾落盘，与 PFS 相悖；此处统一重建
+        // （新库为幂等空转）。注意 SQLite 不支持 DROP COLUMN 顺手解除 NOT NULL 语义，
+        // 且落盘私钥本就应从旧页中消失，故不迁移该列数据。
+        let _ = sqlx::raw_sql(
+            "CREATE TABLE pairing_session_rebuild (
+                id              TEXT PRIMARY KEY,
+                code            TEXT NOT NULL,
+                initiator_dev   TEXT NOT NULL,
+                responder_dev   TEXT,
+                state           INTEGER NOT NULL DEFAULT 0,
+                ephemeral_pk    BLOB NOT NULL,
+                shared_secret   BLOB,
+                created_ns      INTEGER NOT NULL,
+                expires_ns      INTEGER NOT NULL);
+             INSERT INTO pairing_session_rebuild
+                SELECT id, code, initiator_dev, responder_dev, state,
+                       ephemeral_pk, shared_secret, created_ns, expires_ns
+                FROM pairing_session;
+             DROP TABLE pairing_session;
+             ALTER TABLE pairing_session_rebuild RENAME TO pairing_session;
+             CREATE INDEX IF NOT EXISTS idx_pairing_state
+                ON pairing_session(state, expires_ns);",
+        )
+        .execute(pool)
+        .await;
+        // v14（SEC-AUDIT P2-3）：space_crypto 补随机持久盐列（新库 schema 已含）
+        let _ = sqlx::raw_sql("ALTER TABLE space_crypto ADD COLUMN kdf_salt BLOB")
+            .execute(pool)
+            .await;
         Ok(())
     }
 
@@ -1672,15 +1702,18 @@ impl Store {
 }
 
 /// 空间加密元数据（M2-WP07：登记 master_key 持有证明）。
+/// kdf_salt = 16 字节 CSPRNG 持久盐（SEC-AUDIT P2-3；旧库未初始化时为 NULL）。
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct SpaceCryptoRow {
     pub space_id: String,
     pub kek_hash: String,
     pub alg: String,
+    pub kdf_salt: Option<Vec<u8>>,
     pub created_ns: i64,
 }
 
 /// 配对会话行（M2-WP04：助记词配对状态机）。
+/// PFS（SEC-AUDIT-2026-M2-001 P1-2）：临时私钥不入库，仅驻留发起方进程内存。
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct PairingSessionRow {
     pub id: String,
@@ -1689,7 +1722,6 @@ pub struct PairingSessionRow {
     pub responder_dev: Option<String>,
     /// 0=open, 1=accepted, 2=closed
     pub state: i64,
-    pub ephemeral_sk: Vec<u8>,
     pub ephemeral_pk: Vec<u8>,
     pub shared_secret: Option<Vec<u8>>,
     pub created_ns: i64,
@@ -1734,8 +1766,8 @@ impl Store {
         Ok(v.unwrap_or(0))
     }
 
-    /// 创建配对会话（发起方调用）。code = 12 词助记词空格串；ephemeral_sk/pk
-    /// 为发起方临时 X25519 密钥对字节（32 字节私钥 / 32 字节公钥）。
+    /// 创建配对会话（发起方调用）。code = 12 词助记词空格串；ephemeral_pk 为
+    /// 发起方临时 X25519 公钥。临时私钥不入库（PFS，SEC-AUDIT-2026-M2-001）。
     ///
     /// # Errors
     /// DB 错误 → Fatal。
@@ -1744,20 +1776,18 @@ impl Store {
         id: &str,
         code: &str,
         initiator_dev: &str,
-        ephemeral_sk: &[u8],
         ephemeral_pk: &[u8],
         ttl_ns: i64,
     ) -> Result<(), PartisyError> {
         let now = self.now_ns();
         sqlx::query(
             "INSERT INTO pairing_session
-                (id, code, initiator_dev, state, ephemeral_sk, ephemeral_pk, created_ns, expires_ns)
-             VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
+                (id, code, initiator_dev, state, ephemeral_pk, created_ns, expires_ns)
+             VALUES (?, ?, ?, 0, ?, ?, ?)",
         )
         .bind(id)
         .bind(code)
         .bind(initiator_dev)
-        .bind(ephemeral_sk)
         .bind(ephemeral_pk)
         .bind(now)
         .bind(now.saturating_add(ttl_ns))
@@ -1776,7 +1806,7 @@ impl Store {
         code: &str,
     ) -> Result<Option<PairingSessionRow>, PartisyError> {
         sqlx::query_as::<_, PairingSessionRow>(
-            "SELECT id, code, initiator_dev, responder_dev, state, ephemeral_sk, ephemeral_pk,
+            "SELECT id, code, initiator_dev, responder_dev, state, ephemeral_pk,
                     shared_secret, created_ns, expires_ns
              FROM pairing_session
              WHERE code = ? AND state = 0 AND expires_ns > ?
@@ -1822,7 +1852,7 @@ impl Store {
         id: &str,
     ) -> Result<Option<PairingSessionRow>, PartisyError> {
         sqlx::query_as::<_, PairingSessionRow>(
-            "SELECT id, code, initiator_dev, responder_dev, state, ephemeral_sk, ephemeral_pk,
+            "SELECT id, code, initiator_dev, responder_dev, state, ephemeral_pk,
                     shared_secret, created_ns, expires_ns
              FROM pairing_session WHERE id = ?",
         )
@@ -1872,12 +1902,62 @@ impl Store {
         space_id: &str,
     ) -> Result<Option<SpaceCryptoRow>, PartisyError> {
         sqlx::query_as::<_, SpaceCryptoRow>(
-            "SELECT space_id, kek_hash, alg, created_ns FROM space_crypto WHERE space_id = ?",
+            "SELECT space_id, kek_hash, alg, kdf_salt, created_ns FROM space_crypto WHERE space_id = ?",
         )
         .bind(space_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| db_err("查 space_crypto", e))
+    }
+
+    /// 读空间 KDF 盐（SEC-AUDIT P2-3：生产 master_key 派生必须持随机持久盐）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；行存在但盐长度异常 → Fatal。
+    pub async fn space_kdf_salt(&self, space_id: &str) -> Result<Option<[u8; 16]>, PartisyError> {
+        let row: Option<Option<Vec<u8>>> =
+            sqlx::query_scalar("SELECT kdf_salt FROM space_crypto WHERE space_id = ?")
+                .bind(space_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| db_err("查 kdf_salt", e))?;
+        row.flatten()
+            .map(|b| {
+                b.as_slice().try_into().map_err(|_| {
+                    db_err(
+                        "kdf_salt 长度异常",
+                        sqlx::Error::ColumnDecode {
+                            index: "kdf_salt".into(),
+                            source: format!("期望 16 字节，得 {} 字节", b.len()).into(),
+                        },
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    /// 写空间 KDF 盐（首写固定：已存在盐不被覆盖——轮换盐等于作废全部已加密内容）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn upsert_space_kdf_salt(
+        &self,
+        space_id: &str,
+        salt: &[u8; 16],
+    ) -> Result<(), PartisyError> {
+        sqlx::query(
+            "INSERT INTO space_crypto (space_id, kek_hash, alg, kdf_salt, created_ns)
+             VALUES (?, '', 'xchacha20-blake3-v1', ?, ?)
+             ON CONFLICT(space_id) DO UPDATE SET
+                 kdf_salt = COALESCE(space_crypto.kdf_salt, excluded.kdf_salt)",
+        )
+        .bind(space_id)
+        .bind(salt.as_slice())
+        .bind(self.now_ns())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("写 kdf_salt", e))?;
+        Ok(())
     }
 }
 

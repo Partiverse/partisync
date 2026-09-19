@@ -146,5 +146,34 @@ async fn register_with_kek_hash_round_trip_persists() {
     );
 }
 
+#[tokio::test]
+async fn kdf_salt_persist_first_write_wins() {
+    // SEC-AUDIT P2-3：生产空间持随机持久盐；首写固定（盐轮换=作废已加密内容）
+    let s = node("salt").await;
+    assert!(s.space_kdf_salt("default").await.unwrap().is_none());
+    let salt = crypto::random_kdf_salt();
+    s.upsert_space_kdf_salt("default", &salt).await.unwrap();
+    s.upsert_space_kdf_salt("default", &[9u8; 16])
+        .await
+        .unwrap();
+    assert_eq!(
+        s.space_kdf_salt("default").await.unwrap(),
+        Some(salt),
+        "已存在的盐不被覆盖（first-write-wins）"
+    );
+    // 随机盐 → master → kek_hash 登记全链路
+    let master = crypto::argon2_master_key_with_salt(
+        "abandon ability able about above absent absorb abstract absurd abuse access accident",
+        &salt,
+    );
+    let kek = kek_hash_of(&master);
+    s.register_space_crypto("default", &kek, "xchacha20-blake3-v1")
+        .await
+        .unwrap();
+    let row = s.space_crypto("default").await.unwrap().unwrap();
+    assert_eq!(row.kek_hash, kek);
+    assert_eq!(row.kdf_salt.as_deref(), Some(salt.as_slice()));
+}
+
 #[allow(dead_code)]
 fn _unused_hash(_: Hash) {}
