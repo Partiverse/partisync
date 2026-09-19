@@ -700,30 +700,27 @@ impl Store {
                 .unwrap_or_else(|| "unknown".into());
             if existing_owner != owner_device {
                 let incoming_content = content.map(|(h, _)| h);
-                let mut i = 0u32;
-                loop {
-                    let cand = if i == 0 {
-                        format!("{path}.conflict-{owner_device}")
-                    } else {
-                        format!("{path}.conflict-{owner_device}-{i}")
-                    };
+                // 候选序：base、-2、-3…-64；全被占则 ULID 兜底（病态多版本，
+                // 版本回收归 WP08）。同内容复用 = 同版本重复投递（幂等），不另开副本
+                let mut placed = false;
+                for sfx in std::iter::once(String::new()).chain((2..=64).map(|k| format!("-{k}"))) {
+                    let cand = format!("{path}.conflict-{owner_device}{sfx}");
                     match self.entry_by_path(&cand).await? {
                         None => {
                             final_path = cand;
+                            placed = true;
                             break;
                         }
-                        // 同内容复用：同版本重复投递（幂等），不另开副本
                         Some(c) if c.content_id.as_deref() == incoming_content => {
                             final_path = cand;
+                            placed = true;
                             break;
                         }
-                        Some(_) => i += 1,
+                        Some(_) => {}
                     }
-                    if i > 64 {
-                        // 病态多版本兜底：ULID 后缀保证终止（版本回收归 WP08）
-                        final_path = format!("{path}.conflict-{owner_device}-{}", Ulid::now());
-                        break;
-                    }
+                }
+                if !placed {
+                    final_path = format!("{path}.conflict-{owner_device}-{}", Ulid::now());
                 }
                 conflict = Some(ApplyConflict {
                     base_path: path.to_string(),
@@ -738,6 +735,7 @@ impl Store {
             _ => "/".to_string(),
         };
         let parent_id = self.entry_by_path(&parent_path).await?.map(|e| e.id);
+        let existed = self.entry_by_path(&final_path).await?.is_some();
         if let Some((hash, csize)) = content {
             sqlx::query("INSERT OR IGNORE INTO content (id, size) VALUES (?, ?)")
                 .bind(hash)
@@ -757,7 +755,7 @@ impl Store {
              RETURNING id",
         )
         .bind(&id)
-        .bind(parent_id)
+        .bind(&parent_id)
         .bind(kind as i64)
         .bind(name)
         .bind(&final_path)
@@ -769,6 +767,23 @@ impl Store {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| db_err("应用远端条目", e))?;
+        // 新插入行须维护闭包（与 add_entry 同款）——否则远端条目 remove_entry/
+        // ancestors_of 全部失效（WP02 测试暴露的 WP01 潜在缺陷）；复用既有行
+        // （ON CONFLICT 更新）时闭包已在，跳过防 PK 冲突
+        if !existed {
+            sqlx::query(
+                "INSERT INTO entry_closure (ancestor, descendant, depth)
+                 SELECT ancestor, ?, depth + 1 FROM entry_closure WHERE descendant = ?
+                 UNION ALL SELECT ?, ?, 0",
+            )
+            .bind(&id)
+            .bind(parent_id)
+            .bind(&id)
+            .bind(&id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("维护远端闭包", e))?;
+        }
         Ok(ApplyOutcome {
             path: final_path,
             conflict,
