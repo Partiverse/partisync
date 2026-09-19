@@ -43,3 +43,19 @@ M2-WP07 端到端加密：空间级密钥层次 + 助记词配对 → 派生主�
 - 外部审计发现关键算法不合规 → 评估 RustCrypto vs aws-lc-rs 切换；
 - Argon2 启动时延阻塞冷启动场景 → 评估 m/t 参数降级 + 内存硬化参数固化；
 - 移动端 M6 内存约束下 Argon2id 不可行 → 评估 scrypt 或 PBKDF2 兜底。
+
+## 修订 1（2026-09-19，SEC-AUDIT-2026-M2-001 友邻审计整改）
+友邻审计（Conditional Pass，报告 `docs/reviews/M2-cryptography-audit-report.md`）
+发现两处与本 ADR 决策的偏差，按「Don't Roll Your Own Crypto」原则整改：
+1. **KDF 实现标准化（P1-1）**：决策 2 中「HKDF-blake3 自实现」废弃——blake3 不是
+   HKDF，用 Hasher keying 模拟属自研构造。改用 blake3 官方 Key Derivation 模式
+   `blake3::derive_key`（形式化验证 + 引擎层域分离）：context 为协议级常量
+   （`partisync space-key-v1` / `partisync content-key-v1` / `partisync meta-key-v1`），
+   变长输入（master/space_id/content_id）全部走 key_material。依赖不变。
+2. **盐策略收紧（P2-3）**：master_key 的 salt 不再由 space_id 确定性派生
+   （固定 space_id ⇒ 全局同盐，抗彩虹表弱化）。生产空间改为 16 字节 CSPRNG
+   随机盐，经 `space_crypto.kdf_salt` 持久化（首写固定）；space_id 绑定盐仅限
+   测试与无状态派生。确定性让位于存储的盐——解锁路径依赖 `kdf_salt` 字段。
+3. **密钥内存封装（P2-4）**：派生密钥输出一律 `Zeroizing<[u8; 32]>` 包裹，
+   覆盖编译器栈拷贝/异步逃逸残留面（zeroize 依赖不变）。
+配套：`pairing_session.ephemeral_sk` 移出持久层（PFS，见 SPEC M2-WP04 修订）。
