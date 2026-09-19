@@ -7,6 +7,11 @@ description = "Hub：分片元数据(fjall)、openraft 复制、联邦路由、�
 
 [dependencies]
 fjall.workspace = true # ADR-0011
+blake3.workspace = true # ADR-0002/0011：分片路由哈希（非 KDF）
+
+[dev-dependencies]
+partisync-core = { path = "../partisync-core" } # 测试临时目录 Ulid
+proptest = { workspace = true }
 
 [lints]
 workspace = true

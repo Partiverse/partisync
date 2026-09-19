@@ -2064,7 +2064,10 @@ dependencies = [
 name = "partisync-hub"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "fjall",
+ "partisync-core",
+ "proptest",
 ]
 
 [[package]]
