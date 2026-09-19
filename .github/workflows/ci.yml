@@ -49,6 +49,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # 互操作认证矩阵（SPEC M1-WP08）：rclone S3/WebDAV + 消费面 + 跨协议。
+  # D10（CI 计费闸门）解除后本 job 自动生效。
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone curl
+      - run: cargo build -q -p partisync-cli
+      - run: scripts/interop.sh
+
   # 铁律 2（追溯唯一）：PR 中每个非合并提交必须携带合规 Task-ID trailer。
   task-ids:
     if: github.event_name == 'pull_request'
