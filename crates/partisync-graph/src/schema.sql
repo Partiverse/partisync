@@ -74,3 +74,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_ns INTEGER NOT NULL,
     updated_ns INTEGER NOT NULL
 );
+
+-- v5（M1-WP08）：目录列表排序复合索引——顶层 16 万子项目录
+-- ORDER BY kind,name 全排序 500ms+（实测），复合索引消除
+CREATE INDEX IF NOT EXISTS idx_entry_parent_order ON entry(parent_id, kind DESC, name);

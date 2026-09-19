@@ -281,7 +281,8 @@ impl Store {
         .map_err(|e| db_err("查询条目", e))
     }
 
-    /// 列出直接子项（目录在前，名称序）。
+    /// 列出直接子项（目录在前，名称序；LIMIT 1000——病态大目录的 UI 分页，
+    /// M1-WP08 实测：顶层 16 万子项目录无限制时序列化 1.3s）。
     ///
     /// # Errors
     /// DB 错误 → Fatal。
@@ -289,7 +290,7 @@ impl Store {
         sqlx::query_as::<_, EntryRow>(
             "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry
              WHERE parent_id = (SELECT id FROM entry WHERE path = ?)
-             ORDER BY kind DESC, name",
+             ORDER BY kind DESC, name LIMIT 1000",
         )
         .bind(parent_path)
         .fetch_all(&self.pool)
