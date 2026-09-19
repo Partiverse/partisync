@@ -268,7 +268,6 @@ proptest! {
             let mut created: [Vec<String>; 3] = [vec![], vec![], vec![]];
             for (seq, node_i, pick, size, is_remove) in ops {
                 let n = &nodes[node_i as usize];
-                let dev = devs[node_i as usize];
                 if is_remove == 0 || created[node_i as usize].is_empty() {
                     let path = format!("/n{node_i}-f{seq}-{pick}");
                     n.add_entry(Some(&roots[node_i as usize]), &path[1..], &path, EntryKind::File,
