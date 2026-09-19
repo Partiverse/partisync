@@ -6,6 +6,7 @@
 pub mod indexer;
 pub mod jobs;
 pub mod journal;
+pub mod merkle;
 pub mod remote_index;
 pub mod store;
 pub mod watch;

@@ -131,3 +131,18 @@ CREATE TABLE IF NOT EXISTS sync_conflict (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conflict_dedup
     ON sync_conflict(base_path, incoming_path, detected_hlc);
+
+-- v8（M2-WP03）：对账基建——持久时钟与来源水位
+-- 本店 HLC 时钟顶（oplog 键同构）：修复时钟随进程重启回退的潜在缺陷，
+-- 也是「本机是否又产生了新写入」的对账判据
+CREATE TABLE IF NOT EXISTS sync_clock (
+    id  INTEGER PRIMARY KEY CHECK (id = 1),
+    top TEXT NOT NULL
+);
+-- 水位：来自 device 的 oplog 行，本店已应用（或 LWW 裁决过）的最大键
+CREATE TABLE IF NOT EXISTS sync_watermark (
+    device   TEXT NOT NULL,
+    space_id TEXT NOT NULL DEFAULT 'default',
+    last_hlc TEXT NOT NULL,
+    PRIMARY KEY (device, space_id)
+);

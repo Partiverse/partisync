@@ -170,10 +170,7 @@ impl Store {
             .await
             .map_err(|e| db_err("打开数据库", e))?;
         Self::migrate(&pool).await?;
-        Ok(Store {
-            pool,
-            oplog_clock: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-        })
+        Self::attach(pool).await
     }
 
     /// 内存库（测试/临时索引）。单连接：内存库不跨连接共享。
@@ -187,10 +184,36 @@ impl Store {
             .await
             .map_err(|e| db_err("打开内存库", e))?;
         Self::migrate(&pool).await?;
+        Self::attach(pool).await
+    }
+
+    /// 迁移后装配：从 `sync_clock` 恢复 HLC 时钟（M2-WP03）——
+    /// 重启后新键严格大于关闭前（修复 WP01 时钟随进程回退的隐患）。
+    async fn attach(pool: SqlitePool) -> Result<Self, PartisyError> {
+        let top: Option<String> = sqlx::query_scalar("SELECT top FROM sync_clock WHERE id = 1")
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| db_err("恢复时钟", e))?;
         Ok(Store {
             pool,
-            oplog_clock: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            oplog_clock: std::sync::Arc::new(tokio::sync::Mutex::new(
+                top.and_then(|k| partisync_core::Hlc::from_key(&k)),
+            )),
         })
+    }
+
+    /// 时钟顶落盘（单调 UPSERT——只接受更大的键，防御乱序持久化）。
+    async fn persist_clock(&self, key: &str) -> Result<(), PartisyError> {
+        sqlx::query(
+            "INSERT INTO sync_clock (id, top) VALUES (1, ?)
+             ON CONFLICT(id) DO UPDATE SET top = excluded.top
+             WHERE excluded.top > sync_clock.top",
+        )
+        .bind(key)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("持久化时钟", e))?;
+        Ok(())
     }
 
     async fn migrate(pool: &SqlitePool) -> Result<(), PartisyError> {
@@ -575,6 +598,7 @@ impl Store {
         .execute(&self.pool)
         .await
         .map_err(|e| db_err("记录 oplog", e))?;
+        self.persist_clock(&key).await?;
         Ok(key)
     }
 
@@ -635,6 +659,7 @@ impl Store {
         .execute(&self.pool)
         .await
         .map_err(|e| db_err("中继 oplog", e))?;
+        self.persist_clock(hlc_key).await?;
         Ok(())
     }
 
@@ -1190,6 +1215,91 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| db_err("列冲突血缘", e))
+    }
+}
+
+impl Store {
+    // ---- 水位（M2-WP03 对账快路径用）----
+
+    /// 记录单条应用过的 oplog 键对应的 origin 水位（按 origin 单调）；
+    /// 同 origin 多次调用取最大键——可重入安全。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn note_applied(&self, origin: &str, hlc: &str) -> Result<(), PartisyError> {
+        sqlx::query(
+            "INSERT INTO sync_watermark (device, space_id, last_hlc) VALUES (?, 'default', ?)
+             ON CONFLICT(device, space_id) DO UPDATE SET last_hlc = excluded.last_hlc
+             WHERE excluded.last_hlc > sync_watermark.last_hlc",
+        )
+        .bind(origin)
+        .bind(hlc)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("记水位", e))?;
+        Ok(())
+    }
+
+    /// 全表导出（origin → 最高键）：对账快路径互换。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn watermarks(&self) -> Result<Vec<(String, String)>, PartisyError> {
+        sqlx::query_as::<_, (String, String)>("SELECT device, last_hlc FROM sync_watermark")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| db_err("列水位", e))
+    }
+
+    /// 本店时钟顶（HLC key 形式）——「本机是否又产生了新写入」的对账判据。
+    /// 无键 ⇒ 本机尚未做任何写入（首次对账与 fresh joiner 校验）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn clock_top(&self) -> Result<Option<String>, PartisyError> {
+        sqlx::query_scalar::<_, String>("SELECT top FROM sync_clock WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| db_err("读时钟顶", e))
+    }
+
+    // ---- 状态导出（M2-WP03 Merkle 叶集合扫描）----
+
+    /// entry 状态叶：(path, kind, content_id, owner)。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn entry_state_leaves(
+        &self,
+    ) -> Result<Vec<(String, i64, Option<String>, Option<String>)>, PartisyError> {
+        sqlx::query_as("SELECT path, kind, content_id, owner_device FROM entry")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| db_err("扫 entry 叶", e))
+    }
+
+    /// tag 状态叶：(key="tag/{id}", name, color, deleted)——LWW 水位不进叶哈希。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn tag_state_leaves(
+        &self,
+    ) -> Result<Vec<(String, String, Option<String>, i64)>, PartisyError> {
+        sqlx::query_as("SELECT id, name, color, deleted FROM tag")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| db_err("扫 tag 叶", e))
+    }
+
+    /// entry_tag 状态叶：(key="link/{tag_id}␟{path}", deleted)。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn link_state_leaves(&self) -> Result<Vec<(String, i64)>, PartisyError> {
+        sqlx::query_as("SELECT tag_id, entry_path, deleted FROM entry_tag")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| db_err("扫链接叶", e))
     }
 }
 

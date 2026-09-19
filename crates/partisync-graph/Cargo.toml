@@ -12,6 +12,7 @@ partisync-provider = { path = "../partisync-provider" } # ADR-0007 同层裁定�
 sqlx = { workspace = true }
 walkdir = { workspace = true }
 notify = { workspace = true } # ADR-0005：文件事件源
+blake3 = { workspace = true } # M2-WP03 merkle.rs 状态叶哈希
 tokio = { workspace = true }
 serde = { workspace = true }
 
