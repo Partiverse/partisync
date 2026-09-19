@@ -1,6 +1,6 @@
 # ADR-0011: Hub L1 元数据引擎以 fjall 3.1 为底座
 
-状态: 提议 · 日期: 2026-09-20 · 决策人: @lead（AI 代理起草，待人工签核）
+状态: 已接受 · 日期: 2026-09-20 · 决策人: @lead（AI 代理起草，用户已签核 2026-09-20）
 关联: SPEC M3-WP01、M3-WP00（依赖 ADR 清单）、调研方案 §5.6（L1 Hub 行）/§6 选型表、ADR-0002（依赖治理先例）
 
 ## 背景
@@ -42,9 +42,21 @@ M3-WP01 把 hub 元数据平面抬到 10⁹ 条目：需要 LSM 型 KV（顺序�
 
 ## 后果
 
-- deny.toml 无需改白名单（许可证已覆盖）；`[bans] multiple-versions = "warn"`
-  可能因 fjall 传递依赖出现新告警——进场提交时如实登记，不放宽阈值；
+- ~~deny.toml 无需改白名单（许可证已覆盖）~~ **进场修订（2026-09-20，签核决策的
+  机械后果）**：fjall 传递依赖引入两个白名单外许可证——`varint-rs 2.2.1`（0BSD）
+  与 `xxhash-rust 0.8.18`（BSL-1.0，Boost Software License）。两者均为 OSI 认可的
+  宽松许可，随本 ADR 一并加入 deny.toml allow（不放宽任何其他阈值）；
 - fjall 3.x 仍在 1.0 前的快速演进带（2→3 有破坏性变更史）——升级跟随
   dependabot，破坏性升级按铁律 8 走独立 PR + 全量回归；
 - 单实例多 keyspace 的句柄/内存开销（×256 分片）是 T03 必测项（SPEC 风险节）；
 - 本 ADR 签核后，WP01-T03 起的实现方可携带该依赖进场。
+
+## 进场记录（T02 执行结果）
+
+- cargo-deny 0.20.2：licenses/bans 相对进场前基线**零新增失败**（新增的
+  0BSD/BSL-1.0 已按上文加入 allow）；
+- **基线既有失败（与本 ADR 无关，登记待另开任务）**：① workspace 内 7 组
+  path 依赖被 `wildcards = "deny"` 判罚（partisync-cli/graph/transfer/sync/
+  provider/cas，疑为 cargo-deny 版本演进导致基线转红）；② `webpki-root-certs
+  1.0.9`（CDLA-Permissive-2.0，reqwest dev 链）不在白名单。均不在 T02 范围，
+  按「顺手修另开任务」纪律登记。
