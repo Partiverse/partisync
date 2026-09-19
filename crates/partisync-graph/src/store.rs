@@ -411,7 +411,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn entry_by_path(&self, path: &str) -> Result<Option<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device FROM entry WHERE path = ?",
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device, state, content_hydrated_at_ns, pin_count FROM entry WHERE path = ?",
         )
         .bind(path)
         .fetch_optional(&self.pool)
@@ -426,7 +426,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn children(&self, parent_path: &str) -> Result<Vec<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device FROM entry
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device, state, content_hydrated_at_ns, pin_count FROM entry
              WHERE parent_id = (SELECT id FROM entry WHERE path = ?)
              ORDER BY kind DESC, name LIMIT 1000",
         )
@@ -860,7 +860,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device FROM entry
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device, state, content_hydrated_at_ns, pin_count FROM entry
              WHERE name LIKE '%' || ? || '%' ORDER BY kind DESC, name LIMIT ?",
         )
         .bind(q)
@@ -946,7 +946,7 @@ impl Store {
                 .await
                 .map_err(|e| db_err("重复组大小", e))?;
             let copies = sqlx::query_as::<_, EntryRow>(
-                "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device FROM entry
+                "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device, state, content_hydrated_at_ns, pin_count FROM entry
                  WHERE content_id = ? ORDER BY path",
             )
             .bind(&content_id)
