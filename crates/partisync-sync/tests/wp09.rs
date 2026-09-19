@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use partisync_core::Ulid;
-use partisync_graph::store::{EntryKind, Store};
+use partisync_graph::store::EntryKind;
 use partisync_sync::capture;
 use partisync_sync::chaos::ChaosSim;
 use partisync_sync::failpoint;
@@ -98,9 +98,7 @@ async fn three_node_asymmetric_partition_converges_via_relay() {
         let _ = sim.push("b", "a").await;
         let _ = sim.push("b", "c").await;
     }
-    let sa: BTreeSet<_> = state_paths(&sim, "a").await.into_iter().collect();
     let sb: BTreeSet<_> = state_paths(&sim, "b").await.into_iter().collect();
-    let sc: BTreeSet<_> = state_paths(&sim, "c").await.into_iter().collect();
     // B 必然含双侧副本（A→B 推过 /a-only、C→B 推过 /c-only）
     assert!(sb.contains("/a-only"));
     assert!(sb.contains("/c-only"));

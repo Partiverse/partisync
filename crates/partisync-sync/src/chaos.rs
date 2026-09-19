@@ -162,6 +162,7 @@ mod tests {
         sim.set_partition("a", "b", true);
         let stats = sim.push("a", "b").await.unwrap();
         // 第一次恢复后无数据，但仍能调用
-        assert!(stats.applied == 0 || stats.applied > 0);
+        // 第一次恢复后无数据，但仍能调用——push 不 panic 即过
+        let _ = stats;
     }
 }
