@@ -7,5 +7,6 @@
 //! ACK 裁剪：对端确认后删除已应用行。Merkle 对账：水位快路径 + 分级桶下钻修复。
 
 pub mod capture;
+pub mod pairing;
 pub mod reconcile;
 pub mod session;

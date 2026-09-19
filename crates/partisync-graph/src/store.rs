@@ -266,6 +266,17 @@ impl Store {
         let _ = sqlx::raw_sql("UPDATE entry SET state = 1 WHERE state IS NULL")
             .execute(pool)
             .await;
+        // v11（M2-WP04）：device 扩 endpoint / pairing_state / last_endpoint_update
+        let _ = sqlx::raw_sql("ALTER TABLE device ADD COLUMN endpoint TEXT")
+            .execute(pool)
+            .await;
+        let _ =
+            sqlx::raw_sql("ALTER TABLE device ADD COLUMN pairing_state INTEGER NOT NULL DEFAULT 0")
+                .execute(pool)
+                .await;
+        let _ = sqlx::raw_sql("ALTER TABLE device ADD COLUMN last_endpoint_update_ns INTEGER")
+            .execute(pool)
+            .await;
         Ok(())
     }
 
@@ -1657,6 +1668,159 @@ impl Store {
                 .map_or(0, |d| d.as_nanos()),
         )
         .unwrap_or(i64::MAX)
+    }
+}
+
+/// 配对会话行（M2-WP04：助记词配对状态机）。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct PairingSessionRow {
+    pub id: String,
+    pub code: String,
+    pub initiator_dev: String,
+    pub responder_dev: Option<String>,
+    /// 0=open, 1=accepted, 2=closed
+    pub state: i64,
+    pub ephemeral_sk: Vec<u8>,
+    pub ephemeral_pk: Vec<u8>,
+    pub shared_secret: Option<Vec<u8>>,
+    pub created_ns: i64,
+    pub expires_ns: i64,
+}
+
+impl Store {
+    // ---- 设备注册与配对（M2-WP04）----
+
+    /// 登记设备 endpoint（M2-WP04：iroh NodeAddr 序列化）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；device_id 不存在 → Fatal。
+    pub async fn set_device_endpoint(
+        &self,
+        device_id: &str,
+        endpoint: &str,
+    ) -> Result<(), PartisyError> {
+        sqlx::query(
+            "UPDATE device SET endpoint = ?, pairing_state = 2, last_endpoint_update_ns = ?
+             WHERE id = ?",
+        )
+        .bind(endpoint)
+        .bind(self.now_ns())
+        .bind(device_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("登记 endpoint", e))?;
+        Ok(())
+    }
+
+    /// 设备配对状态查询。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；device 不存在 → 0。
+    pub async fn device_pairing_state(&self, device_id: &str) -> Result<i64, PartisyError> {
+        let v: Option<i64> = sqlx::query_scalar("SELECT pairing_state FROM device WHERE id = ?")
+            .bind(device_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| db_err("查 pairing_state", e))?;
+        Ok(v.unwrap_or(0))
+    }
+
+    /// 创建配对会话（发起方调用）。code = 12 词助记词空格串；ephemeral_sk/pk
+    /// 为发起方临时 X25519 密钥对字节（32 字节私钥 / 32 字节公钥）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn create_pairing_session(
+        &self,
+        id: &str,
+        code: &str,
+        initiator_dev: &str,
+        ephemeral_sk: &[u8],
+        ephemeral_pk: &[u8],
+        ttl_ns: i64,
+    ) -> Result<(), PartisyError> {
+        let now = self.now_ns();
+        sqlx::query(
+            "INSERT INTO pairing_session
+                (id, code, initiator_dev, state, ephemeral_sk, ephemeral_pk, created_ns, expires_ns)
+             VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(code)
+        .bind(initiator_dev)
+        .bind(ephemeral_sk)
+        .bind(ephemeral_pk)
+        .bind(now)
+        .bind(now.saturating_add(ttl_ns))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("建配对会话", e))?;
+        Ok(())
+    }
+
+    /// 按 code 查未过期 open 会话。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn pairing_session_by_code(
+        &self,
+        code: &str,
+    ) -> Result<Option<PairingSessionRow>, PartisyError> {
+        sqlx::query_as::<_, PairingSessionRow>(
+            "SELECT id, code, initiator_dev, responder_dev, state, ephemeral_sk, ephemeral_pk,
+                    shared_secret, created_ns, expires_ns
+             FROM pairing_session
+             WHERE code = ? AND state = 0 AND expires_ns > ?
+             ORDER BY created_ns DESC LIMIT 1",
+        )
+        .bind(code)
+        .bind(self.now_ns())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("查配对会话", e))
+    }
+
+    /// 接收方完成 ECDH 后回写共享密钥与会话状态。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；id 不存在 → 0 行影响。
+    pub async fn complete_pairing(
+        &self,
+        id: &str,
+        responder_dev: &str,
+        shared_secret: &[u8],
+    ) -> Result<(), PartisyError> {
+        sqlx::query(
+            "UPDATE pairing_session
+             SET responder_dev = ?, shared_secret = ?, state = 2
+             WHERE id = ?",
+        )
+        .bind(responder_dev)
+        .bind(shared_secret)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("完成配对", e))?;
+        Ok(())
+    }
+
+    /// 发起方 fetch 已完成会话以派生 device_keypair。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；id 不存在 → None。
+    pub async fn pairing_session_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<PairingSessionRow>, PartisyError> {
+        sqlx::query_as::<_, PairingSessionRow>(
+            "SELECT id, code, initiator_dev, responder_dev, state, ephemeral_sk, ephemeral_pk,
+                    shared_secret, created_ns, expires_ns
+             FROM pairing_session WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("查配对 id", e))
     }
 }
 

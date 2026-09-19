@@ -144,6 +144,22 @@ CREATE TABLE IF NOT EXISTS entry_version (
 CREATE INDEX IF NOT EXISTS idx_version_path ON entry_version(path);
 CREATE INDEX IF NOT EXISTS idx_version_expires ON entry_version(expires_at_ns);
 
+-- v11（M2-WP04）：设备网络与助记词配对
+-- device 表 endpoint / pairing_state 由 migrate() 防御性补列
+CREATE TABLE IF NOT EXISTS pairing_session (
+    id              TEXT PRIMARY KEY,   -- ULID
+    code            TEXT NOT NULL,      -- 12 词助记词（空格串）
+    initiator_dev   TEXT NOT NULL,
+    responder_dev   TEXT,
+    state           INTEGER NOT NULL DEFAULT 0,  -- 0=open, 1=accepted, 2=closed
+    ephemeral_sk    BLOB NOT NULL,       -- 发起方临时 X25519 私钥
+    ephemeral_pk    BLOB NOT NULL,
+    shared_secret   BLOB,
+    created_ns      INTEGER NOT NULL,
+    expires_ns      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_state ON pairing_session(state, expires_ns);
+
 -- v9（M2-WP06）：占位符骨架同步与按需 hydrate
 -- entry.state 0=materialized, 1=placeholder；content_hydrated_at_ns 是内容到位时间戳；
 -- pin_count 是本端 pin 引用数（WP08 回收使用）。ALTER 列由 migrate() 防御性补列执行，
