@@ -1817,6 +1817,13 @@ dependencies = [
 [[package]]
 name = "partisync-sync"
 version = "0.1.0"
+dependencies = [
+ "partisync-core",
+ "partisync-graph",
+ "proptest",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "partisync-transfer"

@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS entry (
     size       INTEGER NOT NULL DEFAULT 0,
     mtime_ns   INTEGER NOT NULL DEFAULT 0,
     state      INTEGER NOT NULL DEFAULT 0, -- 0=materialized
-    chunk_root TEXT                       -- v2：大文件块清单根（SPEC M0-WP03）
+    chunk_root TEXT,                      -- v2：大文件块清单根（SPEC M0-WP03）
+    owner_device TEXT,                    -- v6：域归属（设备自有域属主）
+    synced_seq INTEGER                    -- v6：已同步水位（对端 ACK 后推进）
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entry_path ON entry(path);
 CREATE INDEX IF NOT EXISTS idx_entry_parent ON entry(parent_id);
@@ -78,3 +80,19 @@ CREATE TABLE IF NOT EXISTS jobs (
 -- v5（M1-WP08）：目录列表排序复合索引——顶层 16 万子项目录
 -- ORDER BY kind,name 全排序 500ms+（实测），复合索引消除
 CREATE INDEX IF NOT EXISTS idx_entry_parent_order ON entry(parent_id, kind DESC, name);
+
+-- v6（M2-WP01）：同步核——域归属与 oplog
+-- 设备自有域：owner_device = 属主设备（单写者，属主状态权威）
+-- 共享域：预留（Tag/用户元数据，WP02 启用）
+CREATE TABLE IF NOT EXISTS sync_oplog (
+    hlc           TEXT PRIMARY KEY,  -- HLC key（字符串序 == 全序）
+    space_id      TEXT NOT NULL DEFAULT 'default',
+    domain        INTEGER NOT NULL,  -- 0=设备自有 1=共享
+    entity        TEXT NOT NULL,     -- 'entry' / …
+    entity_id     TEXT NOT NULL,
+    op            TEXT NOT NULL,     -- 'upsert' / 'remove'
+    origin_device TEXT NOT NULL,     -- 源头设备（回环防护）
+    payload       TEXT NOT NULL,     -- JSON（设备自有域=全量行；remove={path}）
+    at_ns         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oplog_hlc ON sync_oplog(hlc);

@@ -170,6 +170,14 @@ pub async fn apply_pending(
     Ok(applied)
 }
 
+/// 公开出口（M2-WP01：sync crate 的远端应用需要父链保证）。
+///
+/// # Errors
+/// 同内部实现。
+pub async fn ensure_dir_chain_pub(store: &Store, vpath: &str) -> Result<(), PartisyError> {
+    ensure_dir_chain(store, vpath).await
+}
+
 async fn ensure_dir_chain(store: &Store, vpath: &str) -> Result<(), PartisyError> {
     let mut prefix = String::new();
     let segs: Vec<&str> = vpath.trim_start_matches('/').split('/').collect();

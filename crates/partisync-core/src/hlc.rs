@@ -94,4 +94,29 @@ impl Hlc {
     pub const fn device(&self) -> u64 {
         self.device
     }
+
+    /// oplog 主键序列化（phys:logic:device，各段定宽 hex——字符串序 == 时间序）。
+    #[must_use]
+    pub fn to_key(&self) -> String {
+        format!(
+            "{:016x}-{:08x}-{:016x}",
+            self.phys_ms, self.logic, self.device
+        )
+    }
+
+    /// [`Hlc::to_key`] 的逆运算。
+    ///
+    /// # Errors
+    /// 格式不符 → `HlcError` 由调用侧以字符串错误承载（v1 oplog 主键只来自 to_key）。
+    pub fn from_key(key: &str) -> Option<Hlc> {
+        let mut it = key.split('-');
+        let phys = u64::from_str_radix(it.next()?, 16).ok()?;
+        let logic = u32::from_str_radix(it.next()?, 16).ok()?;
+        let device = u64::from_str_radix(it.next()?, 16).ok()?;
+        Some(Hlc {
+            phys_ms: phys,
+            logic,
+            device,
+        })
+    }
 }

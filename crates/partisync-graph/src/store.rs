@@ -30,6 +30,32 @@ pub struct EntryRow {
     pub size: i64,
     pub mtime_ns: i64,
     pub chunk_root: Option<String>,
+    pub owner_device: Option<String>,
+}
+
+/// oplog 行视图（M2-WP01）。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct OplogRow {
+    pub hlc: String,
+    pub space_id: String,
+    pub domain: i64,
+    pub entity: String,
+    pub entity_id: String,
+    pub op: String,
+    pub origin_device: String,
+    pub payload: String,
+    pub at_ns: i64,
+}
+
+/// 设备 id 字符串 → u64 哈希（HLC device 段；FNV-1a，无依赖确定性）。
+#[must_use]
+pub fn hash_u64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// 全局统计（去重口径：saved = Σentry.size − Σcontent.size）。
@@ -56,6 +82,8 @@ pub struct DupGroup {
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    /// oplog 时钟（M2-WP01）：进程内单调 HLC；None = 尚未初始化（首次捕获时从墙钟起步）
+    oplog_clock: std::sync::Arc<tokio::sync::Mutex<Option<partisync_core::Hlc>>>,
 }
 
 fn db_err(what: &str, e: sqlx::Error) -> PartisyError {
@@ -103,7 +131,10 @@ impl Store {
             .await
             .map_err(|e| db_err("打开数据库", e))?;
         Self::migrate(&pool).await?;
-        Ok(Store { pool })
+        Ok(Store {
+            pool,
+            oplog_clock: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        })
     }
 
     /// 内存库（测试/临时索引）。单连接：内存库不跨连接共享。
@@ -117,7 +148,10 @@ impl Store {
             .await
             .map_err(|e| db_err("打开内存库", e))?;
         Self::migrate(&pool).await?;
-        Ok(Store { pool })
+        Ok(Store {
+            pool,
+            oplog_clock: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        })
     }
 
     async fn migrate(pool: &SqlitePool) -> Result<(), PartisyError> {
@@ -125,8 +159,14 @@ impl Store {
             .execute(pool)
             .await
             .map_err(|e| db_err("迁移", e))?;
-        // schema v2（M0-WP03）：旧库防御性补列；新库已含该列，duplicate 错误忽略
+        // schema v2/v6（M0-WP03/M2-WP01）：旧库防御性补列；新库已含，duplicate 忽略
         let _ = sqlx::raw_sql("ALTER TABLE entry ADD COLUMN chunk_root TEXT")
+            .execute(pool)
+            .await;
+        let _ = sqlx::raw_sql("ALTER TABLE entry ADD COLUMN owner_device TEXT")
+            .execute(pool)
+            .await;
+        let _ = sqlx::raw_sql("ALTER TABLE entry ADD COLUMN synced_seq INTEGER")
             .execute(pool)
             .await;
         Ok(())
@@ -236,8 +276,8 @@ impl Store {
         }
         let id = Ulid::now().to_string();
         sqlx::query(
-            "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(parent_id)
@@ -248,6 +288,7 @@ impl Store {
         .bind(i64::try_from(size).unwrap_or(i64::MAX))
         .bind(i64::try_from(mtime_ns).unwrap_or(i64::MAX))
         .bind(chunk_root)
+        .bind(self.device_id().await.ok()) // 域归属（M2-WP01）：本机创建 = 本机属主
         .execute(&self.pool)
         .await
         .map_err(|e| db_err("插入条目", e))?;
@@ -273,7 +314,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn entry_by_path(&self, path: &str) -> Result<Option<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry WHERE path = ?",
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device FROM entry WHERE path = ?",
         )
         .bind(path)
         .fetch_optional(&self.pool)
@@ -288,7 +329,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn children(&self, parent_path: &str) -> Result<Vec<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device FROM entry
              WHERE parent_id = (SELECT id FROM entry WHERE path = ?)
              ORDER BY kind DESC, name LIMIT 1000",
         )
@@ -304,7 +345,7 @@ impl Store {
     /// DB 错误 → Fatal。
     pub async fn ancestors_of(&self, path: &str) -> Result<Vec<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT e.id, e.kind, e.name, e.path, e.content_id, e.size, e.mtime_ns, e.chunk_root
+            "SELECT e.id, e.kind, e.name, e.path, e.content_id, e.size, e.mtime_ns, e.chunk_root, e.owner_device
              FROM entry e JOIN entry_closure c ON e.id = c.ancestor
              WHERE c.descendant = (SELECT id FROM entry WHERE path = ?) AND c.depth > 0
              ORDER BY c.depth DESC",
@@ -431,13 +472,182 @@ impl Store {
 }
 
 impl Store {
+    /// 本机设备 id（device 表首行；未登记 → 'device-local'）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn device_id(&self) -> Result<String, PartisyError> {
+        sqlx::query_scalar::<_, String>("SELECT id FROM device ORDER BY id LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("device 表为空：先 seed_device_volume".into()),
+            })
+    }
+
+    /// 记录一条 oplog（HLC 由本店时钟分配，严格单调）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_oplog(
+        &self,
+        space_id: &str,
+        domain: i64,
+        entity: &str,
+        entity_id: &str,
+        op: &str,
+        origin_device: &str,
+        payload: &str,
+    ) -> Result<String, PartisyError> {
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let device_hash = hash_u64(origin_device);
+        let mut clock = self.oplog_clock.lock().await;
+        let hlc = match *clock {
+            Some(mut h) => {
+                h.tick(wall).map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("oplog 时钟溢出: {e:?}").into()),
+                })?;
+                h
+            }
+            None => partisync_core::Hlc::from_wall(device_hash, wall),
+        };
+        *clock = Some(hlc);
+        let key = hlc.to_key();
+        sqlx::query(
+            "INSERT OR IGNORE INTO sync_oplog (hlc, space_id, domain, entity, entity_id, op, origin_device, payload, at_ns)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&key)
+        .bind(space_id)
+        .bind(domain)
+        .bind(entity)
+        .bind(entity_id)
+        .bind(op)
+        .bind(origin_device)
+        .bind(payload)
+        .bind(i64::try_from(hlc.phys_ms() * 1_000_000).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("记录 oplog", e))?;
+        Ok(key)
+    }
+
+    /// 全部待同步 oplog 行（HLC 全序）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn pending_oplog(&self) -> Result<Vec<OplogRow>, PartisyError> {
+        sqlx::query_as::<_, OplogRow>(
+            "SELECT hlc, space_id, domain, entity, entity_id, op, origin_device, payload, at_ns
+             FROM sync_oplog ORDER BY hlc",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("读 oplog", e))
+    }
+
+    /// ACK 裁剪：删除指定 hlc 的 oplog 行（对端已确认应用）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn trim_oplog(&self, hlcs: &[String]) -> Result<u64, PartisyError> {
+        let mut n = 0u64;
+        for h in hlcs {
+            n += sqlx::query("DELETE FROM sync_oplog WHERE hlc = ?")
+                .bind(h)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("裁剪 oplog", e))?
+                .rows_affected();
+        }
+        Ok(n)
+    }
+
+    /// 应用远端同步条目（设备自有域全量行；冲突 = 保留两者 + 血缘后缀，P11 前置）。
+    ///
+    /// owner_device 随 payload 走（单写者：非属主不产生本地图谱修改语义——
+    /// 远端行就是属主行的投影）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_remote_entry(
+        &self,
+        path: &str,
+        name: &str,
+        kind: EntryKind,
+        size: u64,
+        mtime_ns: u64,
+        content: Option<(&str, u64)>,
+        chunk_root: Option<&str>,
+        owner_device: &str,
+    ) -> Result<String, PartisyError> {
+        // 同路径不同属主 = 双端独立创建冲突 → 保留两者：来方改挂冲突后缀
+        let mut final_path = path.to_string();
+        if let Some(existing) = self.entry_by_path(path).await? {
+            let existing_owner = existing
+                .owner_device
+                .clone()
+                .unwrap_or_else(|| "unknown".into());
+            if existing_owner != owner_device {
+                final_path = format!("{path}.conflict-{owner_device}");
+            }
+        }
+        // 父目录链（远端树的目录由 oplog 目录条目或此处 ensure 保证）
+        crate::journal::ensure_dir_chain_pub(self, &final_path).await?;
+        let parent_path = match final_path.rsplit_once('/') {
+            Some((p, _)) if !p.is_empty() => p.to_string(),
+            _ => "/".to_string(),
+        };
+        let parent_id = self.entry_by_path(&parent_path).await?.map(|e| e.id);
+        if let Some((hash, csize)) = content {
+            sqlx::query("INSERT OR IGNORE INTO content (id, size) VALUES (?, ?)")
+                .bind(hash)
+                .bind(i64::try_from(csize).unwrap_or(i64::MAX))
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("登记远端内容", e))?;
+        }
+        let id = partisync_core::Ulid::now().to_string();
+        sqlx::query(
+            "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(path) DO UPDATE SET
+                 size = excluded.size, mtime_ns = excluded.mtime_ns,
+                 content_id = excluded.content_id, chunk_root = excluded.chunk_root,
+                 owner_device = excluded.owner_device
+             RETURNING id",
+        )
+        .bind(&id)
+        .bind(parent_id)
+        .bind(kind as i64)
+        .bind(name)
+        .bind(&final_path)
+        .bind(content.map(|(h, _)| h))
+        .bind(i64::try_from(size).unwrap_or(i64::MAX))
+        .bind(i64::try_from(mtime_ns).unwrap_or(i64::MAX))
+        .bind(chunk_root)
+        .bind(owner_device)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| db_err("应用远端条目", e))?;
+        Ok(id)
+    }
+
     /// 名称子串检索（LIKE，上限防全表外溢）。
     ///
     /// # Errors
     /// DB 错误 → Fatal。
     pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<EntryRow>, PartisyError> {
         sqlx::query_as::<_, EntryRow>(
-            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device FROM entry
              WHERE name LIKE '%' || ? || '%' ORDER BY kind DESC, name LIMIT ?",
         )
         .bind(q)
@@ -523,7 +733,7 @@ impl Store {
                 .await
                 .map_err(|e| db_err("重复组大小", e))?;
             let copies = sqlx::query_as::<_, EntryRow>(
-                "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root FROM entry
+                "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device FROM entry
                  WHERE content_id = ? ORDER BY path",
             )
             .bind(&content_id)

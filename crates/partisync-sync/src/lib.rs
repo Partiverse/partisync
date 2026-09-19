@@ -1,4 +1,8 @@
-//! 同步引擎：watcher、scan_journal、域分离 oplog、bisync、Merkle 对账
+//! 同步核（SPEC M2-WP01）：域分离 oplog 捕获、push/pull 会话、回环防护、ACK 裁剪。
 //!
-//! 骨架 crate（M-1 bootstrap，调研方案附录 A）。实现按里程碑推进，
-//! 行为契约见 docs/specs/ 对应工作包规格。
+//! 域分离设计（调研方案 §5.7）：设备自有数据单写者（属主状态权威，无 CRDT/共识）；
+//! 共享域（v1 预留）HLC 全序 + LWW。回环防护：oplog 行携带 origin_device，
+//! 应用时跳过 origin == 本机 的行。ACK 裁剪：对端确认后删除已应用行。
+
+pub mod capture;
+pub mod session;
