@@ -315,8 +315,37 @@ async fn index_remote_cmd(args: &[String]) -> i32 {
             return 1;
         }
     };
-    match index_provider(&store, &provider, &prefix).await {
+    // 作业化（SPEC M1-WP08 v1.1）：断点续扫 + 可选限速
+    let bwlimit = flag_value(args, "--bwlimit").and_then(|v| parse_bwlimit(&v));
+    let job_id = match jobs::create(&store, "index-remote", &format!("{scheme}:{prefix}")).await {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let _ = jobs::start(&store, &job_id).await;
+    let mut ctx = if let Some(resume_id) = flag_value(args, "--resume-job") {
+        let prev = match jobs::get(&store, &resume_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        };
+        println!("resume: 从 checkpoint {:?} 续跑", prev.checkpoint);
+        JobCtx::for_resume(&prev, None)
+    } else {
+        JobCtx {
+            id: job_id.clone(),
+            skip_up_to: None,
+            stop_after: None,
+            done: 0,
+        }
+    };
+    match index_provider(&store, &provider, &prefix, Some(&mut ctx), bwlimit).await {
         Ok(report) => {
+            let _ = jobs::complete(&store, &job_id, ctx.done).await;
             let stats = store
                 .stats()
                 .await
@@ -331,16 +360,36 @@ async fn index_remote_cmd(args: &[String]) -> i32 {
                 .map(|_| 0)
                 .unwrap_or(1);
             println!(
-                "index-remote 完成: scheme={scheme} prefix={prefix} db={db}\n  本次: 文件 {} 目录 {} 哈希字节 {}",
+                "index-remote 完成: scheme={scheme} prefix={prefix} db={db} job={job_id}\n  本次: 文件 {} 目录 {} 哈希字节 {}",
                 report.files, report.dirs, fmt_bytes(report.bytes_hashed as i64)
             );
             stats
         }
+        Err(e) if e.severity == partisync_core::error::Severity::Interrupted => {
+            let _ = jobs::mark_interrupted(&store, &job_id, ctx.done).await;
+            eprintln!(
+                "index-remote 中断: 已提交 {} 个文件（job={job_id}）；恢复: partisync index-remote … --resume-job {job_id}",
+                ctx.done
+            );
+            130
+        }
         Err(e) => {
+            let _ = jobs::fail(&store, &job_id, &e.to_string()).await;
             eprintln!("index-remote 失败: {e}（severity={:?}）", e.severity);
             1
         }
     }
+}
+
+/// 解析限速参数（如 10M、512k、1048576）。
+fn parse_bwlimit(v: &str) -> Option<u64> {
+    let (num, mult) = match v.chars().last()? {
+        'k' | 'K' => (&v[..v.len() - 1], 1024u64),
+        'm' | 'M' => (&v[..v.len() - 1], 1024 * 1024),
+        'g' | 'G' => (&v[..v.len() - 1], 1024 * 1024 * 1024),
+        _ => (v, 1),
+    };
+    num.parse::<u64>().ok().map(|n| n * mult)
 }
 
 async fn ls_cmd(args: &[String]) -> i32 {
