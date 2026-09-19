@@ -84,12 +84,12 @@ async fn dav_dispatch(
     let key = rest.trim_end_matches('/').to_string();
     match method.as_str() {
         "OPTIONS" => options(),
-        "PROPFIND" => propfind(&app, &key, headers).await,
-        "GET" | "HEAD" => get_or_head(&app, &key, method == axum::http::Method::HEAD).await,
-        "PUT" => put(&app, &key, body).await,
-        "MKCOL" => mkcol(&app, &key),
-        "DELETE" => delete(&app, &key).await,
-        "MOVE" => move_resource(&app, &key, &headers),
+        "PROPFIND" => propfind(app, &key, headers).await,
+        "GET" | "HEAD" => get_or_head(app, &key, method == axum::http::Method::HEAD).await,
+        "PUT" => put(app, &key, body).await,
+        "MKCOL" => mkcol(app, &key),
+        "DELETE" => delete(app, &key).await,
+        "MOVE" => move_resource(app, &key, &headers),
         _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
     }
 }
