@@ -161,10 +161,21 @@ async fn fast_path_eligible(
             return Ok(false);
         }
     }
-    let all: BTreeSet<String> = am.keys().chain(bm.keys()).cloned().collect();
-    for d in all {
-        if am.get(&d) != bm.get(&d) {
-            return Ok(false);
+    // 共同登记的 origin 上水位须相等（只看交集——单侧独占的 origin 由对方时钟顶覆盖
+    // 条件兜底；「a 单方面登记的 origin ⇒ a 已见过该 origin 所有写入 ⇒ b 缺它即状态
+    // 不等」会在慢路径根比对时被检出——不构成假阴性）
+    for (d, v) in &am {
+        if let Some(vb) = bm.get(d) {
+            if vb != v {
+                return Ok(false);
+            }
+        }
+    }
+    for (d, v) in &bm {
+        if let Some(va) = am.get(d) {
+            if va != v {
+                return Ok(false);
+            }
         }
     }
     Ok(true)
