@@ -31,6 +31,31 @@ pub struct EntryRow {
     pub mtime_ns: i64,
     pub chunk_root: Option<String>,
     pub owner_device: Option<String>,
+    #[sqlx(default)]
+    pub state: i64,
+    #[sqlx(default)]
+    pub content_hydrated_at_ns: Option<i64>,
+    #[sqlx(default)]
+    pub pin_count: i64,
+}
+
+/// entry 状态枚举（M2-WP06）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[repr(i64)]
+pub enum EntryState {
+    Materialized = 0,
+    Placeholder = 1,
+}
+
+impl EntryState {
+    #[must_use]
+    pub const fn from_i64(v: i64) -> Self {
+        if v == 1 {
+            Self::Placeholder
+        } else {
+            Self::Materialized
+        }
+    }
 }
 
 /// oplog 行视图（M2-WP01）。
@@ -221,7 +246,8 @@ impl Store {
             .execute(pool)
             .await
             .map_err(|e| db_err("迁移", e))?;
-        // schema v2/v6（M0-WP03/M2-WP01）：旧库防御性补列；新库已含，duplicate 忽略
+        // schema v2/v6/v9（M0-WP03/M2-WP01/M2-WP06）：旧库防御性补列；新库已含，
+        // duplicate 忽略（ALTER 错误吞掉模式——仅添加列，逐个迁移）
         let _ = sqlx::raw_sql("ALTER TABLE entry ADD COLUMN chunk_root TEXT")
             .execute(pool)
             .await;
@@ -229,6 +255,15 @@ impl Store {
             .execute(pool)
             .await;
         let _ = sqlx::raw_sql("ALTER TABLE entry ADD COLUMN synced_seq INTEGER")
+            .execute(pool)
+            .await;
+        let _ = sqlx::raw_sql("ALTER TABLE entry ADD COLUMN content_hydrated_at_ns INTEGER")
+            .execute(pool)
+            .await;
+        let _ = sqlx::raw_sql("ALTER TABLE entry ADD COLUMN pin_count INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+        let _ = sqlx::raw_sql("UPDATE entry SET state = 1 WHERE state IS NULL")
             .execute(pool)
             .await;
         Ok(())
@@ -769,14 +804,17 @@ impl Store {
                 .await
                 .map_err(|e| db_err("登记远端内容", e))?;
         }
+        // M2-WP06：远端条目无 content → 以 placeholder 形态入库
+        let entry_state: i64 = if content.is_some() { 0 } else { 1 };
         let id = partisync_core::Ulid::now().to_string();
         sqlx::query(
-            "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device, state)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(path) DO UPDATE SET
                  size = excluded.size, mtime_ns = excluded.mtime_ns,
                  content_id = excluded.content_id, chunk_root = excluded.chunk_root,
-                 owner_device = excluded.owner_device
+                 owner_device = excluded.owner_device,
+                 state = excluded.state
              RETURNING id",
         )
         .bind(&id)
@@ -789,6 +827,7 @@ impl Store {
         .bind(i64::try_from(mtime_ns).unwrap_or(i64::MAX))
         .bind(chunk_root)
         .bind(owner_device)
+        .bind(entry_state)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| db_err("应用远端条目", e))?;
@@ -1300,6 +1339,121 @@ impl Store {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| db_err("扫链接叶", e))
+    }
+}
+
+impl Store {
+    // ---- 占位符（M2-WP06：骨架同步与按需 hydrate）----
+
+    /// 新建占位条目（content_id=NULL, state=Placeholder）。元数据已就位，
+    /// 内容待 hydrate（本地调用或由 WP05 块传输完成后调）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；path 冲突 → 幂等返回既有 id。
+    pub async fn add_placeholder(
+        &self,
+        parent_id: Option<&str>,
+        name: &str,
+        path: &str,
+        size: u64,
+        mtime_ns: u64,
+    ) -> Result<String, PartisyError> {
+        if let Some(id) = sqlx::query_scalar::<_, String>("SELECT id FROM entry WHERE path = ?")
+            .bind(path)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| db_err("查询 placeholder", e))?
+        {
+            return Ok(id);
+        }
+        let id = Ulid::now().to_string();
+        sqlx::query(
+            "INSERT INTO entry (id, parent_id, kind, name, path, size, mtime_ns, owner_device, state)
+             VALUES (?, ?, 0, ?, ?, ?, ?, ?, 1)",
+        )
+        .bind(&id)
+        .bind(parent_id)
+        .bind(name)
+        .bind(path)
+        .bind(i64::try_from(size).unwrap_or(i64::MAX))
+        .bind(i64::try_from(mtime_ns).unwrap_or(i64::MAX))
+        .bind(self.device_id().await.ok())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("新建 placeholder", e))?;
+        // 闭包维护（同 add_entry）
+        sqlx::query(
+            "INSERT INTO entry_closure (ancestor, descendant, depth)
+             SELECT ancestor, ?, depth + 1 FROM entry_closure WHERE descendant = ?
+             UNION ALL SELECT ?, ?, 0",
+        )
+        .bind(&id)
+        .bind(parent_id)
+        .bind(&id)
+        .bind(&id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("占位闭包", e))?;
+        Ok(id)
+    }
+
+    /// hydrate：内容到位后清 placeholder 标记，记时间戳。
+    ///
+    /// # Errors
+    /// path 不存在 → Fatal；DB 错误 → Fatal。
+    pub async fn hydrate_entry(
+        &self,
+        path: &str,
+        content: (&str, u64),
+    ) -> Result<(), PartisyError> {
+        let (hash, csize) = content;
+        sqlx::query("INSERT OR IGNORE INTO content (id, size) VALUES (?, ?)")
+            .bind(hash)
+            .bind(i64::try_from(csize).unwrap_or(i64::MAX))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("hydrate 登记内容", e))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        sqlx::query(
+            "UPDATE entry SET state = 0, content_id = ?, content_hydrated_at_ns = ?
+             WHERE path = ?",
+        )
+        .bind(hash)
+        .bind(i64::try_from(now).unwrap_or(i64::MAX))
+        .bind(path)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("hydrate 更新", e))?;
+        Ok(())
+    }
+
+    /// pin（用户显式保留）：pin_count > 0 的条目 WP08 永不被回收。
+    /// 重复 pin 不增计数（幂等）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal；path 不存在 → 0 行影响（不报错——壳层允许 pin 路径未到位）。
+    pub async fn pin(&self, path: &str) -> Result<(), PartisyError> {
+        sqlx::query("UPDATE entry SET pin_count = pin_count + 1 WHERE path = ? AND pin_count = 0")
+            .bind(path)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("pin", e))?;
+        Ok(())
+    }
+
+    /// unpin：仅减一次（pin_count ≥ 0）；已 0 时为 no-op。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn unpin(&self, path: &str) -> Result<(), PartisyError> {
+        sqlx::query("UPDATE entry SET pin_count = MAX(pin_count - 1, 0) WHERE path = ?")
+            .bind(path)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("unpin", e))?;
+        Ok(())
     }
 }
 

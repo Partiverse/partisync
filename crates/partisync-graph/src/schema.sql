@@ -129,8 +129,11 @@ CREATE TABLE IF NOT EXISTS sync_conflict (
     detected_hlc  TEXT NOT NULL,
     at_ns         INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_conflict_dedup
-    ON sync_conflict(base_path, incoming_path, detected_hlc);
+-- v9（M2-WP06）：占位符骨架同步与按需 hydrate
+-- entry.state 0=materialized, 1=placeholder；content_hydrated_at_ns 是内容到位时间戳；
+-- pin_count 是本端 pin 引用数（WP08 回收使用）。ALTER 列由 migrate() 防御性补列执行，
+-- 此处只声明新库应具备的最终形态以供新库识别
+CREATE INDEX IF NOT EXISTS idx_entry_state ON entry(state);
 
 -- v8（M2-WP03）：对账基建——持久时钟与来源水位
 -- 本店 HLC 时钟顶（oplog 键同构）：修复时钟随进程重启回退的潜在缺陷，
