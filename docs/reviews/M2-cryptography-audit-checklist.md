@@ -144,6 +144,22 @@ cargo test -p partisync-sync --tests wp04 wp07 wp09
 - 与 M2 关门关系: ☑ 可继续（友邻审计通过，内部尽调完成，准许继续演进；外部审计前须修复 P1 项）
 - 外部审计范围建议: 重点聚焦在 iroh 动态配对握手、XChaCha20 密文封包边界与内存安全清零。
 
+### 5.1 整改记录（2026-09-19，整改后状态）
+
+| 发现 | 级别 | 整改措施 | 提交 | 状态 |
+|---|---|---|---|---|
+| 自研 `hkdf_blake3` 偏离行业标准（3.1.3 / 3.2.2） | P1 | 废弃自研两阶段 keyed-hash，切换 blake3 官方 Key Derivation 模式 `blake3::derive_key`；context 协议级常量（space/content/meta 三域），变长输入走 key_material | `4d60e29` | ✅ 已整改 |
+| `ephemeral_sk` 明文持久化破坏 PFS（§三 缺陷 2） | P1 | pairing_session 重建为无私钥形态（schema v13，migrate() 幂等）；临时私钥仅驻留发起方进程内存（`Zeroizing`），SPEC M2-WP04 PFS 修订 | `2b9a805` | ✅ 已整改 |
+| Argon2 salt 绑定 space_id 全局一致（§三 缺陷 3） | P2 | 新增 `random_kdf_salt()` + `argon2_master_key_with_salt()` 生产路径；`space_crypto.kdf_salt` 持久盐列（schema v14，首写固定）；space_id 盐降级为仅测试 | `4d60e29` + `2b9a805` | ✅ 已整改（空间初始化全量接线归 M3 空间供给流程） |
+| 密钥裸 `[u8; 32]` 栈逃逸（3.2.4 / §三 缺陷 4） | P2 | crypto.rs / pairing.rs 全部派生密钥输出 `Zeroizing<[u8; 32]>` 包裹（master/space/content/meta/device_key/endpoint_secret/shared_secret/熵） | `4d60e29` + `2b9a805` | ✅ 已整改 |
+| 密码学 API 缺审计追踪标注（3.6.1） | P2 | crypto.rs / pairing.rs 模块头 rustdoc 补 `SEC-AUDIT-2026-M2-001` 追踪标记与整改状态 | `4d60e29` + `2b9a805` | ✅ 已整改 |
+| zeroize 边界局限文档（3.6.4） | P2 | ADR-0010 修订 1 + SPEC M2-WP07 §1 记录盐策略与内存封装决策 | `4d60e29` | ✅ 已整改 |
+
+整改验证：`cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo test --workspace` 全绿（145 通过，0 失败；新增盐确定性 + 盐持久化验收用例）。
+**注意**：KDF 切换 `derive_key` 改变派生输出——M2 预发布、无存量密文，此时切换为零成本窗口；
+G3 外部审计进场前不再接受 KDF 层变更。
+
 ---
 
 ## 6. 附：执行人说明
