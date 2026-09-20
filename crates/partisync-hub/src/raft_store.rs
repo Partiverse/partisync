@@ -66,11 +66,11 @@ pub const KS_RAFT_META: &str = "r-meta";
 
 /// 状态机 meta 行内容（meta 行与快照 blob 头共用此布局）。
 ///
-/// `[applied_present 1B][applied 16B][mem_log_present 1B][mem_log 16B]
+/// `[applied_present 1B][applied 24B][mem_log_present 1B][mem_log 24B]
 /// [mlen 4B][membership json]`——presence 字节显式区分「无指针」与
 /// `(term=0,index=0)` 合法指针（openraft 套件在 index 0 建 log）；
 /// `mem_log` 是 membership 条目自身的 log id（`StoredMembership::log_id`
-/// 语义，≠ last applied）。
+/// 语义，≠ last applied）；LogId 定长 24B（term+leader_node+index）。
 #[derive(Debug, Clone)]
 struct SmMetaRow {
     applied: Option<LogId<u64>>,
@@ -88,14 +88,14 @@ fn encode_meta_prefix(row: &SmMetaRow, out: &mut Vec<u8>) -> Result<(), StorageE
             out.push(1);
             out.extend_from_slice(&encode_log_id(&lid));
         }
-        None => out.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        None => out.extend_from_slice(&[0u8; 25]),
     }
     match row.mem_log_id {
         Some(lid) => {
             out.push(1);
             out.extend_from_slice(&encode_log_id(&lid));
         }
-        None => out.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        None => out.extend_from_slice(&[0u8; 25]),
     }
     let json = serde_json::to_vec(&row.membership)
         .map_err(|_| corrupt(ErrorSubject::StateMachine, "membership json encode"))?;
@@ -107,27 +107,27 @@ fn encode_meta_prefix(row: &SmMetaRow, out: &mut Vec<u8>) -> Result<(), StorageE
 /// meta 行/blob 头的解码（[`encode_meta_prefix`] 逆变换）。
 fn decode_meta_prefix(blob: &[u8]) -> Result<(SmMetaRow, usize), StorageError<u64>> {
     let short = |what| corrupt(ErrorSubject::StateMachine, what);
-    if blob.len() < 38 {
+    if blob.len() < 54 {
         return Err(short("meta prefix too short"));
     }
     let present = |b: u8| b != 0;
     let applied = if present(blob[0]) {
-        Some(decode_log_id(&blob[1..17]).ok_or_else(|| short("applied corrupted"))?)
+        Some(decode_log_id(&blob[1..25]).ok_or_else(|| short("applied corrupted"))?)
     } else {
         None
     };
-    let mem_log_id = if present(blob[17]) {
-        Some(decode_log_id(&blob[18..34]).ok_or_else(|| short("mem log id corrupted"))?)
+    let mem_log_id = if present(blob[25]) {
+        Some(decode_log_id(&blob[26..50]).ok_or_else(|| short("mem log id corrupted"))?)
     } else {
         None
     };
     let mut mlen = [0u8; 4];
-    mlen.copy_from_slice(&blob[34..38]);
+    mlen.copy_from_slice(&blob[50..54]);
     let mlen = u32::from_be_bytes(mlen) as usize;
-    if blob.len() < 38 + mlen {
+    if blob.len() < 54 + mlen {
         return Err(short("membership truncated"));
     }
-    let membership: Membership<u64, BasicNode> = serde_json::from_slice(&blob[38..38 + mlen])
+    let membership: Membership<u64, BasicNode> = serde_json::from_slice(&blob[54..54 + mlen])
         .map_err(|_| short("membership json corrupted"))?;
     Ok((
         SmMetaRow {
@@ -135,7 +135,7 @@ fn decode_meta_prefix(blob: &[u8]) -> Result<(SmMetaRow, usize), StorageError<u6
             mem_log_id,
             membership,
         },
-        38 + mlen,
+        54 + mlen,
     ))
 }
 
@@ -220,33 +220,40 @@ fn zero_log_id() -> LogId<u64> {
     LogId::new(CommittedLeaderId::new(0, 0), 0)
 }
 
-/// 编码 `LogId<u64>`：`[term 8B][index 8B]`（`CommittedLeaderId` 只含 term）。
-fn encode_log_id(lid: &LogId<u64>) -> [u8; 16] {
-    let mut b = [0u8; 16];
+/// 编码 `LogId<u64>`：`[term 8B][leader_node 8B][index 8B]`——LogId 身份
+/// 含 leader node（缺 node 会破坏 openraft progress 匹配，T05 演练实测）。
+fn encode_log_id(lid: &LogId<u64>) -> [u8; 24] {
+    let mut b = [0u8; 24];
     b[..8].copy_from_slice(&lid.leader_id.term.to_be_bytes());
-    b[8..].copy_from_slice(&lid.index.to_be_bytes());
+    b[8..16].copy_from_slice(&lid.leader_id.node_id.to_be_bytes());
+    b[16..].copy_from_slice(&lid.index.to_be_bytes());
     b
 }
 
 /// 解码 [`encode_log_id`] 的逆变换。
 fn decode_log_id(b: &[u8]) -> Option<LogId<u64>> {
-    if b.len() < 16 {
+    if b.len() < 24 {
         return None;
     }
     let mut term = [0u8; 8];
+    let mut node = [0u8; 8];
     let mut index = [0u8; 8];
     term.copy_from_slice(&b[..8]);
-    index.copy_from_slice(&b[8..16]);
+    node.copy_from_slice(&b[8..16]);
+    index.copy_from_slice(&b[16..24]);
     Some(LogId::new(
-        CommittedLeaderId::new(u64::from_be_bytes(term), 0),
+        CommittedLeaderId::new(u64::from_be_bytes(term), u64::from_be_bytes(node)),
         u64::from_be_bytes(index),
     ))
 }
 
-/// 日志条目值编码：`[term 8B][tag 1B][payload]`（index 在键中，不重复存）。
+/// 日志条目值编码：`[term 8B][leader_node 8B][tag 1B][payload]`（index 在
+/// 键中，不重复存；leader node 是 LogId 身份的一部分，见
+/// [`encode_log_id`]）。
 fn encode_entry(entry: &Entry<HubTypeConfig>) -> Result<Vec<u8>, StorageError<u64>> {
-    let mut v = Vec::with_capacity(9 + 32);
+    let mut v = Vec::with_capacity(17 + 32);
     v.extend_from_slice(&entry.log_id.leader_id.term.to_be_bytes());
+    v.extend_from_slice(&entry.log_id.leader_id.node_id.to_be_bytes());
     match &entry.payload {
         EntryPayload::Blank => {
             v.push(TAG_BLANK);
@@ -268,24 +275,27 @@ fn encode_entry(entry: &Entry<HubTypeConfig>) -> Result<Vec<u8>, StorageError<u6
 /// 日志条目值解码（[`encode_entry`] 逆变换；index 取自键）。
 fn decode_entry(index: u64, v: &[u8]) -> Result<Entry<HubTypeConfig>, StorageError<u64>> {
     let subject = ErrorSubject::Log(zero_log_id());
-    if v.len() < 9 {
+    if v.len() < 17 {
         return Err(corrupt(subject, "log entry value too short"));
     }
     let mut term = [0u8; 8];
     term.copy_from_slice(&v[..8]);
+    let mut node = [0u8; 8];
+    node.copy_from_slice(&v[8..16]);
     let term = u64::from_be_bytes(term);
-    let payload = match v[8] {
+    let node = u64::from_be_bytes(node);
+    let payload = match v[16] {
         TAG_BLANK => EntryPayload::Blank,
-        TAG_NORMAL => EntryPayload::Normal(HubData(v[9..].to_vec())),
+        TAG_NORMAL => EntryPayload::Normal(HubData(v[17..].to_vec())),
         TAG_MEMBERSHIP => {
-            let m: Membership<u64, BasicNode> = serde_json::from_slice(&v[9..])
+            let m: Membership<u64, BasicNode> = serde_json::from_slice(&v[17..])
                 .map_err(|_| corrupt(subject, "membership json corrupted"))?;
             EntryPayload::Membership(m)
         }
         _ => return Err(corrupt(subject, "unknown payload tag")),
     };
     Ok(Entry {
-        log_id: LogId::new(CommittedLeaderId::new(term, 0), index),
+        log_id: LogId::new(CommittedLeaderId::new(term, node), index),
         payload,
     })
 }
@@ -602,7 +612,7 @@ fn encode_blob(meta: &SmMetaRow, rows: &[(u64, Vec<u8>)]) -> Result<Vec<u8>, Sto
 
 /// 快照 blob 解码（[`encode_blob`] 逆变换）。
 fn decode_blob(blob: &[u8]) -> Result<SmBlob, StorageError<u64>> {
-    if blob.len() < 46 {
+    if blob.len() < 62 {
         return Err(corrupt(
             ErrorSubject::Snapshot(None),
             "snapshot blob too short",
@@ -637,6 +647,24 @@ fn decode_blob(blob: &[u8]) -> Result<SmBlob, StorageError<u64>> {
         pos += 12 + dlen;
     }
     Ok((meta, rows))
+}
+
+impl RaftStateMachineStore {
+    /// 读数据节单行（replica 线性一致读通道；fjall 内部同步，与 raft apply
+    /// 并发安全）。
+    ///
+    /// # Errors
+    /// 引擎读取失败。
+    pub async fn read_data_row(&self, index: u64) -> Result<Option<Vec<u8>>, StorageError<u64>> {
+        match sto(
+            self.0.sm.get(sm_data_key(self.0.pid, index)),
+            ErrorSubject::StateMachine,
+            ErrorVerb::Read,
+        )? {
+            None => Ok(None),
+            Some(g) => Ok(Some(g.to_vec())),
+        }
+    }
 }
 
 impl RaftSnapshotBuilder<HubTypeConfig> for RaftSnapshotBuilderStore {

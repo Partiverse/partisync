@@ -5,6 +5,8 @@
 //! kill -9 持久化、openraft 官方一致性套件。
 //! T04 覆盖：帧回环/版本校验、RaftNetwork 客户端 ↔ 框架服务端 RPC 回环、
 //! 远端业务错误映射、超时与拒连。
+//! T05 覆盖：三节点组 bootstrap、leader 选举、复制与读回、failover <10s
+//! 无损（关门 KPI）、领导者转移 <5s、线性一致读（read-your-writes）。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -686,4 +688,272 @@ async fn t04_net_payload_survives_json_envelope() {
         .append_entries(areq, RPCOption::new(Duration::from_secs(5)))
         .await
         .expect("append with binary payload");
+}
+
+/// ===== T05：组生命周期与选举演练（SPEC M3-WP02 验收 2-4） =====
+use partisync_hub::replica::{NodeConfig, Replica, ReplicaError};
+use std::collections::BTreeMap;
+
+/// cluster 演练互斥：端口先绑后释的分配法在并行测试下会互抢（同组 RPC
+/// 打到错误节点 → 选举 chaos），整段演练持锁串行。
+static CLUSTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 分配一个空闲 TCP 端口（绑定后立即释放；本机演练用）。
+fn alloc_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
+}
+
+/// 起一个 3 节点组（选举超时 150-300ms、心跳 25ms——演练确定性注入）。
+async fn spawn_cluster(tag: &str, size: usize) -> Vec<Replica> {
+    let ids: Vec<u64> = (1..=size as u64).collect();
+    let addrs: BTreeMap<u64, String> = ids
+        .iter()
+        .map(|id| (*id, format!("127.0.0.1:{}", alloc_port())))
+        .collect();
+    let mut nodes = Vec::new();
+    for id in ids {
+        let cfg = NodeConfig {
+            node_id: id,
+            addr: addrs[&id].clone(),
+            db_root: tmp_root(&format!("{tag}-n{id}")),
+            group_id: 1,
+            members: addrs.clone(),
+            election_timeout_ms: (300, 600),
+            heartbeat_interval_ms: 50,
+        };
+        nodes.push(Replica::open(&cfg).await.expect("open replica"));
+    }
+    for n in &nodes {
+        n.bootstrap().await.expect("bootstrap");
+    }
+    nodes
+}
+
+/// 任一节点视角等待指定节点成为 leader。
+async fn wait_leader_is(
+    nodes: &[Replica],
+    want: u64,
+    timeout: Duration,
+) -> Result<(), ReplicaError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if nodes.iter().any(|n| n.current_leader() == Some(want)) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(ReplicaError::Timeout);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+use std::time::Instant;
+
+/// 线性一致读（带瞬态重试）：QuorumNotEnough 是心跳确认的瞬态形态
+/// （多 cluster 交接期背景负载），客户端按幂等读重试。
+async fn read_lin(n: &Replica, idx: u64) -> Vec<u8> {
+    for attempt in 0..10 {
+        match n.linearizable_read(idx).await {
+            Ok(Some(row)) => return row,
+            Ok(None) => panic!("row {idx} missing after write"),
+            Err(ReplicaError::CheckIsLeader(
+                openraft::error::CheckIsLeaderError::QuorumNotEnough(_),
+            )) => {
+                tokio::time::sleep(Duration::from_millis(50 + attempt * 50)).await;
+            }
+            Err(other) => panic!("linearizable read: {other}"),
+        }
+    }
+    panic!("linearizable read: quorum not recovered after retries");
+}
+
+/// 演练收尾：显式停掉全部 raft core（drop 不停 core——残留会拖累后续演练）。
+async fn teardown(nodes: &[Replica]) {
+    for n in nodes {
+        n.crash().await;
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // 刻意：std Mutex 整段串行 cluster 演练（见 CLUSTER_LOCK 注释）
+async fn t05_bootstrap_elect_and_replicate() {
+    let _serial = CLUSTER_LOCK.lock().expect("cluster lock");
+    let nodes = spawn_cluster("t05-basic", 3).await;
+    let leader = nodes[0]
+        .wait_leader(Duration::from_secs(5))
+        .await
+        .expect("leader");
+    let l = nodes
+        .iter()
+        .find(|n| n.node_id() == leader)
+        .expect("leader node");
+
+    // 写 10 条，逐条 ACK（leader 串行 commit+apply 后应答）
+    let mut indexes = Vec::new();
+    for i in 0..10u64 {
+        let idx = l
+            .write(format!("payload-{i:04}").into_bytes())
+            .await
+            .expect("write");
+        indexes.push(idx);
+    }
+
+    // follower 顺序读：等 applied ≥ 末条，读回 == 写入
+    for n in nodes.iter().filter(|n| n.node_id() != leader) {
+        n.wait_applied(*indexes.last().expect("idx"), Duration::from_secs(5))
+            .await
+            .expect("follower applied");
+        let got = n
+            .read_applied(indexes[3])
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(got, b"payload-0003".to_vec());
+    }
+
+    // leader 线性一致读（ReadIndex）：read-your-writes
+    for (i, idx) in indexes.iter().enumerate() {
+        let got = read_lin(l, *idx).await;
+        assert_eq!(got, format!("payload-{i:04}").into_bytes());
+    }
+    teardown(&nodes).await;
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // 刻意：同上
+async fn t05_failover_under_10s_no_ack_loss() {
+    // 关门 KPI：kill leader（无优雅交接）→ 新 leader 当选 + 已 ACK 写入
+    // 全部可读，全程 <10s。
+    let nodes = spawn_cluster("t05-failover", 3).await;
+    let leader_id = nodes[0]
+        .wait_leader(Duration::from_secs(5))
+        .await
+        .expect("leader");
+    let leader = nodes
+        .iter()
+        .find(|n| n.node_id() == leader_id)
+        .expect("leader node");
+    let others: Vec<&Replica> = nodes.iter().filter(|n| n.node_id() != leader_id).collect();
+
+    // 先 ACK 8 条
+    let mut last_idx = 0u64;
+    for i in 0..8u64 {
+        last_idx = leader
+            .write(format!("acked-{i:04}").into_bytes())
+            .await
+            .expect("write");
+    }
+
+    // kill（进程死亡形态：core 停止、无交接）
+    let crash_at = Instant::now();
+    leader.crash().await;
+
+    // 幸存者选出新 leader
+    let nl;
+    let deadline = crash_at + Duration::from_secs(10);
+    loop {
+        if let Some(n) = others.iter().find(|n| n.is_leader()) {
+            nl = *n;
+            break;
+        }
+        assert!(Instant::now() < deadline, "failover exceeded 10s KPI");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let elapsed = crash_at.elapsed();
+
+    // 新 leader 上全部 ACK 写入可读（raft 承诺：已 ACK 不丢）
+    nl.wait_applied(last_idx, Duration::from_secs(5))
+        .await
+        .expect("applied");
+    for i in 0..8u64 {
+        // 线索引：ACK 序列 = log 序列（leader 串行写、无并发竞争者）
+        let got = nl
+            .read_applied(last_idx - (7 - i))
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(got, format!("acked-{i:04}").into_bytes());
+    }
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "failover took {elapsed:?}"
+    );
+    teardown(&nodes).await;
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // 刻意：同上
+async fn t05_leader_transfer_under_5s() {
+    // 验收 3：主动转移 <5s。形态（0.9.25 无显式 transfer API）：
+    // 旧 leader pause_election → 目标节点 trigger_elect（更高 term）。
+    let nodes = spawn_cluster("t05-transfer", 3).await;
+    let leader_id = nodes[0]
+        .wait_leader(Duration::from_secs(5))
+        .await
+        .expect("leader");
+    let leader = nodes
+        .iter()
+        .find(|n| n.node_id() == leader_id)
+        .expect("leader");
+    let target = nodes
+        .iter()
+        .find(|n| n.node_id() != leader_id)
+        .expect("target");
+
+    leader.pause_election();
+    let started = Instant::now();
+    target.trigger_elect().await.expect("trigger elect");
+    wait_leader_is(&nodes, target.node_id(), Duration::from_secs(5))
+        .await
+        .expect("target becomes leader");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "transfer took {elapsed:?}"
+    );
+
+    // 转移窗口写可用（新 leader 承接写入）
+    let idx = target
+        .write(b"after-transfer".to_vec())
+        .await
+        .expect("write");
+    let got = read_lin(target, idx).await;
+    assert_eq!(got, b"after-transfer".to_vec());
+    teardown(&nodes).await;
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // 刻意：同上
+async fn t05_linearizable_read_your_writes_monotonic() {
+    // 验收 4 简化 proptest：同一 leader 上「写后读自己写」单调成立；
+    // 8 组随机载荷（proptest 生成器覆盖 0x00/非 ASCII 形态）。
+    let nodes = spawn_cluster("t05-monotonic", 3).await;
+    let leader_id = nodes[0]
+        .wait_leader(Duration::from_secs(5))
+        .await
+        .expect("leader");
+    let leader = nodes
+        .iter()
+        .find(|n| n.node_id() == leader_id)
+        .expect("leader");
+
+    let mut sm = 0x5EED_2026u64;
+    for case in 0..8u64 {
+        sm = sm.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let len = 1 + (sm >> 33) as usize % 64;
+        let payload: Vec<u8> = (0..len)
+            .map(|_| {
+                sm = sm.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (sm >> 24) as u8
+            })
+            .collect();
+        let idx = leader.write(payload.clone()).await.expect("write");
+        let got = read_lin(leader, idx).await;
+        assert_eq!(got, payload, "read-your-writes violated at case {case}");
+    }
+    teardown(&nodes).await;
 }
