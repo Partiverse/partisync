@@ -12,6 +12,62 @@ use crate::entry_plane::HubError;
 use crate::router::{META_NEXT_PID, STATUS_ACTIVE, STATUS_SPLITTING};
 use crate::tree_plane::{TreePlane, MOVE_BATCH};
 
+/// 崩溃注入（failpoint，测试专用，WP01-T05 崩溃一致性验收）：布防点命中
+/// 计数到达阈值即 panic，模拟进程死亡后由 open 恢复路径收尾。
+///
+/// 布防表为 **thread-local**：分裂协议与恢复全部运行在调用线程（v0.1 单写者），
+/// 同线程布防/命中天然配对；并行测试互不可见，无需互斥。未布防时每次命中
+/// 仅一次线程局部表查询——分裂协议低频（默认 4M 行/次），成本可忽略；
+/// 除本文件三处协议点外禁止在其他路径布防。
+pub mod failpoint {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static ARMED: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
+    }
+
+    /// 注入点：分裂协议「元数据先行」原子批提交之后、目标 keyspace 创建前。
+    pub const PT_META_COMMITTED: &str = "split::meta_committed";
+    /// 注入点：搬移批提交之后（含恢复重放——两条路径共用 move_keys）。
+    pub const PT_MOVE_BATCH: &str = "split::move_batch";
+    /// 注入点：搬移完成之后、置 active 原子批提交之前。
+    pub const PT_MOVES_DONE: &str = "split::moves_done";
+
+    /// 布防：本线程 `point` 第 `panic_on_hit` 次命中时 panic（1 = 首次命中即崩）。
+    pub fn arm(point: &'static str, panic_on_hit: usize) {
+        ARMED.with(|armed| {
+            armed.borrow_mut().insert(point, panic_on_hit.max(1));
+        });
+    }
+
+    /// 撤除本线程全部布防。
+    pub fn disarm_all() {
+        ARMED.with(|armed| armed.borrow_mut().clear());
+    }
+
+    /// 命中计数；到达布防阈值则注入崩溃（先撤自身布防再 panic）。
+    pub(crate) fn hit(point: &'static str) {
+        let fire = ARMED.with(|armed| {
+            let mut armed = armed.borrow_mut();
+            match armed.get_mut(point) {
+                Some(remain) => {
+                    *remain = remain.saturating_sub(1);
+                    let fire = *remain == 0;
+                    if fire {
+                        armed.remove(point);
+                    }
+                    fire
+                }
+                None => false,
+            }
+        });
+        if fire {
+            panic!("failpoint: injected crash at {point}");
+        }
+    }
+}
+
 impl TreePlane {
     /// put 路径入口：行数超阈值时对新分裂（fresh）执行。
     pub(crate) fn split_partition(&self, idx: usize) -> Result<(), HubError> {
@@ -66,6 +122,7 @@ impl TreePlane {
             batch.commit().map_err(HubError::from)?;
             cur
         };
+        failpoint::hit(failpoint::PT_META_COMMITTED);
         let target = self
             .db
             .keyspace(
@@ -81,6 +138,7 @@ impl TreePlane {
 
         // 3. 搬移 [median, next_start)：每批原子（insert 目标 + remove 源同批）
         let moved = self.move_keys(&src, &target, &median, next_start.as_deref())?;
+        failpoint::hit(failpoint::PT_MOVES_DONE);
 
         // 4. 收尾：置 active → 路由生效（源分区行不变、键已搬空）
         let mut batch = OwnedWriteBatch::with_capacity(self.db.clone(), 1);
@@ -199,6 +257,7 @@ impl TreePlane {
                 batch.remove(src, k.as_slice());
             }
             batch.commit().map_err(HubError::from)?;
+            failpoint::hit(failpoint::PT_MOVE_BATCH);
             moved += chunk.len() as u64;
         }
     }
@@ -226,4 +285,26 @@ pub fn partition_meta_key(start: &[u8]) -> Vec<u8> {
     k.push(crate::router::META_PARTITION_PREFIX);
     k.extend_from_slice(start);
     k
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failpoint;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// 单测试串行覆盖布防/命中/撤防三种形态（同一测试线程内顺序执行）。
+    #[test]
+    fn failpoint_arm_hit_disarm() {
+        // 未布防命中：直通无害
+        failpoint::hit("split::unit-unarmed");
+        // 阈值计数：第 2 次命中注入崩溃
+        failpoint::arm("split::unit-armed", 2);
+        failpoint::hit("split::unit-armed");
+        let fired = catch_unwind(AssertUnwindSafe(|| failpoint::hit("split::unit-armed")));
+        assert!(fired.is_err(), "armed hit must panic on threshold");
+        // 撤防后命中：直通
+        failpoint::arm("split::unit-disarmed", 1);
+        failpoint::disarm_all();
+        failpoint::hit("split::unit-disarmed");
+    }
 }

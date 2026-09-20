@@ -21,6 +21,8 @@ pub enum HubError {
     Encode(crate::encode::EncodeError),
     /// 路由命中的分区 keyspace 缺失（内部不变量破坏，不可恢复）。
     PartitionMissing(u64),
+    /// 操作目标条目不存在或已墓碑（rename 语义，WP01-T05）。
+    EntryMissing,
 }
 
 impl core::fmt::Display for HubError {
@@ -29,6 +31,7 @@ impl core::fmt::Display for HubError {
             Self::Fjall(e) => write!(f, "hub storage: {e}"),
             Self::Encode(e) => write!(f, "hub storage: {e}"),
             Self::PartitionMissing(pid) => write!(f, "hub storage: partition {pid} missing"),
+            Self::EntryMissing => write!(f, "hub storage: entry not found or tombstoned"),
         }
     }
 }

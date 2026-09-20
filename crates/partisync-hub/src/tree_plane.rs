@@ -4,6 +4,8 @@
 //! （entry_id 16B + kind 1B + deleted 1B）。分区表见 [`crate::router`]，
 //! 分裂/恢复协议见 [`crate::split`]。
 //!
+//! 本平面只做投影的原始读写；**读时修复归 [`crate::Hub`] 门面**（WP01-T05，
+//! SPEC §4：以权威行为准补齐/清理投影，单次补写上限 256 行）。
 //! v0.1 单写者串行（进程内 `&self` 独占）；投影陈旧窗口由 WP03 对账收口。
 
 use std::collections::HashMap;
@@ -236,8 +238,10 @@ impl TreePlane {
 
     /// keyset 分页列出目录 children（按键序跨分区顺序迭代）。
     ///
-    /// 分裂中分区由 open 恢复路径先行收尾——单写者串行下列表不会观察
-    /// 半分裂状态；`deleted` 投影行短暂可见，WP03 对账收口。
+    /// **原始投影读**：不校验权威行、不修复——Hub 门面在其上做读时修复与
+    /// 幽灵项剔除（WP01-T05）。分裂中分区由 open 恢复路径先行收尾——
+    /// 单写者串行下列表不会观察半分裂状态；`deleted` 投影行短暂可见，
+    /// WP03 对账收口。
     ///
     /// # Errors
     /// 引擎迭代失败。
@@ -329,6 +333,47 @@ impl TreePlane {
             .cloned()
             .ok_or(HubError::PartitionMissing(pid))?;
         Ok((ks, idx))
+    }
+
+    /// 读取单个投影槽位（原始读，不修复——修复归 [`crate::Hub`] 门面）。
+    ///
+    /// # Errors
+    /// 引擎读取失败或值损坏。
+    pub fn get_child(&self, dir_id: &[u8; 16], name: &str) -> Result<Option<ChildRow>> {
+        let key = child_key(dir_id, name);
+        let (ks, _) = self.route(&key)?;
+        match ks.get(key.as_slice()).map_err(HubError::from)? {
+            None => Ok(None),
+            Some(guard) => Ok(Some(ChildRow::decode(&guard)?)),
+        }
+    }
+
+    /// 全平面投影行内省（测试/运维）：`(dir_id, name, row)` 按分区序。
+    ///
+    /// # Errors
+    /// 引擎迭代失败或值损坏。
+    pub fn iter_child_rows(&self) -> Result<Vec<([u8; 16], String, ChildRow)>> {
+        let keyspaces: Vec<Keyspace> = {
+            let router = self.router.read().expect("router lock");
+            let keyspaces = self.keyspaces.read().expect("keyspaces lock");
+            router
+                .partitions()
+                .iter()
+                .filter_map(|p| keyspaces.get(&p.id).cloned())
+                .collect()
+        };
+        let mut out = Vec::new();
+        for ks in keyspaces {
+            for guard in ks.iter() {
+                let (k, v) = guard.into_inner().map_err(HubError::from)?;
+                let mut dir_id = [0u8; 16];
+                dir_id.copy_from_slice(&k[0..16]);
+                let name = String::from_utf8(k[16..].to_vec())
+                    .map_err(|_| HubError::Encode(EncodeError::InvalidNameLength))?;
+                out.push((dir_id, name, ChildRow::decode(&v)?));
+            }
+        }
+        Ok(out)
     }
 
     /// 落盘。
