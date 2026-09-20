@@ -42,7 +42,7 @@ walkdir = "2.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 fjall = "3.1" # ADR-0011（M3-WP01 Hub L1 元数据 LSM）
-openraft = { version = "0.9", features = ["serde"] } # ADR-0013（M3-WP02 分片复制共识）
+openraft = { version = "0.9", features = ["serde", "storage-v2"] } # ADR-0013（M3-WP02 分片复制共识；storage-v2=裁定 2 存储面）
 
 [workspace.lints.rust]
 # 安全政策（执行方案 §5.2）：默认全局禁止 unsafe；确需 unsafe 的 crate 必须在

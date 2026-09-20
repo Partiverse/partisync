@@ -2,11 +2,13 @@
 //!
 //! 行为契约见 docs/specs/ 对应工作包规格。当前实现：M3-WP01 T03/T04/T05
 //! （entry 哈希平面 + children range 平面 + 动态分裂 + Hub 门面 + 树操作/
-//! 读时修复）；基准报告归 T06。
+//! 读时修复）；M3-WP02 T02/T03（keyspace 收敛 + openraft storage-v2 →
+//! fjall 存储适配器）；基准报告归 T06/T07。
 
 pub mod encode;
 pub mod entry_plane;
 pub mod ksconv;
+pub mod raft_store;
 pub mod router;
 pub mod shard;
 pub mod split;
@@ -16,6 +18,11 @@ pub use encode::{
     decode_entry_row, encode_entry_row, EncodeError, EntryRow, FLAG_DELETED, KIND_DIR, KIND_FILE,
 };
 pub use entry_plane::{HashPlane, HubError};
+pub use raft_store::{
+    group_prefix, open_raft_stores, HubData, HubResponse, HubTypeConfig, RaftLogReaderStore,
+    RaftLogStore, RaftSnapshotBuilderStore, RaftStateMachineStore, KS_RAFT_LOG, KS_RAFT_META,
+    KS_RAFT_SM,
+};
 pub use router::Partition;
 pub use shard::{shard_of, SHARD_COUNT};
 pub use tree_plane::{
