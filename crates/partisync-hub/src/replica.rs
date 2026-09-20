@@ -26,8 +26,9 @@ use std::time::{Duration, Instant};
 
 use fjall::Database;
 use openraft::error::{CheckIsLeaderError, ClientWriteError, Fatal};
+use openraft::storage::RaftStateMachine;
 use openraft::ConfigError;
-use openraft::{BasicNode, Config, Raft, ServerState};
+use openraft::{BasicNode, Config, Raft, ServerState, SnapshotPolicy};
 use tokio::net::TcpListener;
 
 use crate::net::{serve, NetFactory, NetRequest, NetResponse};
@@ -54,6 +55,9 @@ pub struct NodeConfig {
     pub election_timeout_ms: (u64, u64),
     /// 心跳间隔 ms。
     pub heartbeat_interval_ms: u64,
+    /// 禁用自动快照（业务状态机模式必开——快照/安装当前仅覆盖通用节，
+    /// 业务节快照化归后续任务卡；T02 起门面模式恒为 true）。
+    pub disable_auto_snapshot: bool,
 }
 
 /// 组生命周期错误集。
@@ -135,12 +139,20 @@ impl WriteHandle {
     /// # Errors
     /// raft core 停止或写被拒绝。
     pub async fn ack(self) -> Result<u64, ReplicaError> {
+        self.ack_with_response().await.map(|(idx, _)| idx)
+    }
+
+    /// 等待提交完成并取回状态机应答（业务节以应答字节承载语义标志）。
+    ///
+    /// # Errors
+    /// raft core 停止或写被拒绝。
+    pub async fn ack_with_response(self) -> Result<(u64, Vec<u8>), ReplicaError> {
         let res = self
             .rx
             .await
             .map_err(|e| ReplicaError::Init(format!("raft core stopped: {e}")))?;
         match res {
-            Ok(resp) => Ok(resp.log_id.index),
+            Ok(resp) => Ok((resp.log_id.index, resp.data.0)),
             Err(e) => Err(ReplicaError::ClientWrite(e)),
         }
     }
@@ -164,15 +176,35 @@ impl Replica {
     /// # Errors
     /// 监听绑定、存储打开、配置构建或 raft core 启动失败。
     pub async fn open(cfg: &NodeConfig) -> Result<Self, ReplicaError> {
-        let listener = TcpListener::bind(&cfg.addr).await?;
         let db = Database::open(fjall::Config::new(&cfg.db_root))?;
-        let (log, sm) = open_raft_stores(&db, cfg.group_id)?;
+        let (_, sm) = open_raft_stores(&db, cfg.group_id)?;
+        Self::open_with_sm(cfg, db, sm).await
+    }
+
+    /// 以既有 Database 与外部状态机打开（业务状态机模式——
+    /// [`crate::service::HubService`]：SM = 通用节 + 业务节包装）。
+    ///
+    /// # Errors
+    /// 同 [`Self::open`]。
+    pub async fn open_with_sm(
+        cfg: &NodeConfig,
+        db: Database,
+        sm: impl RaftStateMachine<HubTypeConfig>,
+    ) -> Result<Self, ReplicaError> {
+        let listener = TcpListener::bind(&cfg.addr).await?;
+        let (log, _generic) = open_raft_stores(&db, cfg.group_id)?;
+        drop(_generic); // 业务模式下通用 SM 由调用方包装传入
 
         let config = Arc::new(Config {
             cluster_name: "partisync-hub".to_owned(),
             heartbeat_interval: cfg.heartbeat_interval_ms,
             election_timeout_min: cfg.election_timeout_ms.0,
             election_timeout_max: cfg.election_timeout_ms.1,
+            snapshot_policy: if cfg.disable_auto_snapshot {
+                SnapshotPolicy::Never
+            } else {
+                Config::default().snapshot_policy
+            },
             ..Config::default()
         });
 
@@ -313,11 +345,29 @@ impl Replica {
     ///
     /// # Errors
     /// 本节点非 leader 或引擎读取失败。
+    /// 线性一致读就绪确认（裁定 5：ReadIndex 语义）——leader 向 quorum
+    /// 确认领导权并等待本机 apply 追平读点。业务门面读侧确认后即可读本机
+    /// 状态机（Replica 数据节或业务平面）。
+    ///
+    /// # Errors
+    /// 本节点非 leader（`CheckIsLeader`）或 raft 错误。
+    pub async fn ensure_linearizable(&self) -> Result<(), ReplicaError> {
+        self.raft
+            .ensure_linearizable()
+            .await
+            .map(|_| ())
+            .map_err(|e| match e {
+                openraft::error::RaftError::APIError(ce) => ReplicaError::CheckIsLeader(ce),
+                other => ReplicaError::Fatal(other.into_fatal().unwrap_or(Fatal::Stopped)),
+            })
+    }
+
+    /// leader 线性一致读（裁定 5）：ReadIndex 就绪确认 + 本机数据节读。
+    ///
+    /// # Errors
+    /// 本节点非 leader 或引擎读取失败。
     pub async fn linearizable_read(&self, index: u64) -> Result<Option<Vec<u8>>, ReplicaError> {
-        self.raft.ensure_linearizable().await.map_err(|e| match e {
-            openraft::error::RaftError::APIError(ce) => ReplicaError::CheckIsLeader(ce),
-            other => ReplicaError::Fatal(other.into_fatal().unwrap_or(Fatal::Stopped)),
-        })?;
+        self.ensure_linearizable().await?;
         self.sm_reader
             .read_data_row(index)
             .await

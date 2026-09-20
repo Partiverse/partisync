@@ -12,6 +12,7 @@ pub mod net;
 pub mod raft_store;
 pub mod replica;
 pub mod router;
+pub mod service;
 pub mod shard;
 pub mod split;
 pub mod tree_plane;
@@ -75,6 +76,15 @@ impl Hub {
     pub fn open_with_threshold(root: &Path, threshold: u64) -> entry_plane::Result<Self> {
         // fjall 单路径排他锁：两平面共享同一 Database（单库多 keyspace，裁定 5）
         let db = fjall::Database::open(fjall::Config::new(root))?;
+        Self::attach(db, threshold)
+    }
+
+    /// 挂接到既有 Database（raft 门面 [`crate::service::HubService`] 复用
+    /// 同一读取/修复实现）。
+    ///
+    /// # Errors
+    /// 任一平面打开失败。
+    pub(crate) fn attach(db: fjall::Database, threshold: u64) -> entry_plane::Result<Self> {
         Ok(Self {
             entry: HashPlane::attach(db.clone())?,
             tree: TreePlane::attach(db, threshold)?,
@@ -86,19 +96,7 @@ impl Hub {
     /// # Errors
     /// 任一平面写入失败。
     pub fn put_entry(&self, row: &EntryRow) -> entry_plane::Result<()> {
-        self.entry.put(row)?;
-        if let Some(parent) = row.parent_id {
-            self.tree.put_child(
-                &parent,
-                &row.name,
-                &ChildRow {
-                    entry_id: row.entry_id,
-                    kind: row.kind,
-                    deleted: row.is_deleted(),
-                },
-            )?;
-        }
-        Ok(())
+        put_entry_impl(&self.entry, &self.tree, row)
     }
 
     /// 读取 entry 权威行（墓碑原样返回），并做读时修复（SPEC §4）：
@@ -146,13 +144,7 @@ impl Hub {
     /// 任一平面操作失败。
     pub fn remove_entry(&self, entry_id: &[u8; 16]) -> entry_plane::Result<()> {
         let row = self.entry.get(entry_id)?;
-        self.entry.remove(entry_id)?;
-        if let Some(row) = row {
-            if let Some(parent) = row.parent_id {
-                self.tree.remove_child(&parent, &row.name)?;
-            }
-        }
-        Ok(())
+        remove_entry_impl(&self.entry, &self.tree, entry_id, row.as_ref())
     }
 
     /// 改名/移动（SPEC §4，O(1)——裁定 2）：只写本条目权威行 + 两侧投影迁移，
@@ -175,25 +167,7 @@ impl Hub {
         if row.is_deleted() {
             return Err(HubError::EntryMissing);
         }
-        if let Some(old_parent) = row.parent_id {
-            self.tree.remove_child(&old_parent, &row.name)?;
-        }
-        let mut new_row = row.clone();
-        new_row.parent_id = new_parent;
-        new_row.name = new_name.to_owned();
-        self.entry.put(&new_row)?;
-        if let Some(new_parent) = new_parent {
-            self.tree.put_child(
-                &new_parent,
-                new_name,
-                &ChildRow {
-                    entry_id: row.entry_id,
-                    kind: row.kind,
-                    deleted: false,
-                },
-            )?;
-        }
-        Ok(())
+        rename_entry_impl(&self.entry, &self.tree, &row, new_parent, new_name)
     }
 
     /// keyset 分页列出目录 children，读时修复生效（SPEC §4）：
@@ -370,4 +344,79 @@ impl Iterator for SubtreeIter<'_> {
             }
         }
     }
+}
+
+/// [`Hub::put_entry`] 内核（raft 状态机 apply 复用同一实现——语义逐字一致）。
+///
+/// # Errors
+/// 任一平面写入失败。
+pub(crate) fn put_entry_impl(
+    entry: &HashPlane,
+    tree: &TreePlane,
+    row: &EntryRow,
+) -> entry_plane::Result<()> {
+    entry.put(row)?;
+    if let Some(parent) = row.parent_id {
+        tree.put_child(
+            &parent,
+            &row.name,
+            &ChildRow {
+                entry_id: row.entry_id,
+                kind: row.kind,
+                deleted: row.is_deleted(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// [`Hub::remove_entry`] 内核（`prior` = 删除前的权威行，供投影定位）。
+///
+/// # Errors
+/// 任一平面操作失败。
+pub(crate) fn remove_entry_impl(
+    entry: &HashPlane,
+    tree: &TreePlane,
+    entry_id: &[u8; 16],
+    prior: Option<&EntryRow>,
+) -> entry_plane::Result<()> {
+    entry.remove(entry_id)?;
+    if let Some(row) = prior {
+        if let Some(parent) = row.parent_id {
+            tree.remove_child(&parent, &row.name)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`Hub::rename_entry`] 内核（`row` = 改名前权威行，须存在且非墓碑）。
+///
+/// # Errors
+/// 任一平面操作失败。
+pub(crate) fn rename_entry_impl(
+    entry: &HashPlane,
+    tree: &TreePlane,
+    row: &EntryRow,
+    new_parent: Option<[u8; 16]>,
+    new_name: &str,
+) -> entry_plane::Result<()> {
+    if let Some(old_parent) = row.parent_id {
+        tree.remove_child(&old_parent, &row.name)?;
+    }
+    let mut new_row = row.clone();
+    new_row.parent_id = new_parent;
+    new_row.name = new_name.to_owned();
+    entry.put(&new_row)?;
+    if let Some(new_parent) = new_parent {
+        tree.put_child(
+            &new_parent,
+            new_name,
+            &ChildRow {
+                entry_id: row.entry_id,
+                kind: row.kind,
+                deleted: false,
+            },
+        )?;
+    }
+    Ok(())
 }

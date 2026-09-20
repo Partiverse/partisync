@@ -56,6 +56,7 @@ async fn spawn_cluster(root: &std::path::Path, tag: &str) -> Vec<Replica> {
             members: addrs.clone(),
             election_timeout_ms: (300, 600),
             heartbeat_interval_ms: 50,
+            disable_auto_snapshot: false,
         };
         nodes.push(Replica::open(&cfg).await.expect("open replica"));
     }
