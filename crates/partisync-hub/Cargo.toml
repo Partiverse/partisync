@@ -17,5 +17,12 @@ serde_json = { workspace = true } # hub-demo JSON 响应
 [dev-dependencies]
 proptest = { workspace = true }
 
+[lib]
+bench = false # 无 #[bench]；阻止 cargo 为 lib 生成默认 libtest bench 目标
+
+[[bench]]
+name = "wp01" # SPEC M3-WP01 T06：10⁷ 导入 / LIST p99 / 盘上预算宏基准
+harness = false
+
 [lints]
 workspace = true

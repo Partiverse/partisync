@@ -7,6 +7,7 @@
 //!   置 active。半分裂状态不外泄（单写者串行 + open 先恢复后服务）。
 
 use fjall::{Keyspace, OwnedWriteBatch};
+use std::ops::Bound;
 
 use crate::entry_plane::HubError;
 use crate::router::{META_NEXT_PID, STATUS_ACTIVE, STATUS_SPLITTING};
@@ -227,6 +228,11 @@ impl TreePlane {
     }
 
     /// 搬移 `[start, end)`（end=None 即无界），返回搬移行数；每批原子。
+    ///
+    /// 搬移游标自批尾续扫（排除上批末键）——总扫描 O(M)。v0.1 每批从 `start`
+    /// 重开迭代器为 O(M²/B)：10⁷ 实测单次分裂停顿 ~100-200s 且随搬移量
+    /// 超线性增长（M3-WP01-T06 基准报告，优化留痕），修正后分裂为秒级。
+    /// 崩溃语义不变：批仍原子，恢复重放幂等（已搬走的键不在源中，扫描跳过）。
     fn move_keys(
         &self,
         src: &Keyspace,
@@ -235,13 +241,14 @@ impl TreePlane {
         end: Option<&[u8]>,
     ) -> Result<u64, HubError> {
         let mut moved: u64 = 0;
+        let mut lo = Bound::Included(start.to_vec());
         loop {
-            let it = match end {
-                None => src.range(start.to_vec()..),
-                Some(e) => src.range(start.to_vec()..e.to_vec()),
+            let hi: Bound<Vec<u8>> = match end {
+                None => Bound::Unbounded,
+                Some(e) => Bound::Excluded(e.to_vec()),
             };
             let mut chunk = Vec::with_capacity(MOVE_BATCH);
-            for guard in it {
+            for guard in src.range((lo.clone(), hi)) {
                 let (k, v) = guard.into_inner().map_err(HubError::from)?;
                 chunk.push((k.to_vec(), v.to_vec()));
                 if chunk.len() >= MOVE_BATCH {
@@ -259,6 +266,7 @@ impl TreePlane {
             batch.commit().map_err(HubError::from)?;
             failpoint::hit(failpoint::PT_MOVE_BATCH);
             moved += chunk.len() as u64;
+            lo = Bound::Excluded(chunk[chunk.len() - 1].0.clone());
         }
     }
 
