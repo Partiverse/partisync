@@ -3,7 +3,8 @@
 //!
 //! 拓扑（裁定 1）：每 range 分区一组 raft（`group_id` = 分区 pid），成员
 //! 静态配置（`Members` = `{node_id → addr}`），v0.1 无动态成员。组注册表
-//! （`shard_id → 组`）的持久化随分裂×复制耦合（裁定 6）在 T06 收口。
+//! （`shard_id → 组`）的持久化随分裂×复制耦合（裁定 6）在
+//! WP03+ 接线时收口。
 //!
 //! 写路径（裁定 5）：leader 串行 `client_write`（append + quorum commit +
 //! apply 后应答）。读路径：leader 侧线性一致读 =
@@ -122,6 +123,29 @@ impl From<StorageError<u64>> for ReplicaError {
     }
 }
 
+/// 已提交写句柄：[`Replica::submit`] 的应答，await 即等待该条目
+/// commit 并 apply（返回 log index）——流水线导入（有界在途窗口）用。
+pub struct WriteHandle {
+    rx: tokio::sync::oneshot::Receiver<openraft::raft::ClientWriteResult<HubTypeConfig>>,
+}
+
+impl WriteHandle {
+    /// 等待提交完成。
+    ///
+    /// # Errors
+    /// raft core 停止或写被拒绝。
+    pub async fn ack(self) -> Result<u64, ReplicaError> {
+        let res = self
+            .rx
+            .await
+            .map_err(|e| ReplicaError::Init(format!("raft core stopped: {e}")))?;
+        match res {
+            Ok(resp) => Ok(resp.log_id.index),
+            Err(e) => Err(ReplicaError::ClientWrite(e)),
+        }
+    }
+}
+
 /// 一个 raft 组成员节点（v0.1：一节点一 DB、承载一组）。
 pub struct Replica {
     node_id: u64,
@@ -214,12 +238,16 @@ impl Replica {
             .iter()
             .map(|(id, addr)| (*id, BasicNode::new(addr)))
             .collect();
-        self.raft.initialize(nodes).await.map_err(|e| match e {
-            openraft::error::RaftError::APIError(openraft::error::InitializeError::NotAllowed(
-                _,
-            )) => ReplicaError::Init("not allowed (already initialized)".to_owned()),
-            other => ReplicaError::Init(other.to_string()),
-        })
+        match self.raft.initialize(nodes).await {
+            Ok(()) => Ok(()),
+            // 幂等语义：并发 bootstrap 下先胜者的 membership 已复制到本
+            // 节点——「已初始化」按 openraft 文档安全忽略
+            Err(openraft::error::RaftError::APIError(
+                openraft::error::InitializeError::NotAllowed(_),
+            )) => Ok(()),
+            Err(openraft::error::RaftError::Fatal(f)) => Err(ReplicaError::Fatal(f)),
+            Err(other) => Err(ReplicaError::Init(other.to_string())),
+        }
     }
 
     /// 等待本组出现任一 leader（返回其 id）。
@@ -306,6 +334,17 @@ impl Replica {
             .read_data_row(index)
             .await
             .map_err(Into::into)
+    }
+
+    /// 提交写（fire-and-forget）：立即返回 [`WriteHandle`]，由调用方
+    /// 决定在途窗口并逐个 `ack` 等待——openraft 对在途写做日志合批刷盘，
+    /// 吞吐远高于逐条 `write` 的串行 fsync 形态。
+    ///
+    /// # Errors
+    /// raft core 停止。
+    pub async fn submit(&self, payload: Vec<u8>) -> Result<WriteHandle, ReplicaError> {
+        let rx = self.raft.client_write_ff(HubData(payload)).await?;
+        Ok(WriteHandle { rx })
     }
 
     /// 领导者转移演练第一步：暂停本节点选举（openraft 0.9 无显式

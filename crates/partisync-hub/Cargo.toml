@@ -25,5 +25,9 @@ bench = false # 无 #[bench]；阻止 cargo 为 lib 生成默认 libtest bench �
 name = "wp01" # SPEC M3-WP01 T06：10⁷ 导入 / LIST p99 / 盘上预算宏基准
 harness = false
 
+[[bench]]
+name = "wp02" # SPEC M3-WP02 T07：复制导入吞吐 / failover / 转移宏基准
+harness = false
+
 [lints]
 workspace = true
