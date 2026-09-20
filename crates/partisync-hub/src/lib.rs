@@ -6,6 +6,7 @@
 
 pub mod encode;
 pub mod entry_plane;
+pub mod ksconv;
 pub mod router;
 pub mod shard;
 pub mod split;

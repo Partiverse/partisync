@@ -1,8 +1,10 @@
-//! entry 哈希平面（SPEC M3-WP01 §1/§2/裁定 5）：单 fjall Database + 256 keyspace。
+//! entry 哈希平面（SPEC M3-WP01 §1/§2/裁定 5）：单 fjall Database + 前缀共享 keyspace。
 //!
-//! - 权威行存储：put/get/remove 直达 `shard_of(entry_id)` 对应 keyspace；
+//! - 权威行存储：put/get/remove 直达 `shard_of(entry_id)` 路由前缀；
+//! - 键 = `0x00 ␟ shard 1B ␟ entry_id 16B`（17B，前缀隔离；收敛后
+//!   keyspace 共享见 [`crate::ksconv`]——SPEC M3-WP02 裁定 3）；
 //! - 删除 = 墓碑（`FLAG_DELETED`），行保留至 WP03 对账窗口；
-//! - children 投影与读时修复归 WP01-T04/T05（tree_plane/split）；
+//! - children 投影与读时修复归 WP01-T05（tree_plane/split/lib.rs）；
 //! - v0.1 单写者串行（进程内 `&self` 独占）；并发写语义归 WP02。
 
 use std::path::Path;
@@ -10,6 +12,7 @@ use std::path::Path;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 
 use crate::encode::{decode_entry_row, encode_entry_row, EntryRow};
+use crate::ksconv::{entry_key, ENTRY_PREFIX, KS_ENTRY};
 use crate::shard::{shard_of, SHARD_COUNT};
 
 /// 哈希平面统一错误。
@@ -53,14 +56,16 @@ impl From<crate::encode::EncodeError> for HubError {
 /// 平面结果别名。
 pub type Result<T> = std::result::Result<T, HubError>;
 
-fn keyspace_name(shard: usize) -> String {
-    format!("e-{shard:03}")
-}
-
-/// entry 哈希平面：256 个 keyspace，`shard_of` 路由。
+/// entry 哈希平面：前缀共享 keyspace，`shard_of` 路由 + 前缀隔离。
+///
+/// 物理布局收敛（SPEC M3-WP02 裁定 3）：所有 256 分片共用一个
+/// `m-entry` keyspace，键按 `shard` 前缀排序——行为契约不变
+/// （路由仍按 `shard_of` 确定性分布），仅消除 open 时逐 keyspace
+/// fsync 的 O(256) 开销。
 pub struct HashPlane {
     db: Database,
-    keyspaces: Vec<Keyspace>,
+    /// 共享 keyspace（`m-entry`）；256 分片逻辑隔离靠前缀字节。
+    ks: Keyspace,
 }
 
 impl HashPlane {
@@ -77,12 +82,8 @@ impl HashPlane {
     /// # Errors
     /// keyspace 创建失败时返回 [`HubError::Fjall`]。
     pub fn attach(db: Database) -> Result<Self> {
-        let mut keyspaces = Vec::with_capacity(SHARD_COUNT);
-        for shard in 0..SHARD_COUNT {
-            let ks = db.keyspace(&keyspace_name(shard), KeyspaceCreateOptions::default)?;
-            keyspaces.push(ks);
-        }
-        Ok(Self { db, keyspaces })
+        let ks = db.keyspace(KS_ENTRY, KeyspaceCreateOptions::default)?;
+        Ok(Self { db, ks })
     }
 
     /// 落盘（ durability 测试与优雅关闭用）。
@@ -99,24 +100,27 @@ impl HashPlane {
     /// # Errors
     /// 任一分片扫描失败。
     pub fn stats(&self) -> Result<Vec<u64>> {
-        let mut counts = Vec::with_capacity(SHARD_COUNT);
-        for ks in &self.keyspaces {
-            counts.push(ks.iter().count() as u64);
+        let mut counts = vec![0u64; SHARD_COUNT];
+        for guard in self.ks.iter() {
+            let (k, _) = guard.into_inner().map_err(HubError::from)?;
+            if k.len() == 18 && k[0] == ENTRY_PREFIX {
+                counts[k[1] as usize] += 1;
+            }
         }
         Ok(counts)
     }
 
-    /// 全平面扫描（内省/演示面用）：按分片序产出全部行（含墓碑）。
+    /// 全平面扫描（内省/演示面用）：按键序产出全部行（含墓碑）。
     ///
     /// # Errors
     /// 引擎读取失败或值损坏。
     pub fn iter_entries(&self) -> Result<Vec<EntryRow>> {
         let mut rows = Vec::new();
-        for ks in &self.keyspaces {
-            for guard in ks.iter() {
-                let (k, v) = guard.into_inner().map_err(HubError::from)?;
+        for guard in self.ks.iter() {
+            let (k, v) = guard.into_inner().map_err(HubError::from)?;
+            if k.len() == 18 && k[0] == ENTRY_PREFIX {
                 let mut row = decode_entry_row(&v)?;
-                row.entry_id.copy_from_slice(&k);
+                row.entry_id.copy_from_slice(&k[2..]);
                 rows.push(row);
             }
         }
@@ -128,8 +132,8 @@ impl HashPlane {
     /// # Errors
     /// 编码或引擎写入失败。
     pub fn put(&self, row: &EntryRow) -> Result<()> {
-        let ks = &self.keyspaces[shard_of(&row.entry_id) as usize];
-        ks.insert(row.entry_id.as_slice(), encode_entry_row(row)?)?;
+        let k = entry_key(shard_of(&row.entry_id), &row.entry_id);
+        self.ks.insert(k, encode_entry_row(row)?)?;
         Ok(())
     }
 
@@ -138,8 +142,8 @@ impl HashPlane {
     /// # Errors
     /// 引擎读取失败或值损坏。
     pub fn get(&self, entry_id: &[u8; 16]) -> Result<Option<EntryRow>> {
-        let ks = &self.keyspaces[shard_of(entry_id) as usize];
-        match ks.get(entry_id.as_slice())? {
+        let k = entry_key(shard_of(entry_id), entry_id);
+        match self.ks.get(k.as_slice())? {
             None => Ok(None),
             Some(slice) => {
                 let mut row = decode_entry_row(&slice)?;
@@ -154,8 +158,8 @@ impl HashPlane {
     /// # Errors
     /// 引擎读写失败或既有值损坏。
     pub fn remove(&self, entry_id: &[u8; 16]) -> Result<()> {
-        let ks = &self.keyspaces[shard_of(entry_id) as usize];
-        let mut row = match ks.get(entry_id.as_slice())? {
+        let k = entry_key(shard_of(entry_id), entry_id);
+        let mut row = match self.ks.get(k.as_slice())? {
             Some(slice) => decode_entry_row(&slice)?,
             None => EntryRow {
                 entry_id: *entry_id,
@@ -169,7 +173,7 @@ impl HashPlane {
             },
         };
         row.flags |= crate::encode::FLAG_DELETED;
-        ks.insert(entry_id.as_slice(), encode_entry_row(&row)?)?;
+        self.ks.insert(k, encode_entry_row(&row)?)?;
         Ok(())
     }
 }
@@ -256,5 +260,26 @@ mod tests {
         let got = plane.get(&id).expect("get").expect("tombstone");
         assert!(got.is_deleted());
         assert_eq!(got.name, "");
+    }
+
+    #[test]
+    fn stats_reflect_shard_distribution() {
+        let plane = HashPlane::open(&tmp_root("stats")).expect("open");
+        // 均匀分布：256 分片各至少 1 行（1000 行足够覆盖）
+        for i in 0..1000u64 {
+            let mut id = [0u8; 16];
+            id[..8].copy_from_slice(&i.to_be_bytes());
+            let r = row(0, "x");
+            let mut r2 = r.clone();
+            r2.entry_id = id;
+            plane.put(&r2).expect("put");
+        }
+        let counts = plane.stats().expect("stats");
+        assert_eq!(counts.len(), 256);
+        let total: u64 = counts.iter().sum();
+        assert_eq!(total, 1000);
+        // blake3 路由近似均匀：1000 行覆盖绝大多数分片（生日界：期望空位 ~6）
+        let covered = counts.iter().filter(|c| **c > 0).count();
+        assert!(covered >= 200, "expected broad coverage, got {covered}");
     }
 }

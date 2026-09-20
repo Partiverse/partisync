@@ -1,31 +1,37 @@
 //! range 分区路由（SPEC M3-WP01 §3）：`[start_key, end_key) → partition`。
 //!
-//! 分区表持久化于独立 meta keyspace（元数据先行），路由层内存缓存。
+//! 分区表持久化于 meta keyspace（元数据先行），路由层内存缓存。
 //! 端区界隐式：分区 i 的 end = 分区 i+1 的 start；末分区 end 无界。
+//!
+//! keyspace 收敛（SPEC M3-WP02 裁定 3）：meta 行落在 `m-meta` 前缀
+//! `[0x02, 0x01, start_key]`，分区数据共享 `m-child`——行数按
+//! `[start, next_start)` range 计，不再逐 keyspace 打开。
 
-use std::collections::HashMap;
 use std::sync::RwLock;
 
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use fjall::Keyspace;
+
+use crate::ksconv::{meta_key, META_PREFIX};
 
 /// 分区元数据状态位（meta 值第 9 字节）。
 pub const STATUS_ACTIVE: u8 = 0;
 /// 分裂中（崩溃恢复时按协议收尾——SPEC §3 分裂协议）。
 pub const STATUS_SPLITTING: u8 = 1;
 
-/// meta keyspace 名。
+/// meta keyspace 名（WP01 旧布局 `t-meta`；收敛后为 `m-meta`，见
+/// [`crate::ksconv::KS_META`]——迁移探测仍按此名识别旧库）。
 pub const META_KEYSPACE: &str = "t-meta";
-/// meta 内 next-pid 计数器键。
+/// meta 内 next-pid 计数器键（收敛后前缀化为 `[0x02, 0x00]`）。
 pub const META_NEXT_PID: &[u8] = &[0x00];
-/// meta 分区行键前缀（后接 start_key）。
+/// meta 分区行键前缀（后接 start_key；收敛后外层再加 [`META_PREFIX`]）。
 pub const META_PARTITION_PREFIX: u8 = 0x01;
 
 /// 单个 range 分区的内存路由项。
 #[derive(Debug, Clone)]
 pub struct Partition {
-    /// 起始键（含）。
+    /// 起始键（含，前缀化存储键）。
     pub start: Vec<u8>,
-    /// 分区号（keyspace 名 `t-p{pid}`）。
+    /// 分区号（收敛后仅作元数据标识；WP01 曾映射 keyspace 名 `t-p{pid}`）。
     pub id: u64,
     /// 分裂中标记（meta 持久态的缓存）。
     pub splitting: bool,
@@ -62,20 +68,22 @@ impl Router {
 
     /// 由 meta keyspace 重建路由器（open 恢复路径）。
     ///
+    /// 收敛后 meta 行为 `[0x02, 0x01, start_key]`（`m-meta`），数据全部驻留
+    /// 共享 `data` keyspace（`m-child`）；行数按 `[start, next_start)`
+    /// range 计——不再逐个打开 `t-p{id}` keyspace（256+ 次 manifest fsync
+    /// 是 WP01 open=12.8s 的来源）。
+    ///
     /// # Errors
-    /// meta 读取或 keyspace 打开失败。
-    pub fn load(meta: &Keyspace, db: &Database) -> fjall::Result<(Self, HashMap<u64, Keyspace>)> {
+    /// meta 读取或 data range 计数失败。
+    pub fn load(meta: &Keyspace, data: &Keyspace) -> fjall::Result<Self> {
         let mut parts = Vec::new();
-        let mut keyspaces = HashMap::new();
-        for guard in meta.prefix([META_PARTITION_PREFIX]) {
+        for guard in meta.prefix([META_PREFIX, META_PARTITION_PREFIX]) {
             let (k, v) = guard.into_inner()?;
-            let start = k[1..].to_vec();
+            let start = k[2..].to_vec();
             let mut pid_buf = [0u8; 8];
             pid_buf.copy_from_slice(&v[0..8]);
             let id = u64::from_be_bytes(pid_buf);
             let splitting = v[8] == STATUS_SPLITTING;
-            let ks = db.keyspace(&format!("t-p{id}"), KeyspaceCreateOptions::default)?;
-            keyspaces.insert(id, ks);
             parts.push(Partition {
                 start,
                 id,
@@ -85,9 +93,13 @@ impl Router {
         parts.sort_by(|a, b| a.start.cmp(&b.start));
         let counts = parts
             .iter()
-            .map(|p| keyspaces[&p.id].iter().count() as u64)
-            .collect();
-        Ok((Self { parts, counts }, keyspaces))
+            .enumerate()
+            .map(|(i, p)| {
+                let end = parts.get(i + 1).map(|n| n.start.as_slice());
+                partition_count(data, &p.start, end)
+            })
+            .collect::<fjall::Result<Vec<u64>>>()?;
+        Ok(Self { parts, counts })
     }
 
     /// 键所属分区下标（最后一个 start ≤ key 的分区；表空则 panic——open 必建首分区）。
@@ -122,7 +134,7 @@ impl Router {
         self.counts[idx] = v;
     }
 
-    /// 全量替换计数（恢复搬移后重算）。
+    /// 全量替换计数（恢复收尾后重算）。
     pub fn replace_counts(&mut self, counts: Vec<u64>) {
         self.counts = counts;
     }
@@ -138,6 +150,34 @@ impl Router {
     pub fn clear_splitting(&mut self, idx: usize) {
         self.parts[idx].splitting = false;
     }
+}
+
+/// meta 分区行键（收敛后完整存储键）= `[0x02, 0x01] + start_key`。
+#[must_use]
+pub fn partition_meta_key(start: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::with_capacity(1 + start.len());
+    raw.push(META_PARTITION_PREFIX);
+    raw.extend_from_slice(start);
+    meta_key(&raw)
+}
+
+/// 共享 `data` keyspace 上按分区逻辑区间 `[start, end)` 计行
+/// （end=None 即无界）。
+///
+/// # Errors
+/// 迭代失败。
+pub fn partition_count(data: &Keyspace, start: &[u8], end: Option<&[u8]>) -> fjall::Result<u64> {
+    use std::ops::Bound;
+    let hi: Bound<Vec<u8>> = match end {
+        None => Bound::Unbounded,
+        Some(e) => Bound::Excluded(e.to_vec()),
+    };
+    let mut n = 0u64;
+    for guard in data.range((Bound::Included(start.to_vec()), hi)) {
+        guard.into_inner()?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 #[cfg(test)]

@@ -1,25 +1,32 @@
-//! 动态分裂协议与崩溃恢复（SPEC M3-WP01 §3）。
+//! 动态分裂协议与崩溃恢复（SPEC M3-WP01 §3；M3-WP02 裁定 3 收敛后语义）。
 //!
-//! 协议不变量：**分区元数据先行 + 搬移原子批**——任一步崩溃后：
-//! - meta 原子批要么整体生效要么不生效（新分区行存在 ⇔ splitting 态存在）；
-//! - 搬移批每批原子（insert 目标 + remove 源同批），键恒在且仅在一侧；
-//! - 恢复方向确定：见 splitting 分区行 → 键序前驱为源 → 重放搬移至清空 →
-//!   置 active。半分裂状态不外泄（单写者串行 + open 先恢复后服务）。
+//! keyspace 收敛后所有分区共享 `m-child`，分裂为 **元数据-only 操作**：
+//! 不再物理搬移键，只切分路由表与分区行数计数。协议不变量收缩为：
+//! - 分裂 = 单次原子批：next-pid 计数器 + 新分区行（直接 active）；
+//! - 崩溃窗口仅一处：批未提交 → open 恢复见 splitting 行重放收尾
+//!   （幂等：重放即把同一行再置 active）；已提交 → 无 splitting 残留。
+//!
+//! 物理搬移随 keyspace 收敛移除（共享 keyspace 内 insert+remove 同键 =
+//! 净删除，见 M3-WP02 裁定 3 推导）；WP02-T05 起搬移语义由 raft 日志
+//! 复制承接（SPEC §6）。
 
-use fjall::{Keyspace, OwnedWriteBatch};
+use fjall::OwnedWriteBatch;
 use std::ops::Bound;
 
 use crate::entry_plane::HubError;
-use crate::router::{META_NEXT_PID, STATUS_ACTIVE, STATUS_SPLITTING};
-use crate::tree_plane::{TreePlane, MOVE_BATCH};
+use crate::router::{
+    partition_count, partition_meta_key, META_NEXT_PID, STATUS_ACTIVE, STATUS_SPLITTING,
+};
+use crate::tree_plane::TreePlane;
 
-/// 崩溃注入（failpoint，测试专用，WP01-T05 崩溃一致性验收）：布防点命中
-/// 计数到达阈值即 panic，模拟进程死亡后由 open 恢复路径收尾。
+/// 崩溃注入（failpoint，测试专用，WP01-T05 崩溃一致性验收；WP02-T02 收敛后
+/// 收缩为两布防点）：布防点命中计数到达阈值即 panic，模拟进程死亡后由
+/// open 恢复路径收尾。
 ///
 /// 布防表为 **thread-local**：分裂协议与恢复全部运行在调用线程（v0.1 单写者），
 /// 同线程布防/命中天然配对；并行测试互不可见，无需互斥。未布防时每次命中
 /// 仅一次线程局部表查询——分裂协议低频（默认 4M 行/次），成本可忽略；
-/// 除本文件三处协议点外禁止在其他路径布防。
+/// 除本文件协议点外禁止在其他路径布防。
 pub mod failpoint {
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -28,12 +35,16 @@ pub mod failpoint {
         static ARMED: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
     }
 
-    /// 注入点：分裂协议「元数据先行」原子批提交之后、目标 keyspace 创建前。
+    /// 注入点：分裂元数据原子批（next-pid + splitting 分区行）提交之后、
+    /// 收尾前——最恶劣窗口（meta 先行已生效，目标分区未收尾）。
     pub const PT_META_COMMITTED: &str = "split::meta_committed";
-    /// 注入点：搬移批提交之后（含恢复重放——两条路径共用 move_keys）。
-    pub const PT_MOVE_BATCH: &str = "split::move_batch";
-    /// 注入点：搬移完成之后、置 active 原子批提交之前。
+    /// 注入点：分裂收尾批（splitting → active）提交之后、路由内存态更新前。
+    /// 收敛后收尾与登记合批时该点在 fresh 分裂中不命中——恢复路径
+    /// （`recover_splits` 置 active 批提交后）仍会命中。
     pub const PT_MOVES_DONE: &str = "split::moves_done";
+    /// 注入点：恢复路径收尾批提交后——复用「搬移批」语义槽位（收敛后无
+    /// 物理搬移，恢复重放的最后一个原子步即收尾批）。
+    pub const PT_MOVE_BATCH: &str = "split::move_batch";
 
     /// 布防：本线程 `point` 第 `panic_on_hit` 次命中时 panic（1 = 首次命中即崩）。
     pub fn arm(point: &'static str, panic_on_hit: usize) {
@@ -71,26 +82,32 @@ pub mod failpoint {
 
 impl TreePlane {
     /// put 路径入口：行数超阈值时对新分裂（fresh）执行。
+    ///
+    /// 收敛后分裂为纯元数据：一次原子批提交「splitting 分区行」即完成
+    /// 键的归属切换（共享 keyspace 下 [median, next) 的键天然就位），
+    /// 随后收尾批置 active + 路由内存态修正计数。
     pub(crate) fn split_partition(&self, idx: usize) -> Result<(), HubError> {
-        let (src_id, next_start) = {
+        let (src_id, start, next_start) = {
             let router = self.router.read().expect("router lock");
             let p = &router.partitions()[idx];
             (
                 p.id,
+                p.start.clone(),
                 router.partitions().get(idx + 1).map(|n| n.start.clone()),
             )
         };
-        let src = self
-            .keyspaces
-            .read()
-            .expect("keyspaces lock")
-            .get(&src_id)
-            .cloned()
-            .ok_or(HubError::PartitionMissing(src_id))?;
 
-        // 1. 选键序中位边界（真实行数计；内存计数仅做触发近似）
-        let keys: Vec<Vec<u8>> = src
-            .iter()
+        // 1. 选键序中位边界（真实行数计；内存计数仅做触发近似）。
+        //    共享 keyspace：扫本分区逻辑区间 [start, next_start)。
+        let keys: Vec<Vec<u8>> = self
+            .data
+            .range((
+                Bound::<Vec<u8>>::Included(start.clone()),
+                match &next_start {
+                    None => Bound::Unbounded,
+                    Some(e) => Bound::Excluded(e.clone()),
+                },
+            ))
             .filter_map(|g| g.key().ok().map(|k| k.to_vec()))
             .collect();
         let n = keys.len();
@@ -102,12 +119,13 @@ impl TreePlane {
             return Ok(());
         }
         let median = keys[n / 2].clone();
+        let moved = (n - n / 2) as u64;
 
         // 2. 元数据先行：原子批写 next-pid 计数器 + 新分区行（splitting 态）
         let new_pid = {
             let cur = self
                 .meta
-                .get(META_NEXT_PID)
+                .get(crate::ksconv::meta_key(META_NEXT_PID))
                 .map_err(HubError::from)?
                 .map_or(1u64, |v| {
                     let mut b = [0u8; 8];
@@ -115,7 +133,11 @@ impl TreePlane {
                     u64::from_be_bytes(b)
                 });
             let mut batch = OwnedWriteBatch::with_capacity(self.db.clone(), 2);
-            batch.insert(&self.meta, META_NEXT_PID, (cur + 1).to_be_bytes());
+            batch.insert(
+                &self.meta,
+                crate::ksconv::meta_key(META_NEXT_PID),
+                (cur + 1).to_be_bytes(),
+            );
             let mut row = Vec::with_capacity(9);
             row.extend_from_slice(&cur.to_be_bytes());
             row.push(STATUS_SPLITTING);
@@ -124,42 +146,29 @@ impl TreePlane {
             cur
         };
         failpoint::hit(failpoint::PT_META_COMMITTED);
-        let target = self
-            .db
-            .keyspace(
-                &format!("t-p{new_pid}"),
-                fjall::KeyspaceCreateOptions::default,
-            )
-            .map_err(HubError::from)?;
-        // 不变量：新 pid 不得与既有分区冲突（计数器错位将退化为同库自我搬移）
+        // 不变量：新 pid 不得与既有分区冲突（计数器错位将退化为同分区自切）
         assert_ne!(
             new_pid, src_id,
             "split allocated pid {new_pid} colliding with source"
         );
 
-        // 3. 搬移 [median, next_start)：每批原子（insert 目标 + remove 源同批）
-        let moved = self.move_keys(&src, &target, &median, next_start.as_deref())?;
-        failpoint::hit(failpoint::PT_MOVES_DONE);
-
-        // 4. 收尾：置 active → 路由生效（源分区行不变、键已搬空）
+        // 3. 收尾：同一分区行置 active（原子批；崩溃即由恢复路径重放）
         let mut batch = OwnedWriteBatch::with_capacity(self.db.clone(), 1);
         let mut row = Vec::with_capacity(9);
         row.extend_from_slice(&new_pid.to_be_bytes());
         row.push(STATUS_ACTIVE);
         batch.insert(&self.meta, partition_meta_key(&median), row);
         batch.commit().map_err(HubError::from)?;
+        // 收尾批已提交、路由内存态未更新——崩溃窗口（覆盖 WP01「搬移完成/
+        // 置 active 前后」语义的收敛形态：键已归属新分区，仅内存计数滞后）
+        failpoint::hit(failpoint::PT_MOVE_BATCH);
+        failpoint::hit(failpoint::PT_MOVES_DONE);
 
-        // 5. 内存路由更新：新分区插到源之后，计数按搬移实况修正
+        // 4. 内存路由更新：新分区插到源之后，计数按键序中位修正
         self.keyspaces
             .write()
             .expect("keyspaces lock")
-            .insert(new_pid, target);
-        let src_count = self
-            .keyspaces
-            .read()
-            .expect("keyspaces lock")
-            .get(&src_id)
-            .map_or(0, |ks| ks.iter().count() as u64);
+            .insert(new_pid, self.data.clone());
         let mut router = self.router.write().expect("router lock");
         router.insert_split(
             idx,
@@ -168,7 +177,7 @@ impl TreePlane {
                 id: new_pid,
                 splitting: false,
             },
-            src_count + moved,
+            n as u64,
             moved,
         );
         Ok(())
@@ -176,7 +185,8 @@ impl TreePlane {
 
     /// open 恢复：收尾所有 splitting 分区（meta 行已在 Router::load 读入）。
     ///
-    /// 恢复路径与 fresh 分裂的区别：pid/分区行已存在，只重放搬移 + 置 active。
+    /// 收敛后无物理搬移——恢复 = 把 splitting 行置 active（幂等重放）
+    /// + 路由内存态清标记 + 全量重算计数。
     pub(crate) fn recover_splits(&self) -> Result<(), HubError> {
         let targets: Vec<(usize, u64, Vec<u8>)> = {
             let router = self.router.read().expect("router lock");
@@ -189,110 +199,44 @@ impl TreePlane {
                 .collect()
         };
         for (idx, pid, start) in targets {
-            let (src_ks, next_start) = {
-                let router = self.router.read().expect("router lock");
-                let prev = router.partitions()[idx - 1].id;
-                let next_start = router.partitions().get(idx + 1).map(|n| n.start.clone());
-                let src_ks = self
-                    .keyspaces
-                    .read()
-                    .expect("keyspaces lock")
-                    .get(&prev)
-                    .cloned()
-                    .ok_or(HubError::PartitionMissing(prev))?;
-                (src_ks, next_start)
-            };
-            let target = self
-                .keyspaces
-                .read()
-                .expect("keyspaces lock")
-                .get(&pid)
-                .cloned()
-                .ok_or(HubError::PartitionMissing(pid))?;
-            self.move_keys(&src_ks, &target, &start, next_start.as_deref())?;
-
             let mut batch = OwnedWriteBatch::with_capacity(self.db.clone(), 1);
             let mut row = Vec::with_capacity(9);
             row.extend_from_slice(&pid.to_be_bytes());
             row.push(STATUS_ACTIVE);
             batch.insert(&self.meta, partition_meta_key(&start), row);
             batch.commit().map_err(HubError::from)?;
+            failpoint::hit(failpoint::PT_MOVE_BATCH);
+            failpoint::hit(failpoint::PT_MOVES_DONE);
             self.router
                 .write()
                 .expect("router lock")
                 .clear_splitting(idx);
         }
-        // 恢复搬移改变了各分区驻留数——全量重算
+        // 恢复后计数重算（splitting 期间 bump 归源分区，区间已变）
         self.recount_all();
         Ok(())
     }
 
-    /// 搬移 `[start, end)`（end=None 即无界），返回搬移行数；每批原子。
-    ///
-    /// 搬移游标自批尾续扫（排除上批末键）——总扫描 O(M)。v0.1 每批从 `start`
-    /// 重开迭代器为 O(M²/B)：10⁷ 实测单次分裂停顿 ~100-200s 且随搬移量
-    /// 超线性增长（M3-WP01-T06 基准报告，优化留痕），修正后分裂为秒级。
-    /// 崩溃语义不变：批仍原子，恢复重放幂等（已搬走的键不在源中，扫描跳过）。
-    fn move_keys(
-        &self,
-        src: &Keyspace,
-        target: &Keyspace,
-        start: &[u8],
-        end: Option<&[u8]>,
-    ) -> Result<u64, HubError> {
-        let mut moved: u64 = 0;
-        let mut lo = Bound::Included(start.to_vec());
-        loop {
-            let hi: Bound<Vec<u8>> = match end {
-                None => Bound::Unbounded,
-                Some(e) => Bound::Excluded(e.to_vec()),
-            };
-            let mut chunk = Vec::with_capacity(MOVE_BATCH);
-            for guard in src.range((lo.clone(), hi)) {
-                let (k, v) = guard.into_inner().map_err(HubError::from)?;
-                chunk.push((k.to_vec(), v.to_vec()));
-                if chunk.len() >= MOVE_BATCH {
-                    break;
-                }
-            }
-            if chunk.is_empty() {
-                return Ok(moved);
-            }
-            let mut batch = OwnedWriteBatch::with_capacity(self.db.clone(), chunk.len() * 2);
-            for (k, v) in &chunk {
-                batch.insert(target, k.as_slice(), v.as_slice());
-                batch.remove(src, k.as_slice());
-            }
-            batch.commit().map_err(HubError::from)?;
-            failpoint::hit(failpoint::PT_MOVE_BATCH);
-            moved += chunk.len() as u64;
-            lo = Bound::Excluded(chunk[chunk.len() - 1].0.clone());
-        }
-    }
-
+    /// 按分区逻辑区间在共享 `m-child` 上重算各行数。
     fn recount_all(&self) {
-        let keyspaces = self.keyspaces.read().expect("keyspaces lock");
         let mut router = self.router.write().expect("router lock");
-        let counts: Vec<u64> = router
-            .partitions()
+        let parts = router.partitions().to_vec();
+        let counts: Vec<u64> = parts
             .iter()
-            .map(|p| {
-                keyspaces
-                    .get(&p.id)
-                    .map_or(0, |ks| ks.iter().count() as u64)
+            .enumerate()
+            .map(|(i, p)| {
+                let end = parts.get(i + 1).map(|n| n.start.as_slice());
+                partition_count(&self.data, &p.start, end).unwrap_or(0)
             })
             .collect();
         router.replace_counts(counts);
     }
 }
 
-/// meta 分区行键 = 前缀字节 + start_key。
+/// meta 分区行键（兼容导出——收敛后为 `[0x02, 0x01] + start_key`）。
 #[must_use]
-pub fn partition_meta_key(start: &[u8]) -> Vec<u8> {
-    let mut k = Vec::with_capacity(1 + start.len());
-    k.push(crate::router::META_PARTITION_PREFIX);
-    k.extend_from_slice(start);
-    k
+pub fn partition_meta_key_compat(start: &[u8]) -> Vec<u8> {
+    partition_meta_key(start)
 }
 
 #[cfg(test)]
