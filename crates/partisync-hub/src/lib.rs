@@ -8,6 +8,7 @@
 pub mod encode;
 pub mod entry_plane;
 pub mod ksconv;
+pub mod net;
 pub mod raft_store;
 pub mod router;
 pub mod shard;
@@ -18,6 +19,10 @@ pub use encode::{
     decode_entry_row, encode_entry_row, EncodeError, EntryRow, FLAG_DELETED, KIND_DIR, KIND_FILE,
 };
 pub use entry_plane::{HashPlane, HubError};
+pub use net::{
+    read_frame, serve, write_frame, NetFactory, NetRequest, NetResponse, TcpNetwork, FRAME_VERSION,
+    MAX_FRAME_BYTES,
+};
 pub use raft_store::{
     group_prefix, open_raft_stores, HubData, HubResponse, HubTypeConfig, RaftLogReaderStore,
     RaftLogStore, RaftSnapshotBuilderStore, RaftStateMachineStore, KS_RAFT_LOG, KS_RAFT_META,

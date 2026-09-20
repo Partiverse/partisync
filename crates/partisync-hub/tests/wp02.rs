@@ -1,7 +1,10 @@
-//! WP02 存储适配器回归（SPEC M3-WP02 T03）：openraft storage-v2 → fjall。
+//! WP02 T03/T04 回归：openraft storage-v2 → fjall 存储适配器 + TCP 帧网络层。
 //!
-//! 覆盖：vote/committed 硬状态、append/range/log-state、truncate/purge、
-//! apply（数据节 + membership）、快照构建/安装/回读、重开恢复、组隔离。
+//! T03 覆盖：vote/committed 硬状态、append/range/log-state、truncate/purge、
+//! apply（数据节 + membership）、快照构建/安装/回读、重开恢复、组隔离、
+//! kill -9 持久化、openraft 官方一致性套件。
+//! T04 覆盖：帧回环/版本校验、RaftNetwork 客户端 ↔ 框架服务端 RPC 回环、
+//! 远端业务错误映射、超时与拒连。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -447,4 +450,240 @@ impl openraft::testing::StoreBuilder<Cfg, RaftLogStore, RaftStateMachineStore, S
 #[test]
 fn t03_openraft_storage_conformance_suite() {
     openraft::testing::Suite::test_all(Wp02StoreBuilder).expect("conformance suite");
+}
+
+/// ===== T04：网络层（SPEC M3-WP02 裁定 4） =====
+use std::time::Duration;
+
+use openraft::error::{RPCError, RaftError};
+use openraft::network::RPCOption;
+use openraft::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
+    VoteRequest, VoteResponse,
+};
+use openraft::{RPCTypes, RaftNetwork, RaftNetworkFactory};
+use partisync_hub::{serve, NetFactory, NetRequest, NetResponse};
+
+/// 起 stub 服务端：echo 形态按 req 种类回预置应答。
+async fn spawn_stub_server(
+    handler: impl Fn(&NetRequest) -> NetResponse + Send + Sync + 'static + Clone,
+) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    let h = move |req: NetRequest| {
+        let resp = handler(&req);
+        std::future::ready(resp)
+    };
+    tokio::spawn(async move {
+        let _ = serve(listener, h).await;
+    });
+    addr
+}
+
+fn vote_req(term: u64) -> VoteRequest<u64> {
+    VoteRequest {
+        vote: Vote::new_committed(term, 1),
+        last_log_id: Some(log_id(term, 3)),
+    }
+}
+
+#[tokio::test]
+async fn t04_frame_roundtrip_and_version_reject() {
+    use partisync_hub::{read_frame, write_frame};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let srv = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let payload = read_frame(&mut stream).await.expect("read");
+        write_frame(&mut stream, &payload).await.expect("echo");
+    });
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let body = b"\x00\x01frame-payload".to_vec();
+    write_frame(&mut client, &body).await.expect("write");
+    let got = read_frame(&mut client).await.expect("echo back");
+    assert_eq!(got, body);
+    srv.await.expect("srv");
+
+    // 版本不符：客户端发 0xFF 版本帧 → 服务端 read_frame 报错断连
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let srv = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        read_frame(&mut stream).await
+    });
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let len = 2u32.to_be_bytes();
+    use tokio::io::AsyncWriteExt;
+    client.write_all(&len).await.expect("len");
+    client.write_all(&[0xFF]).await.expect("bad version");
+    client.write_all(b"{}").await.expect("body");
+    let res = srv.await.expect("srv");
+    assert!(res.is_err(), "server must reject wrong version");
+}
+
+#[tokio::test]
+async fn t04_net_client_server_roundtrip_all_kinds() {
+    // stub 服务端：Vote 成功、AppendEntries 成功、InstallSnapshot 成功
+    let addr = spawn_stub_server(|req| match req {
+        NetRequest::Vote(_) => NetResponse::Vote(Ok(VoteResponse {
+            vote: Vote::new_committed(5, 2),
+            vote_granted: true,
+            last_log_id: Some(log_id(5, 9)),
+        })),
+        NetRequest::AppendEntries(_) => {
+            NetResponse::AppendEntries(Ok(AppendEntriesResponse::Success))
+        }
+        NetRequest::InstallSnapshot(_) => {
+            NetResponse::InstallSnapshot(Ok(InstallSnapshotResponse {
+                vote: Vote::new_committed(5, 2),
+            }))
+        }
+    })
+    .await;
+
+    let mut factory = NetFactory::new(1);
+    let node = BasicNode::new(addr.clone());
+    let mut client = factory.new_client(2, &node).await;
+
+    // vote
+    let vresp = client
+        .vote(vote_req(5), RPCOption::new(Duration::from_secs(5)))
+        .await
+        .expect("vote rpc");
+    assert_eq!(vresp.vote, Vote::new_committed(5, 2));
+    assert!(vresp.vote_granted);
+    assert_eq!(vresp.last_log_id, Some(log_id(5, 9)));
+
+    // append_entries（长连接复用：第二次 RPC 不重建连接）
+    let areq: AppendEntriesRequest<Cfg> = AppendEntriesRequest {
+        vote: Vote::new_committed(5, 2),
+        prev_log_id: Some(log_id(5, 9)),
+        entries: vec![],
+        leader_commit: Some(log_id(5, 8)),
+    };
+    client
+        .append_entries(areq, RPCOption::new(Duration::from_secs(5)))
+        .await
+        .expect("append rpc");
+
+    // install_snapshot（分块帧）
+    let ireq: InstallSnapshotRequest<Cfg> = InstallSnapshotRequest {
+        vote: Vote::new_committed(5, 2),
+        meta: SnapshotMeta {
+            last_log_id: Some(log_id(5, 9)),
+            last_membership: StoredMembership::new(Some(log_id(1, 1)), membership_of(&[1, 2])),
+            snapshot_id: "5-9".to_owned(),
+        },
+        offset: 0,
+        data: b"snapshot-bytes".to_vec(),
+        done: true,
+    };
+    let iresp = client
+        .install_snapshot(ireq, RPCOption::new(Duration::from_secs(5)))
+        .await
+        .expect("install rpc");
+    assert_eq!(iresp.vote, Vote::new_committed(5, 2));
+}
+
+#[tokio::test]
+async fn t04_net_remote_error_mapping() {
+    // 远端业务错误过网 → RPCError::RemoteError
+    let addr = spawn_stub_server(|req| match req {
+        NetRequest::Vote(_) => {
+            NetResponse::Vote(Err(RaftError::Fatal(openraft::error::Fatal::Stopped)))
+        }
+        _ => unreachable!("vote only"),
+    })
+    .await;
+    let addr_s = addr.clone();
+    let resp =
+        partisync_hub::net::one_shot_vote(&addr_s, vote_req(7), Duration::from_secs(5)).await;
+    match resp {
+        Err(RPCError::RemoteError(remote)) => {
+            assert_eq!(remote.target, 0);
+            assert!(matches!(remote.source, RaftError::Fatal(_)));
+        }
+        other => panic!("expected RemoteError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn t04_net_timeout_on_silent_server() {
+    // 服务端接受连接但不回包 → hard_ttl 超时 → RPCError::Timeout
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    tokio::spawn(async move {
+        // 收下并持有：不读不写（丢弃会触发 RST，客户端将收到 Network 而非超时）
+        let mut held = Vec::new();
+        loop {
+            if let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        }
+    });
+    let resp =
+        partisync_hub::net::one_shot_vote(&addr, vote_req(1), Duration::from_millis(80)).await;
+    match resp {
+        Err(RPCError::Timeout(t)) => {
+            assert_eq!(t.action, RPCTypes::Vote);
+            assert_eq!(t.target, 0);
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn t04_net_connect_refused_maps_network_error() {
+    // 端口 1（tcpmux，本机无监听）→ 连接拒绝 → RPCError::Network
+    let resp =
+        partisync_hub::net::one_shot_vote("127.0.0.1:1", vote_req(1), Duration::from_secs(2)).await;
+    assert!(
+        matches!(resp, Err(RPCError::Network(_))),
+        "expected Network error, got {resp:?}"
+    );
+}
+
+#[tokio::test]
+async fn t04_net_payload_survives_json_envelope() {
+    // HubData 紧凑载荷过 serde_json 信封不失真（含 0x00 字节与多字节 UTF-8）
+    let payload: std::sync::Arc<Vec<u8>> =
+        std::sync::Arc::new(vec![0x00u8, 0xFF, 0xE4, 0xB8, 0xAD, 0xF0, 0x9F, 0x92, 0xAA]);
+    let expected = payload.clone();
+    let addr = spawn_stub_server(move |req| match req {
+        NetRequest::AppendEntries(a) => {
+            let entry = &a.entries[0];
+            match &entry.payload {
+                openraft::EntryPayload::Normal(HubData(d)) => {
+                    assert_eq!(d, &expected[..]);
+                }
+                other => panic!("unexpected payload {other:?}"),
+            }
+            NetResponse::AppendEntries(Ok(AppendEntriesResponse::Success))
+        }
+        _ => unreachable!("append only"),
+    })
+    .await;
+    let mut factory = NetFactory::new(1);
+    let mut client = factory.new_client(2, &BasicNode::new(addr)).await;
+    let areq: AppendEntriesRequest<Cfg> = AppendEntriesRequest {
+        vote: Vote::new_committed(3, 1),
+        prev_log_id: None,
+        entries: vec![Entry {
+            log_id: log_id(3, 2),
+            payload: openraft::EntryPayload::Normal(HubData((*payload).clone())),
+        }],
+        leader_commit: None,
+    };
+    client
+        .append_entries(areq, RPCOption::new(Duration::from_secs(5)))
+        .await
+        .expect("append with binary payload");
 }
