@@ -3,11 +3,13 @@
 //! 当前内容：内容寻址主哈希（BLAKE3）、[`chunker`]（内容定义分块，P1–P3）、
 //! [`store`]（内容寻址块库 + 引用计数，P4）、[`ec`]（RS(10,4) 纠删，
 //! ADR-0014）、[`pack`]（pack v2 格式，M3-WP04 裁定 1）、[`repair`]
-//! （修复限流 + 持久化修复队列，M3-WP04-T03）与 [`tier`]（分层存储
-//! NVMe→HDD→S3 引擎，M3-WP04-T03）。
+//! （修复限流 + 持久化修复队列，M3-WP04-T03）、[`tier`]（分层存储
+//! NVMe→HDD→S3 引擎，M3-WP04-T03）与 [`gc`]（分代 GC + 宽限期 +
+//! per-pack 锁，M3-WP04-T05）。
 
 pub mod chunker;
 pub mod ec;
+pub mod gc;
 pub mod pack;
 pub mod repair;
 pub mod store;
@@ -15,6 +17,7 @@ pub mod tier;
 
 pub use chunker::{chunk_boundaries, chunk_root, CdcConfig, CdcConfigError};
 pub use ec::shards_to_data;
+pub use gc::{Clock, GcState, MarkOutcome, PackLockTable, SystemClock, Tombstone};
 pub use repair::{RepairItem, RepairLimiter, RepairQueue};
 pub use store::{put_chunks, CasStats, ChunkStore};
 pub use tier::{FsBackend, MigrationStatus, PackLocation, Tier, TierBackend, TierEngine};

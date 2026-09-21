@@ -18,6 +18,8 @@ fjall = { workspace = true } # ADR-0011：修复队列持久化（m-pack-repair 
 
 [dev-dependencies]
 proptest = { workspace = true }
+loom = "0.7" # M3-WP04-T05 GC：loom 验证「持续写入+并发 GC」一轮不死锁、不丢块
 
-[lints]
-workspace = true
+[lints.rust]
+# 复述工作区强制的 forbid（partisync-cas 不另开 unsafe）：
+unsafe_code = "forbid"
