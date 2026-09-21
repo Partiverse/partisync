@@ -713,3 +713,134 @@ fn t05_signature_tamper_and_nonce_replay_rejected() {
 fn hex_of(bytes: [u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// ===== T06：设备↔hub 端到端 Merkle 对账（裁定 2 + 裁定 7） =====
+use partisync_graph::store::{EntryKind, Store};
+use partisync_sync::reconcile::ReconcileOpts;
+
+async fn device_node(tag: &str, device: &str) -> Store {
+    let dir = std::env::temp_dir().join(format!("hub-wp03-{tag}-{}", partisync_core::Ulid::now()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let s = Store::open(&dir.join("t.db")).await.unwrap();
+    s.seed_device_volume(device, device, device).await.unwrap();
+    s
+}
+
+/// 设备叶集快照（键 → 哈希），经 sync 协议同口径扫描。
+async fn device_leaves(store: &Store) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for l in partisync_sync::reconcile::scan_leaves_pub(store)
+        .await
+        .unwrap()
+    {
+        out.insert(l.key, l.hash);
+    }
+    out
+}
+
+#[tokio::test]
+async fn t06_device_to_hub_reconcile_e2e() {
+    let root = tmp_root("t06-e2e");
+    // HubService 自带 runtime——在外层 tokio 测试 runtime 中须以
+    // spawn_blocking 构建（内层 block_on 嵌套 panic）
+    let svc = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || HubService::open_with_threshold(&root, 300).expect("open")
+    })
+    .await
+    .expect("join");
+    let dev = device_node("t06-dev", "dev1").await;
+
+    // 设备侧写状态（empty hub 影子 → 首轮全量修复到 hub）
+    let kind = EntryKind::File;
+    let root_id = dev
+        .add_entry(None, "r", "/", EntryKind::Dir, 0, 1, None, None)
+        .await
+        .unwrap();
+    dev.add_entry(
+        Some(&root_id),
+        "docs",
+        "/docs",
+        EntryKind::Dir,
+        0,
+        1,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    dev.add_entry(
+        None,
+        "a.txt",
+        "/docs/a.txt",
+        kind,
+        42,
+        1,
+        Some(("cc", 42)),
+        None,
+    )
+    .await
+    .unwrap();
+    let tag_id = dev.add_tag("重要", Some("#ff0000")).await.unwrap();
+    dev.tag_entry(&tag_id, "/docs/a.txt").await.unwrap();
+    // capture 记账：走 HLC 时钟（clock_top 驱动 fast-path 判定与水位推进）
+    use partisync_sync::capture;
+    for p in ["/", "/docs", "/docs/a.txt"] {
+        capture::record_entry_upsert(&dev, p).await.unwrap();
+    }
+    capture::record_tag_upsert(&dev, &tag_id).await.unwrap();
+    capture::record_tag_link(&dev, &tag_id, "/docs/a.txt")
+        .await
+        .unwrap();
+
+    // 首轮对账：空 hub 影子 → 全量修复（9 叶：3 entry + 1 tag + 1 link + …）
+    let stats = svc
+        .reconcile_with_device(&dev, ReconcileOpts { max_rounds: 4 })
+        .await
+        .expect("reconcile r1");
+    assert!(stats.repaired_b > 0, "hub side must receive repairs");
+    assert!(stats.converged, "round 1 must converge");
+
+    // 叶集等价（键 + 哈希全同）
+    let dev_leaves = device_leaves(&dev).await;
+    let hub_leaves = svc.shadow_scan_async().await.expect("hub scan");
+    let hub_map: std::collections::BTreeMap<_, _> =
+        hub_leaves.into_iter().map(|l| (l.key, l.hash)).collect();
+    assert_eq!(hub_map, dev_leaves, "shadow must mirror device");
+
+    // 增量：设备新增一文件 → 二轮对账仅修复增量，且收敛走水位快路径
+    dev.add_entry(None, "b.txt", "/docs/b.txt", kind, 7, 2, None, None)
+        .await
+        .unwrap();
+    capture::record_entry_upsert(&dev, "/docs/b.txt")
+        .await
+        .unwrap();
+    let stats2 = svc
+        .reconcile_with_device(&dev, ReconcileOpts { max_rounds: 4 })
+        .await
+        .expect("reconcile r2");
+    assert!(stats2.converged);
+    let dev_leaves2 = device_leaves(&dev).await;
+    let hub2: std::collections::BTreeMap<_, _> = svc
+        .shadow_scan_async()
+        .await
+        .expect("hub scan")
+        .into_iter()
+        .map(|l| (l.key, l.hash))
+        .collect();
+    assert_eq!(hub2, dev_leaves2, "delta must be repaired");
+    // 第三轮：无新写 → 水位快路径（零修复直接收敛）
+    let stats3 = svc
+        .reconcile_with_device(&dev, ReconcileOpts { max_rounds: 4 })
+        .await
+        .expect("reconcile r3");
+    assert!(
+        stats3.fast_path && stats3.converged,
+        "r3 must hit fast path"
+    );
+    svc.crash_async().await;
+    // Runtime 归还阻塞线程再 drop（async 上下文 drop runtime 会 panic）
+    tokio::task::spawn_blocking(move || drop(svc))
+        .await
+        .expect("drop svc");
+}

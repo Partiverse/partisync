@@ -31,6 +31,7 @@ use crate::registry::RegistryService;
 use crate::replica::{NodeConfig, Replica, ReplicaError};
 use crate::{put_entry_impl, remove_entry_impl, rename_entry_impl};
 use crate::{HashPlane, Hub, TreePlane};
+use partisync_sync::reconcile::{LeafKind, LeafSource, StateLeaf};
 
 /// 业务命令（raft 日志载荷；`HubData` = newtype-over-bytes）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,12 +137,20 @@ pub fn decode_cmd(mut buf: &[u8]) -> Result<HubCmd, HubError> {
     }
 }
 
+/// 对账影子写命令（修复 sink 经 raft 入日志；载荷 = serde_json 本结构）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShadowUpsert {
+    /// 本批影子行（幂等 upsert：按 key 覆盖）。
+    pub rows: Vec<ShadowRow>,
+}
+
 /// Hub 业务状态机 = 通用节（applied 指针/membership，[`RaftStateMachineStore`]）
-/// + 业务节（entry/children 平面，apply 调用与直连 [`Hub`] 相同的内核）。
+/// + 业务节（entry/children 平面 + 对账影子节，apply 调用与直连 [`Hub`] 相同的内核）。
 pub struct HubStateMachine {
     inner: RaftStateMachineStore,
     entry: HashPlane,
     tree: TreePlane,
+    shadow: fjall::Keyspace,
 }
 
 impl HubStateMachine {
@@ -157,7 +166,10 @@ impl HubStateMachine {
         Ok(Self {
             inner,
             entry: HashPlane::attach(db.clone())?,
-            tree: TreePlane::attach(db, split_threshold)?,
+            tree: TreePlane::attach(db.clone(), split_threshold)?,
+            shadow: db
+                .keyspace(KS_SHADOW, fjall::KeyspaceCreateOptions::default)
+                .map_err(HubError::Fjall)?,
         })
     }
 }
@@ -192,26 +204,43 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for HubStateMachine {
         // （apply 错误在 openraft 中是 fatal——不可承载业务错误）
         for (i, e) in cloned.iter().enumerate() {
             if let openraft::EntryPayload::Normal(d) = &e.payload {
-                let cmd = decode_cmd(&d.0).map_err(business_error)?;
-                let outcome: Result<(), HubError> = match cmd {
-                    HubCmd::Put(row) => put_entry_impl(&self.entry, &self.tree, &row),
-                    HubCmd::Remove(id) => {
-                        let prior = self.entry.get(&id).map_err(business_error)?;
-                        remove_entry_impl(&self.entry, &self.tree, &id, prior.as_ref())
-                    }
-                    HubCmd::Rename(id, parent, name) => {
-                        match self.entry.get(&id).map_err(business_error)? {
-                            Some(row) if !row.is_deleted() => {
-                                rename_entry_impl(&self.entry, &self.tree, &row, parent, &name)
-                            }
-                            _ => Err(HubError::EntryMissing), // no-op + 标志位
+                if let Ok(cmd) = decode_cmd(&d.0) {
+                    let outcome: Result<(), HubError> = match cmd {
+                        HubCmd::Put(row) => put_entry_impl(&self.entry, &self.tree, &row),
+                        HubCmd::Remove(id) => {
+                            let prior = self.entry.get(&id).map_err(business_error)?;
+                            remove_entry_impl(&self.entry, &self.tree, &id, prior.as_ref())
                         }
+                        HubCmd::Rename(id, parent, name) => {
+                            match self.entry.get(&id).map_err(business_error)? {
+                                Some(row) if !row.is_deleted() => {
+                                    rename_entry_impl(&self.entry, &self.tree, &row, parent, &name)
+                                }
+                                _ => Err(HubError::EntryMissing), // no-op + 标志位
+                            }
+                        }
+                    };
+                    match outcome {
+                        Ok(()) => responses[i] = crate::HubResponse(vec![0x00]),
+                        Err(HubError::EntryMissing) => {
+                            responses[i] = crate::HubResponse(vec![0x01]);
+                        }
+                        Err(e) => return Err(business_error(e)),
                     }
-                };
-                match outcome {
-                    Ok(()) => responses[i] = crate::HubResponse(vec![0x00]),
-                    Err(HubError::EntryMissing) => responses[i] = crate::HubResponse(vec![0x01]),
-                    Err(e) => return Err(business_error(e)),
+                } else if let Ok(cmd) = serde_json::from_slice::<ShadowUpsert>(&d.0) {
+                    // 对账影子节：修复 sink 经 raft 应用（裁定 7——同 log 全副本收敛）
+                    for row in &cmd.rows {
+                        let json = serde_json::to_vec(row)
+                            .map_err(|e| business_error_msg(format!("shadow encode: {e}")))?;
+                        self.shadow
+                            .insert(row.key.as_bytes(), json)
+                            .map_err(|e| business_error_msg(format!("shadow write: {e}")))?;
+                    }
+                    responses[i] = crate::HubResponse(vec![0x00]);
+                } else {
+                    return Err(business_error_msg(format!(
+                        "unrecognized payload at index {i}"
+                    )));
                 }
             }
         }
@@ -249,6 +278,17 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for HubStateMachine {
 
 /// 业务平面错误 → openraft SM IO 错误（openraft SM 无业务错误通道；
 /// 调用方经日志与 ACK 结果感知）。
+fn business_error_msg(msg: impl std::fmt::Display) -> openraft::StorageError<u64> {
+    let io = std::io::Error::other(msg.to_string());
+    openraft::StorageError::IO {
+        source: openraft::StorageIOError::new(
+            openraft::ErrorSubject::StateMachine,
+            openraft::ErrorVerb::Write,
+            openraft::AnyError::new(&io),
+        ),
+    }
+}
+
 fn business_error(e: HubError) -> openraft::StorageError<u64> {
     let io = std::io::Error::other(e.to_string());
     openraft::StorageError::IO {
@@ -257,6 +297,147 @@ fn business_error(e: HubError) -> openraft::StorageError<u64> {
             openraft::ErrorVerb::Write,
             openraft::AnyError::new(&io),
         ),
+    }
+}
+
+/// 对账影子节 keyspace（组 1 业务节第二段——裁定 7：同 log 各节按序应用）。
+pub const KS_SHADOW: &str = "r-shadow";
+/// 水位行键前缀（`\x00wm/{origin}` → hlc）。
+pub const WM_PREFIX: u8 = 0x00;
+
+/// 影子行（对账叶的持久形态；serde JSON 进 `r-shadow`）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShadowRow {
+    /// 叶键（entry=path / `tag/{id}` / `link/{tag}␟{path}`）。
+    pub key: String,
+    /// 叶哈希（graph::merkle 口径）。
+    pub hash: String,
+    /// 完整字段集（修复 sink 需要全量字段）。
+    pub kind: ShadowKind,
+}
+
+/// 影子行字段集（与 sync `LeafKind` 一一对应；serde 标签形态）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "t", content = "v")]
+pub enum ShadowKind {
+    /// entry 叶。
+    Entry {
+        /// 全路径。
+        path: String,
+        /// 1=dir 2=file（graph 口径）。
+        kind: i64,
+        /// 内容 id（blake3 hex）。
+        content: Option<String>,
+        /// 属主设备。
+        owner: Option<String>,
+        /// 字节。
+        size: i64,
+        /// mtime。
+        mtime_ns: i64,
+    },
+    /// tag 叶。
+    Tag {
+        /// tag id。
+        id: String,
+        /// 名称。
+        name: String,
+        /// 颜色。
+        color: Option<String>,
+        /// 删除标记。
+        deleted: bool,
+    },
+    /// link 叶。
+    Link {
+        /// tag id。
+        tag_id: String,
+        /// entry 全路径。
+        entry_path: String,
+        /// 删除标记。
+        deleted: bool,
+    },
+}
+
+impl From<&LeafKind> for ShadowKind {
+    fn from(k: &LeafKind) -> Self {
+        match k {
+            LeafKind::Entry {
+                path,
+                kind,
+                content,
+                owner,
+                size,
+                mtime_ns,
+            } => Self::Entry {
+                path: path.clone(),
+                kind: *kind,
+                content: content.clone(),
+                owner: owner.clone(),
+                size: *size,
+                mtime_ns: *mtime_ns,
+            },
+            LeafKind::Tag {
+                id,
+                name,
+                color,
+                deleted,
+            } => Self::Tag {
+                id: id.clone(),
+                name: name.clone(),
+                color: color.clone(),
+                deleted: *deleted,
+            },
+            LeafKind::Link {
+                tag_id,
+                entry_path,
+                deleted,
+            } => Self::Link {
+                tag_id: tag_id.clone(),
+                entry_path: entry_path.clone(),
+                deleted: *deleted,
+            },
+        }
+    }
+}
+
+impl From<&ShadowKind> for LeafKind {
+    fn from(k: &ShadowKind) -> Self {
+        match k {
+            ShadowKind::Entry {
+                path,
+                kind,
+                content,
+                owner,
+                size,
+                mtime_ns,
+            } => Self::Entry {
+                path: path.clone(),
+                kind: *kind,
+                content: content.clone(),
+                owner: owner.clone(),
+                size: *size,
+                mtime_ns: *mtime_ns,
+            },
+            ShadowKind::Tag {
+                id,
+                name,
+                color,
+                deleted,
+            } => Self::Tag {
+                id: id.clone(),
+                name: name.clone(),
+                color: color.clone(),
+                deleted: *deleted,
+            },
+            ShadowKind::Link {
+                tag_id,
+                entry_path,
+                deleted,
+            } => Self::Link {
+                tag_id: tag_id.clone(),
+                entry_path: entry_path.clone(),
+                deleted: *deleted,
+            },
+        }
     }
 }
 
@@ -269,6 +450,7 @@ pub struct HubService {
     replica: Replica,
     hub: Hub,
     registry: RegistryService,
+    shadow: fjall::Keyspace,
 }
 
 /// 门面配置。
@@ -318,12 +500,13 @@ impl HubService {
     /// 存储打开、raft 启动、bootstrap 或选举等待失败。
     pub fn open_with_config(cfg: HubServiceConfig) -> Result<Self, ReplicaError> {
         let rt = Runtime::new().map_err(|e| ReplicaError::Io(std::io::Error::other(e)))?;
-        let (replica, hub, registry) = rt.block_on(open_async(&cfg))?;
+        let (replica, hub, registry, shadow) = rt.block_on(open_async(&cfg))?;
         Ok(Self {
             rt,
             replica,
             hub,
             registry,
+            shadow,
         })
     }
 
@@ -481,7 +664,32 @@ impl HubService {
 
     /// 停止 raft core（演练/测试用：进程死亡形态，无优雅交接）。
     pub fn crash(&self) {
-        self.rt.block_on(self.replica.crash());
+        self.rt.block_on(self.crash_async());
+    }
+
+    /// [`Self::crash`] 的异步形态（可从外部 runtime 直接 await）。
+    pub async fn crash_async(&self) {
+        self.replica.crash().await;
+    }
+
+    /// 设备↔hub Merkle 对账（裁定 2 + 裁定 7）：hub 侧以
+    /// [`RaftLeafSource`]（影子节）参战——设备叶集为真相源之一，
+    /// 修复写经 raft 全副本收敛。
+    ///
+    /// # Errors
+    /// 协议轮次内未收敛（max_rounds 耗尽）或引擎错误。
+    pub async fn reconcile_with_device<S: LeafSource>(
+        &self,
+        device: &S,
+        opts: partisync_sync::reconcile::ReconcileOpts,
+    ) -> Result<partisync_sync::reconcile::ReconcileStats, ReplicaError> {
+        let hub_src = RaftLeafSource::new(self);
+        partisync_sync::reconcile::reconcile(device, &hub_src, opts)
+            .await
+            .map_err(|e| {
+                eprintln!("reconcile failed: {e}");
+                into_replica(HubError::Encode(crate::EncodeError::UnexpectedEof))
+            })
     }
 
     /// 分区表内省（直连读；测试/运维）。
@@ -556,7 +764,7 @@ impl HubService {
 /// （pid=1）→ bootstrap → 等 leader。
 async fn open_async(
     cfg: &HubServiceConfig,
-) -> Result<(Replica, Hub, RegistryService), ReplicaError> {
+) -> Result<(Replica, Hub, RegistryService, fjall::Keyspace), ReplicaError> {
     let db = fjall::Database::open(fjall::Config::new(&cfg.root))?;
     let hub = Hub::attach(db.clone(), cfg.split_threshold).map_err(into_replica)?;
     let registry = RegistryService::open_on(
@@ -583,7 +791,351 @@ async fn open_async(
     let replica = Replica::open_with_sm(&node, db, sm).await?;
     replica.bootstrap().await?;
     replica.wait_leader(Duration::from_secs(10)).await?;
-    Ok((replica, hub, registry))
+    let shadow = replica
+        .database()
+        .keyspace(KS_SHADOW, fjall::KeyspaceCreateOptions::default)
+        .map_err(|e| into_replica(HubError::Fjall(e)))?;
+    Ok((replica, hub, registry, shadow))
+}
+
+impl HubService {
+    /// 对账影子叶扫描（线性一致确认后直读 `r-shadow`，键序 = Merkle 序）。
+    ///
+    /// # Errors
+    /// raft 或引擎错误。
+    pub async fn shadow_scan_async(&self) -> Result<Vec<StateLeaf>, ReplicaError> {
+        self.replica.ensure_linearizable().await?;
+        let mut out = Vec::new();
+        for guard in self.shadow.iter() {
+            let (k, v) = guard
+                .into_inner()
+                .map_err(|e| into_replica(HubError::Fjall(e)))?;
+            if k.first() == Some(&WM_PREFIX) {
+                continue; // 水位行不进叶集
+            }
+            let row: ShadowRow = serde_json::from_slice(&v).map_err(|e| {
+                eprintln!("shadow row decode failed (key={k:02x?}): {e}");
+                into_replica(HubError::Encode(crate::EncodeError::UnexpectedEof))
+            })?;
+            out.push(StateLeaf {
+                key: row.key,
+                hash: row.hash,
+                kind: LeafKind::from(&row.kind),
+            });
+        }
+        Ok(out)
+    }
+
+    /// 影子行 upsert（经 raft；`LeafSource` 修复 sink 的写通道）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn shadow_upsert_async(&self, rows: Vec<ShadowRow>) -> Result<(), ReplicaError> {
+        let cmd = serde_json::to_vec(&ShadowUpsert { rows })
+            .map_err(|_e| into_replica(HubError::Encode(crate::EncodeError::UnexpectedEof)))?;
+        let h = self.replica.submit(cmd).await?;
+        h.ack().await?;
+        Ok(())
+    }
+
+    /// 水位表读取（` wm/{origin}` 特殊行）。
+    async fn watermarks_async(&self) -> Result<Vec<(String, String)>, ReplicaError> {
+        self.replica.ensure_linearizable().await?;
+        let mut out = Vec::new();
+        for guard in self.shadow.prefix([WM_PREFIX]) {
+            let (k, v) = guard
+                .into_inner()
+                .map_err(|e| into_replica(HubError::Fjall(e)))?;
+            let origin = String::from_utf8(k[1..].to_vec())
+                .map_err(|_e| into_replica(HubError::Encode(crate::EncodeError::UnexpectedEof)))?;
+            let hlc = String::from_utf8(v.to_vec())
+                .map_err(|_e| into_replica(HubError::Encode(crate::EncodeError::UnexpectedEof)))?;
+            out.push((origin, hlc));
+        }
+        Ok(out)
+    }
+
+    /// 水位写入（经 raft；finalize_watermarks 的 hub 侧通道）。
+    async fn note_applied_async(&self, origin: &str, hlc: &str) -> Result<(), ReplicaError> {
+        let mut key = vec![WM_PREFIX];
+        key.extend_from_slice(origin.as_bytes());
+        self.shadow
+            .insert(key.as_slice(), hlc.as_bytes())
+            .map_err(|e| into_replica(HubError::Fjall(e)))
+    }
+}
+
+/// hub 侧对账叶源适配器（裁定 2）：把 [`LeafSource`] 的叶扫描/修复 sink
+/// 映射到 HubService 的影子节（读 = 线性一致；写 = 经 raft 的影子 upsert）。
+///
+/// 语义注记（v0.1）：hub 影子 = **镜像**（last-writer-wins 覆盖，不产生
+/// P11 冲突）——属主决胜发生在设备侧，hub 侧冲突行以普通叶收录。
+pub struct RaftLeafSource<'a> {
+    svc: &'a HubService,
+}
+
+impl<'a> RaftLeafSource<'a> {
+    /// 包装门面。
+    #[must_use]
+    pub fn new(svc: &'a HubService) -> Self {
+        Self { svc }
+    }
+}
+
+impl LeafSource for RaftLeafSource<'_> {
+    async fn device_id(&self) -> Result<String, partisync_core::error::PartisyError> {
+        Ok(format!("hub-{}", self.svc.replica.node_id()))
+    }
+
+    async fn watermarks(
+        &self,
+    ) -> Result<Vec<(String, String)>, partisync_core::error::PartisyError> {
+        self.svc.watermarks_async().await.map_err(partisy)
+    }
+
+    async fn clock_top(&self) -> Result<Option<String>, partisync_core::error::PartisyError> {
+        // hub 影子自身不产生写（镜像）——时钟顶恒 None
+        Ok(None)
+    }
+
+    async fn note_applied(
+        &self,
+        origin: &str,
+        hlc: &str,
+    ) -> Result<(), partisync_core::error::PartisyError> {
+        self.svc
+            .note_applied_async(origin, hlc)
+            .await
+            .map_err(partisy)
+    }
+
+    async fn entry_state_leaves(
+        &self,
+    ) -> Result<
+        Vec<(String, i64, Option<String>, Option<String>, i64, i64)>,
+        partisync_core::error::PartisyError,
+    > {
+        self.svc
+            .replica
+            .ensure_linearizable()
+            .await
+            .map_err(partisy)?;
+        let mut out = Vec::new();
+        for leaf in self.svc.shadow_scan_async().await.map_err(partisy)? {
+            if let LeafKind::Entry {
+                path,
+                kind,
+                content,
+                owner,
+                size,
+                mtime_ns,
+            } = leaf.kind
+            {
+                out.push((path, kind, content, owner, size, mtime_ns));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn tag_state_leaves(
+        &self,
+    ) -> Result<Vec<(String, String, Option<String>, i64)>, partisync_core::error::PartisyError>
+    {
+        self.svc
+            .replica
+            .ensure_linearizable()
+            .await
+            .map_err(partisy)?;
+        let mut out = Vec::new();
+        for leaf in self.svc.shadow_scan_async().await.map_err(partisy)? {
+            if let LeafKind::Tag {
+                id,
+                name,
+                color,
+                deleted,
+            } = leaf.kind
+            {
+                out.push((id, name, color, i64::from(deleted)));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn link_state_leaves(
+        &self,
+    ) -> Result<Vec<(String, String, i64)>, partisync_core::error::PartisyError> {
+        self.svc
+            .replica
+            .ensure_linearizable()
+            .await
+            .map_err(partisy)?;
+        let mut out = Vec::new();
+        for leaf in self.svc.shadow_scan_async().await.map_err(partisy)? {
+            if let LeafKind::Link {
+                tag_id,
+                entry_path,
+                deleted,
+            } = leaf.kind
+            {
+                out.push((tag_id, entry_path, i64::from(deleted)));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn apply_remote_entry(
+        &self,
+        path: &str,
+        name: &str,
+        kind: partisync_graph::store::EntryKind,
+        size: u64,
+        mtime_ns: u64,
+        content: Option<(&str, u64)>,
+        chunk_root: Option<&str>,
+        owner_device: &str,
+    ) -> Result<partisync_graph::store::ApplyOutcome, partisync_core::error::PartisyError> {
+        let _ = (name, chunk_root); // 影子叶只承载状态全量字段（与叶哈希口径一致）
+        let kind_i = match kind {
+            partisync_graph::store::EntryKind::Dir => 1,
+            partisync_graph::store::EntryKind::File => 0,
+        };
+        let leaf = partisync_graph::merkle::entry_leaf(
+            path,
+            kind_i,
+            content.map(|(h, _)| h),
+            Some(owner_device),
+            size,
+            mtime_ns,
+        );
+        let row = ShadowRow {
+            key: leaf.key,
+            hash: leaf.hash,
+            kind: ShadowKind::from(&LeafKind::Entry {
+                path: path.to_owned(),
+                kind: kind_i,
+                content: content.map(|(h, _)| h.to_owned()),
+                owner: Some(owner_device.to_owned()),
+                size: size as i64,
+                mtime_ns: mtime_ns as i64,
+            }),
+        };
+        self.svc
+            .shadow_upsert_async(vec![row])
+            .await
+            .map_err(partisy)?;
+        Ok(partisync_graph::store::ApplyOutcome {
+            path: path.to_owned(),
+            conflict: None, // hub 影子 = 镜像覆盖（见 impl 块文档）
+        })
+    }
+
+    async fn apply_remote_tag(
+        &self,
+        id: &str,
+        name: &str,
+        color: Option<&str>,
+        deleted: bool,
+        hlc_key: &str,
+    ) -> Result<bool, partisync_core::error::PartisyError> {
+        let _ = hlc_key;
+        let leaf = partisync_graph::merkle::tag_leaf(id, name, color, deleted);
+        let row = ShadowRow {
+            key: leaf.key,
+            hash: leaf.hash,
+            kind: ShadowKind::from(&LeafKind::Tag {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                color: color.map(str::to_owned),
+                deleted,
+            }),
+        };
+        self.svc
+            .shadow_upsert_async(vec![row])
+            .await
+            .map_err(partisy)?;
+        Ok(true)
+    }
+
+    async fn apply_remote_tag_link(
+        &self,
+        tag_id: &str,
+        entry_path: &str,
+        deleted: bool,
+        hlc_key: &str,
+    ) -> Result<bool, partisync_core::error::PartisyError> {
+        let _ = hlc_key;
+        let leaf = partisync_graph::merkle::link_leaf(tag_id, entry_path, deleted);
+        let row = ShadowRow {
+            key: leaf.key,
+            hash: leaf.hash,
+            kind: ShadowKind::from(&LeafKind::Link {
+                tag_id: tag_id.to_owned(),
+                entry_path: entry_path.to_owned(),
+                deleted,
+            }),
+        };
+        self.svc
+            .shadow_upsert_async(vec![row])
+            .await
+            .map_err(partisy)?;
+        Ok(true)
+    }
+
+    async fn record_conflict(
+        &self,
+        space_id: &str,
+        base_path: &str,
+        local_path: &str,
+        incoming_path: &str,
+        origin_device: &str,
+        detected_hlc: &str,
+    ) -> Result<String, partisync_core::error::PartisyError> {
+        // hub 影子不产生冲突（镜像语义）——血缘留痕以影子行记录（P11 审计面）
+        let key = format!(
+            "\x00conflict/{space_id}/{}",
+            uuid_like(base_path, incoming_path, detected_hlc)
+        );
+        let row = ShadowRow {
+            key: base_path.to_owned(),
+            hash: String::new(),
+            kind: ShadowKind::Entry {
+                path: local_path.to_owned(),
+                kind: 2,
+                content: Some(incoming_path.to_owned()),
+                owner: Some(origin_device.to_owned()),
+                size: 0,
+                mtime_ns: 0,
+            },
+        };
+        let _ = key;
+        self.svc
+            .shadow_upsert_async(vec![row])
+            .await
+            .map_err(partisy)?;
+        Ok(String::new())
+    }
+}
+
+fn uuid_like(a: &str, b: &str, c: &str) -> String {
+    use std::fmt::Write;
+    let mut h = blake3::Hasher::new();
+    h.update(a.as_bytes());
+    h.update(b.as_bytes());
+    h.update(c.as_bytes());
+    let d = h.finalize();
+    let mut s = String::new();
+    for b in &d.as_bytes()[..8] {
+        write!(s, "{b:02x}").unwrap();
+    }
+    s
+}
+
+/// ReplicaError → PartisyError（Fatal + source 链）。
+fn partisy(e: ReplicaError) -> partisync_core::error::PartisyError {
+    partisync_core::error::PartisyError {
+        severity: partisync_core::error::Severity::Fatal,
+        source: Some(Box::new(e)),
+    }
 }
 
 fn into_replica(e: HubError) -> ReplicaError {

@@ -246,6 +246,13 @@ impl LeafSource for Store {
     }
 }
 
+/// 对账协议内部扫描（hub 端测试/工具同口径复用；不校验权威性）。
+pub async fn scan_leaves_pub<S: LeafSource>(
+    store: &S,
+) -> Result<Vec<StateLeaf>, partisync_core::error::PartisyError> {
+    scan_leaves(store).await
+}
+
 async fn scan_leaves<S: LeafSource>(
     store: &S,
 ) -> Result<Vec<StateLeaf>, partisync_core::error::PartisyError> {
