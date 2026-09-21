@@ -7,6 +7,7 @@ description = "传输引擎：设备/云/hub 三通道、MPU、泛化 delta、�
 
 [dependencies]
 partisync-core = { path = "../partisync-core", version = "0.1.0" } # M2-WP05 chunk_plan 错误分类
+partisync-cas = { path = "../partisync-cas", version = "0.1.0" } # M4-WP04-T05 ChunkStore 实现 ChunkSink/ChunkSource（能力层→领域层向下依赖，ADR-0015 hub→transfer→cas 链既定）
 blake3 = { workspace = true } # M2-WP05 块根哈希（如需 blake3-based chunk_root 校验）
 serde = { workspace = true } # M2-WP05 ChunkPlan JSON 序列化（可选）
 bytes = "1" # M3-WP04-T06 ChunkSink/ChunkSource trait（Bytes 类型）

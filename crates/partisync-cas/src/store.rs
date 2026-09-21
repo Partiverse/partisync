@@ -13,7 +13,7 @@ use crate::chunker::chunk_root;
 use crate::content_hash;
 
 /// 块库句柄。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChunkStore {
     pool: SqlitePool,
     objects: PathBuf,

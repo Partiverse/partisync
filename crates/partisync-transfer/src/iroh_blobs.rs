@@ -91,6 +91,35 @@ pub trait ChunkSource: Debug + Send + Sync {
     ) -> impl std::future::Future<Output = Result<Bytes, PartisyError>> + Send;
 }
 
+// ----------------------------------------------------------------------------
+// partisync-cas ChunkStore 的 trait 落地（M4-WP04-T05）
+// ----------------------------------------------------------------------------
+
+/// `ChunkStore` 写路径接入 [`ChunkSink`]（ADR-0015 裁定 3）。
+///
+/// `ChunkStore::put` 已原子完成「新块写对象 + refcount=1；已存在 refcount+1、
+/// 不重写对象」，与裁定 3「引用计数 incr 在 chunk 落 CAS 散块区时原子执行」一致，
+/// 此处不做二次 refcount 操作。
+///
+/// impl 位置说明：trait 归属 transfer、类型归属 cas，按孤儿规则只能落在
+/// transfer（trait 本地）；依赖方向 transfer → cas 为能力层→领域层向下，
+/// ADR-0015 hub→transfer→cas 链既定，不引入反向依赖。
+impl ChunkSink for partisync_cas::ChunkStore {
+    async fn put_chunk(&self, chunk: &[u8]) -> Result<(), PartisyError> {
+        self.put(chunk).await.map(|_| ())
+    }
+}
+
+/// `ChunkStore` 读路径接入 [`ChunkSource`]（ADR-0015 裁定 4）。
+///
+/// hash 口径：CAS [`partisync_cas::content_hash`] 为 blake3 hex，与
+/// iroh-blobs `Hash` 的 hex 表示一致，调用方可直接互转。
+impl ChunkSource for partisync_cas::ChunkStore {
+    async fn get_chunk(&self, hash: &str) -> Result<Bytes, PartisyError> {
+        self.get(hash).await.map(Bytes::from)
+    }
+}
+
 /// iroh-blobs sender 桩执行器（ADR-0015 裁定 5）。
 ///
 /// 真实实现在 hub 层 `iroh_channel.rs`：直接使用 `iroh::Endpoint` + `get::fsm` 状态机。
@@ -285,5 +314,48 @@ mod tests {
             .await
             .unwrap();
         executor.send_chunk("hash0").await.unwrap();
+    }
+
+    // ------------------------------------------------------------------------
+    // ChunkStore 实现（M4-WP04-T05）
+    // ------------------------------------------------------------------------
+
+    fn tempdir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("xfer-cas-it-{tag}-{}", partisync_core::Ulid::now()))
+    }
+
+    #[tokio::test]
+    async fn cas_store_roundtrips_via_chunk_sink_source() {
+        let store = partisync_cas::ChunkStore::open_in_memory(&tempdir("rt"))
+            .await
+            .unwrap();
+        let data = b"cas roundtrip payload";
+        ChunkSink::put_chunk(&store, &data[..]).await.unwrap();
+
+        let hex = partisync_cas::content_hash(data);
+        let got = ChunkSource::get_chunk(&store, &hex).await.unwrap();
+        assert_eq!(got.as_ref(), &data[..]);
+    }
+
+    #[tokio::test]
+    async fn cas_store_put_chunk_dedups_with_refcount() {
+        let store = partisync_cas::ChunkStore::open_in_memory(&tempdir("rc"))
+            .await
+            .unwrap();
+        ChunkSink::put_chunk(&store, b"dup").await.unwrap();
+        ChunkSink::put_chunk(&store, b"dup").await.unwrap();
+        let stats = store.stats().await.unwrap();
+        assert_eq!(stats.chunks, 1, "同块去重：对象只存一份");
+        assert_eq!(stats.refs, 2, "每次 put_chunk 原子 refcount+1");
+    }
+
+    #[tokio::test]
+    async fn cas_store_missing_hash_is_fatal() {
+        let store = partisync_cas::ChunkStore::open_in_memory(&tempdir("miss"))
+            .await
+            .unwrap();
+        let missing = "0".repeat(64);
+        let err = ChunkSource::get_chunk(&store, &missing).await.unwrap_err();
+        assert_eq!(err.severity, Severity::Fatal);
     }
 }
