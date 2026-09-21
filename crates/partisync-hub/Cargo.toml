@@ -6,11 +6,13 @@ license.workspace = true
 description = "Hub：分片元数据(fjall)、openraft 复制、联邦路由、分层与 EC"
 
 [dependencies]
+bytes = "1" # M3-WP04-T06 iroh_channel 测试桩（ChunkSink/ChunkSource 内存实现）
 fjall.workspace = true # ADR-0011
 blake3.workspace = true # ADR-0002/0011：分片路由哈希（非 KDF）
 partisync-core = { path = "../partisync-core", version = "0.1.0" } # 平面 ID ULID
 partisync-sync = { path = "../partisync-sync", version = "0.1.0" } # D2 盐/KDF 原语 + T04 对账泛化（服务→能力层向下依赖，方向合规）
 partisync-graph = { path = "../partisync-graph", version = "0.1.0" } # Merkle 叶哈希口径 + ApplyOutcome（crate 地图既定依赖）
+partisync-transfer = { path = "../partisync-transfer", version = "0.1.0" } # M3-WP04-T06 iroh-blobs ChunkSink/ChunkSource trait（hub 依赖 transfer 是能力层→能力层同向依赖，方向合规）
 ed25519-dalek = "3" # T05 鉴权信封验签（与 sync 同版本，M2-WP04 设备身份）
 axum = { workspace = true } # hub-demo 演示面（既有 workspace 依赖，无新增顶层）
 tokio = { workspace = true } # hub-demo 运行时

@@ -8,6 +8,7 @@
 pub mod acl;
 pub mod encode;
 pub mod entry_plane;
+pub mod iroh_channel;
 pub mod ksconv;
 pub mod net;
 pub mod raft_store;

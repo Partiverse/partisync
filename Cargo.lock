@@ -2428,12 +2428,14 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "blake3",
+ "bytes",
  "ed25519-dalek",
  "fjall",
  "openraft",
  "partisync-core",
  "partisync-graph",
  "partisync-sync",
+ "partisync-transfer",
  "proptest",
  "serde",
  "serde_json",
@@ -2482,6 +2484,7 @@ name = "partisync-transfer"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytes",
  "partisync-core",
  "serde",
  "tokio",

@@ -7,3 +7,6 @@
 //! 对账修复提供「需推送块清单」的纯计算面。
 
 pub mod chunk_plan;
+
+// M3-WP04-T06: iroh-blobs 设备通道（ADR-0015）
+pub mod iroh_blobs;
