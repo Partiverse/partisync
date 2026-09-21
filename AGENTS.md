@@ -33,8 +33,8 @@ cargo fmt --all --check        # 格式门禁
 cargo clippy --workspace --all-targets -- -D warnings   # lint 门禁
 cargo test --workspace         # 测试门禁
 cargo xtask trace M-1-WP07-T01 # 追溯某任务全链
-cargo xtask report M0          # 生成/刷新里程碑报告骨架
-cargo run -p partisync-cli     # CLI（骨架期）
+cargo xtask report M0          # 生成里程碑报告骨架（已存在不覆盖）
+cargo run -p partisync-cli     # CLI（index/ui/watch/ls/find/dedupe 等子命令）
 ```
 
 ## 禁止事项（红线）

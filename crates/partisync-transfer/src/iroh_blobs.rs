@@ -121,7 +121,10 @@ impl<C: ChunkSource> IrohBlobsExecutor<C> {
     #[allow(dead_code)]
     pub async fn new(source: C, _endpoint: &str, _peer_addr: &str) -> Result<Self, PartisyError> {
         // M4 填实：hub 层直接用 iroh::Endpoint，绕过本桩
-        Ok(Self { source, _p: std::marker::PhantomData })
+        Ok(Self {
+            source,
+            _p: std::marker::PhantomData,
+        })
     }
 
     /// 通过 iroh-blobs 发送一个 chunk（桩）。
@@ -163,7 +166,10 @@ impl<S: ChunkSink> IrohBlobsListener<S> {
     #[allow(dead_code)]
     pub async fn new(_hub_addr: &str, sink: S) -> Result<Self, PartisyError> {
         // M4 填实：hub 层直接用 Router::builder(ep).accept(ALPN, BlobsProtocol).spawn()
-        Ok(Self { sink, _p: std::marker::PhantomData })
+        Ok(Self {
+            sink,
+            _p: std::marker::PhantomData,
+        })
     }
 
     /// 接受一个设备上传会话（桩）。
@@ -171,7 +177,10 @@ impl<S: ChunkSink> IrohBlobsListener<S> {
     pub async fn accept(&self) -> Result<UploadSummary, PartisyError> {
         // M4: hub/iroh_channel.rs 用 Router 在后台 accept，由 BlobsProtocol
         // 调用 ChunkSink::put_chunk，无需本桩参与 accept 循环
-        Ok(UploadSummary { chunks_received: 0, bytes_received: 0 })
+        Ok(UploadSummary {
+            chunks_received: 0,
+            bytes_received: 0,
+        })
     }
 }
 
@@ -199,7 +208,10 @@ mod tests {
 
     impl InMemoryChunkSource {
         pub fn insert(&self, hash: &str, data: impl Into<Bytes>) {
-            self.chunks.lock().unwrap().insert(hash.to_string(), data.into());
+            self.chunks
+                .lock()
+                .unwrap()
+                .insert(hash.to_string(), data.into());
         }
     }
 
@@ -225,7 +237,10 @@ mod tests {
 
     impl ChunkSink for InMemoryChunkSink {
         async fn put_chunk(&self, chunk: &[u8]) -> Result<(), PartisyError> {
-            self.received.lock().unwrap().push(Bytes::copy_from_slice(chunk));
+            self.received
+                .lock()
+                .unwrap()
+                .push(Bytes::copy_from_slice(chunk));
             Ok(())
         }
     }
@@ -266,7 +281,9 @@ mod tests {
     async fn executor_send_chunk_via_source() {
         let source = InMemoryChunkSource::default();
         source.insert("hash0", &b"data0"[..]);
-        let executor = IrohBlobsExecutor::new(source, "mock://node", "mock://peer").await.unwrap();
+        let executor = IrohBlobsExecutor::new(source, "mock://node", "mock://peer")
+            .await
+            .unwrap();
         executor.send_chunk("hash0").await.unwrap();
     }
 }

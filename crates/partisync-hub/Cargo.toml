@@ -20,8 +20,10 @@ serde = { workspace = true } # hub-demo JSON 载荷
 serde_json = { workspace = true } # hub-demo JSON 响应
 openraft = { workspace = true } # ADR-0013（M3-WP02 分片复制共识）
 iroh = "=1.2.0" # M3-WP04-T06 ADR-0015：hub 侧 iroh 节点（中继/打洞）+ iroh-blobs 接收/发送会话
-# 注意：iroh-blobs =0.103.0 的 fs-store 有 tokio blocking feature 冲突（M4 进场地解决）
-# 真实 iroh-blobs 接线通过 iroh =1.2.0 主 crate API 实现（见 iroh_channel.rs 接线注释）
+iroh-blobs = "=0.103.0" # M4-WP04-T02：iroh-blobs 协议（handle_connection + get::fsm）；仅用 MemStore 无 fs-store 冲突
+iroh-base = "=1.2.0" # M4-WP04-T02：iroh_base::EndpointAddr（download executor 参数类型）
+base64 = "0.22" # M4-WP04-T02：SecretKey 序列化（Base64 编码）
+tracing = "0.1" # M4-WP04-T02：iroh_channel 日志（warn/info/debug）
 
 [dev-dependencies]
 proptest = { workspace = true }

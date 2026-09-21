@@ -59,14 +59,17 @@ ADR-0014（RS(10,4)）、ADR-0015（iroh/ihor-blobs 通道）
 |---|---|---|
 | ADR-0015 已起草并登记 | ✅ | `docs/adr/0015-iroh-device-channel-hub-side.md` |
 | ChunkSink / ChunkSource trait 定义（无 iroh 传递依赖） | ✅ | `crates/partisync-transfer/src/iroh_blobs.rs` |
-| Hub 侧 iroh 节点门面骨架 | ✅ | `crates/partisync-hub/src/iroh_channel.rs` |
+| Hub 侧 iroh 节点门面（upload 路径 + download 路径） | ✅ | `crates/partisync-hub/src/iroh_channel.rs` |
+| HubIrohKeyspace trait（密钥加载/生成/持久化） | ✅ | `iroh_channel::HubIrohKeyspace` |
+| HubIrohKeyspace 实现（fjall `h-iroh-node` keyspace） | ✅ | `crates/partisync-hub/src/iroh_keyspace.rs` |
 | trait 桩（InMemoryChunkSource / InMemoryChunkSink）测试通过 | ✅ 3 测试 | `iroh_channel::tests` |
-| iroh 版本精确锁定 | ✅ | `iroh =1.2.0`（hub）；`iroh-blobs =0.103.0`（待 M4 接入 store） |
-| iroh 1.2.0 单独编译 | ✅ | `cargo check -p iroh` 通过 |
-| **iroh-blobs fs-store feature 冲突（M4 进场地解决）** | ⚠️ | `iroh-blobs 0.103.0` fs-store 用 `tokio::task::block_in_place`（需 `rt-multi-thread`），workspace tokio 1.53 无 `blocking` feature；transfer 层不引 iroh-blobs（ADR-0015 裁定 1），hub 层仅用 iroh 主 crate |
+| HubIrohKeyspace 测试通过 | ✅ 3 测试 | `iroh_keyspace::tests` |
+| iroh 版本精确锁定 | ✅ | `iroh =1.2.0`（hub）；`iroh-blobs =0.103.0` |
+| iroh + iroh-blobs 单独编译 | ✅ | `cargo check -p iroh -p iroh-blobs` 通过 |
+| **iroh-blobs fs-store feature 冲突（M4 进场地解决）** | ⚠️ | `iroh-blobs 0.103.0` fs-store 用 `tokio::task::block_in_place`（需 `rt-multi-thread`），workspace tokio 1.53 无 `blocking` feature；transfer 层不引 iroh-blobs（ADR-0015 裁定 1），hub 层仅用 iroh 主 crate + MemStore |
 
 > **M4 接线计划**：hub 层通过 `iroh::Endpoint` + `iroh_blobs::get::fsm` 状态机实现 download；
-> upload 由 `Router::accept(ALPN, BlobsProtocol)` 后台处理；绕过 `iroh-blobs` fs-store 依赖。
+> upload 由 `handle_connection(conn, MemStore)` 后台处理；绕过 `iroh-blobs` fs-store 依赖。
 
 ## 7. 回归门禁
 
