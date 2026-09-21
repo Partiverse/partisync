@@ -12,8 +12,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use blake3::Hasher;
+use partisync_core::PartisyError;
 use partisync_graph::merkle::{entry_leaf, link_leaf, merkle_root, tag_leaf, Leaf};
-use partisync_graph::store::{EntryKind, Store};
+use partisync_graph::store::{ApplyOutcome, EntryKind, Store};
+use std::future::Future;
 
 /// 对账统计。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -40,14 +42,14 @@ impl Default for ReconcileOpts {
 
 /// 单节点的可观察状态叶（key + 哈希 + 完整字段集——对账修复需要）。
 #[derive(Debug, Clone)]
-struct StateLeaf {
-    key: String,
-    hash: String,
-    kind: LeafKind,
+pub struct StateLeaf {
+    pub key: String,
+    pub hash: String,
+    pub kind: LeafKind,
 }
 
 #[derive(Debug, Clone)]
-enum LeafKind {
+pub enum LeafKind {
     Entry {
         path: String,
         kind: i64,
@@ -69,7 +71,184 @@ enum LeafKind {
     },
 }
 
-async fn scan_leaves(store: &Store) -> Result<Vec<StateLeaf>, partisync_core::error::PartisyError> {
+/// 对账叶源抽象（SPEC M3-WP03 裁定 2）：协议（[`reconcile`]）只依赖此面——
+/// 设备端 = `partisync_graph::Store` 实现，hub 端 = raft 面适配器（T06 接线）。
+/// 方法签名与 `Store` 既有面一致（协议语义不变，回归线 = M2-WP03 测试原样过）。
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)] // apply_remote_entry 与 Store 既有面签名一致
+pub trait LeafSource {
+    /// 本店设备 id（水位表键）。
+    fn device_id(&self) -> impl Future<Output = Result<String, PartisyError>> + Send;
+    /// 水位表（origin → hlc）。
+    fn watermarks(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(String, String)>, PartisyError>> + Send;
+    /// 本店时钟顶。
+    fn clock_top(&self) -> impl Future<Output = Result<Option<String>, PartisyError>> + Send;
+    /// 记录「已应用对端水位」。
+    fn note_applied(
+        &self,
+        origin: &str,
+        hlc: &str,
+    ) -> impl Future<Output = Result<(), PartisyError>> + Send;
+    /// entry 状态叶。
+    fn entry_state_leaves(
+        &self,
+    ) -> impl Future<
+        Output = Result<Vec<(String, i64, Option<String>, Option<String>, i64, i64)>, PartisyError>,
+    > + Send;
+    /// tag 状态叶。
+    fn tag_state_leaves(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(String, String, Option<String>, i64)>, PartisyError>> + Send;
+    /// link 状态叶。
+    fn link_state_leaves(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(String, String, i64)>, PartisyError>> + Send;
+    /// 远端 entry 应用（修复 sink；含 P11 冲突改挂）。
+    fn apply_remote_entry(
+        &self,
+        path: &str,
+        name: &str,
+        kind: EntryKind,
+        size: u64,
+        mtime_ns: u64,
+        content: Option<(&str, u64)>,
+        chunk_root: Option<&str>,
+        owner_device: &str,
+    ) -> impl Future<Output = Result<ApplyOutcome, PartisyError>> + Send;
+    /// 远端 tag 应用（LWW）。
+    fn apply_remote_tag(
+        &self,
+        id: &str,
+        name: &str,
+        color: Option<&str>,
+        deleted: bool,
+        hlc_key: &str,
+    ) -> impl Future<Output = Result<bool, PartisyError>> + Send;
+    /// 远端 tag-link 应用（LWW）。
+    fn apply_remote_tag_link(
+        &self,
+        tag_id: &str,
+        entry_path: &str,
+        deleted: bool,
+        hlc_key: &str,
+    ) -> impl Future<Output = Result<bool, PartisyError>> + Send;
+    /// 冲突血缘落档。
+    fn record_conflict(
+        &self,
+        space_id: &str,
+        base_path: &str,
+        local_path: &str,
+        incoming_path: &str,
+        origin_device: &str,
+        detected_hlc: &str,
+    ) -> impl Future<Output = Result<String, PartisyError>> + Send;
+}
+
+impl LeafSource for Store {
+    fn device_id(&self) -> impl Future<Output = Result<String, PartisyError>> + Send {
+        Store::device_id(self)
+    }
+    fn watermarks(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(String, String)>, PartisyError>> + Send {
+        Store::watermarks(self)
+    }
+    fn clock_top(&self) -> impl Future<Output = Result<Option<String>, PartisyError>> + Send {
+        Store::clock_top(self)
+    }
+    fn note_applied(
+        &self,
+        origin: &str,
+        hlc: &str,
+    ) -> impl Future<Output = Result<(), PartisyError>> + Send {
+        Store::note_applied(self, origin, hlc)
+    }
+    fn entry_state_leaves(
+        &self,
+    ) -> impl Future<
+        Output = Result<Vec<(String, i64, Option<String>, Option<String>, i64, i64)>, PartisyError>,
+    > + Send {
+        Store::entry_state_leaves(self)
+    }
+    fn tag_state_leaves(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(String, String, Option<String>, i64)>, PartisyError>> + Send
+    {
+        Store::tag_state_leaves(self)
+    }
+    fn link_state_leaves(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(String, String, i64)>, PartisyError>> + Send {
+        Store::link_state_leaves(self)
+    }
+    fn apply_remote_entry(
+        &self,
+        path: &str,
+        name: &str,
+        kind: EntryKind,
+        size: u64,
+        mtime_ns: u64,
+        content: Option<(&str, u64)>,
+        chunk_root: Option<&str>,
+        owner_device: &str,
+    ) -> impl Future<Output = Result<ApplyOutcome, PartisyError>> + Send {
+        Store::apply_remote_entry(
+            self,
+            path,
+            name,
+            kind,
+            size,
+            mtime_ns,
+            content,
+            chunk_root,
+            owner_device,
+        )
+    }
+    fn apply_remote_tag(
+        &self,
+        id: &str,
+        name: &str,
+        color: Option<&str>,
+        deleted: bool,
+        hlc_key: &str,
+    ) -> impl Future<Output = Result<bool, PartisyError>> + Send {
+        Store::apply_remote_tag(self, id, name, color, deleted, hlc_key)
+    }
+    fn apply_remote_tag_link(
+        &self,
+        tag_id: &str,
+        entry_path: &str,
+        deleted: bool,
+        hlc_key: &str,
+    ) -> impl Future<Output = Result<bool, PartisyError>> + Send {
+        Store::apply_remote_tag_link(self, tag_id, entry_path, deleted, hlc_key)
+    }
+    fn record_conflict(
+        &self,
+        space_id: &str,
+        base_path: &str,
+        local_path: &str,
+        incoming_path: &str,
+        origin_device: &str,
+        detected_hlc: &str,
+    ) -> impl Future<Output = Result<String, PartisyError>> + Send {
+        Store::record_conflict(
+            self,
+            space_id,
+            base_path,
+            local_path,
+            incoming_path,
+            origin_device,
+            detected_hlc,
+        )
+    }
+}
+
+async fn scan_leaves<S: LeafSource>(
+    store: &S,
+) -> Result<Vec<StateLeaf>, partisync_core::error::PartisyError> {
     let mut out = Vec::new();
     for (path, kind, content, owner, size, mtime_ns) in store.entry_state_leaves().await? {
         let l = entry_leaf(
@@ -141,9 +320,9 @@ fn as_merkle_leaves(items: &[StateLeaf]) -> Vec<Leaf> {
 }
 
 /// 快路径声音性判定（SPEC §3）。
-async fn fast_path_eligible(
-    a: &Store,
-    b: &Store,
+async fn fast_path_eligible<A: LeafSource, B: LeafSource>(
+    a: &A,
+    b: &B,
 ) -> Result<bool, partisync_core::error::PartisyError> {
     let am: BTreeMap<String, String> = a.watermarks().await?.into_iter().collect();
     let bm: BTreeMap<String, String> = b.watermarks().await?.into_iter().collect();
@@ -185,9 +364,9 @@ async fn fast_path_eligible(
 ///
 /// # Errors
 /// DB 错误 → Fatal。
-pub async fn reconcile(
-    a: &Store,
-    b: &Store,
+pub async fn reconcile<A: LeafSource, B: LeafSource>(
+    a: &A,
+    b: &B,
     opts: ReconcileOpts,
 ) -> Result<ReconcileStats, partisync_core::error::PartisyError> {
     let mut stats = ReconcileStats::default();
@@ -266,9 +445,9 @@ pub async fn reconcile(
     Ok(stats)
 }
 
-async fn finalize_watermarks(
-    a: &Store,
-    b: &Store,
+async fn finalize_watermarks<A: LeafSource, B: LeafSource>(
+    a: &A,
+    b: &B,
     a_dev: &str,
     b_dev: &str,
 ) -> Result<(), partisync_core::error::PartisyError> {
@@ -282,8 +461,8 @@ async fn finalize_watermarks(
 }
 
 /// 把 a 持有的全量字段应用为 b 的状态行；owner = b 的本机（让对端属主行被尊重）。
-async fn apply_to(
-    dst: &Store,
+async fn apply_to<S: LeafSource>(
+    dst: &S,
     leaf: &StateLeaf,
 ) -> Result<(), partisync_core::error::PartisyError> {
     match &leaf.kind {
@@ -366,9 +545,9 @@ async fn apply_to(
 }
 
 /// 同 key 不同值——按规格 §3 决胜（属主权威 + 字典序决胜）。
-async fn resolve_conflict(
-    a: &Store,
-    b: &Store,
+async fn resolve_conflict<A: LeafSource, B: LeafSource>(
+    a: &A,
+    b: &B,
     la: &StateLeaf,
     lb: &StateLeaf,
     stats: &mut ReconcileStats,
