@@ -844,3 +844,134 @@ async fn t06_device_to_hub_reconcile_e2e() {
         .await
         .expect("drop svc");
 }
+
+/// ===== T07：分裂×复制 failpoint 矩阵（RFC M1-M3 组拓扑形态；SPEC 裁定 7） =====
+use partisync_hub::split::failpoint;
+
+#[tokio::test]
+async fn t07_split_in_raft_apply_multi_round_m1m2() {
+    // M1/M2 组拓扑形态：分裂发生在 SM apply（同 log 同序 → 各副本确定性同
+    // median 同 split）；单节点组上验证阈值下多轮分裂 + 全量键集完整。
+    let root = tmp_root("t07-m1m2");
+    let svc = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || HubService::open_with_threshold(&root, 50).expect("open")
+    })
+    .await
+    .expect("join");
+    let dir = dir_row(1, "d");
+    svc.put_entry_async(&dir).await.expect("put dir");
+    let n = 600u16;
+    let expected: Vec<String> = (0..n).map(|i| format!("item-{i:04}")).collect();
+    for (i, name) in expected.iter().enumerate() {
+        let f = child_row(&dir, name, i as u16);
+        svc.put_entry_async(&f).await.expect("put");
+    }
+    let parts = svc.hub_partition_info();
+    assert!(parts.len() > 1, "multi-round splits expected: {parts:?}");
+    assert!(parts.iter().all(|(_, _, sp, _)| !sp));
+    // 全量 keyset 遍历 == 写入集（分裂无丢键无重键，跨分区有序）
+    let mut names = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = svc
+            .list_children_async(&dir.entry_id, cursor.as_ref(), 97)
+            .await
+            .expect("page");
+        let done = page.next_cursor.is_none();
+        for it in page.items {
+            names.push(it.name);
+        }
+        if done {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(names, expected);
+    svc.crash_async().await;
+    tokio::task::spawn_blocking(move || drop(svc))
+        .await
+        .expect("drop");
+}
+
+#[tokio::test]
+async fn t07_m3_kill_during_split_meta_commit_recover() {
+    // M3 形态：分裂元数据原子批提交后 kill（failpoint 命中于组内 apply
+    // 线程 → raft core fatal 死亡 = leader 死亡）→ 重开恢复路径收尾
+    // splitting 行 → 键集完整、服务恢复。
+    let root = tmp_root("t07-m3");
+    let svc = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || HubService::open_with_threshold(&root, 50).expect("open")
+    })
+    .await
+    .expect("join");
+    let dir = dir_row(1, "d");
+    svc.put_entry_async(&dir).await.expect("put dir");
+    // 先写到分裂边缘（阈值 50：49 条后下一笔触发分裂）
+    for i in 0..49u16 {
+        let f = child_row(&dir, &format!("item-{i:04}"), i);
+        svc.put_entry_async(&f).await.expect("put");
+    }
+    // 布防全局点：SM apply 线程下一次分裂元数据批提交后 panic
+    failpoint::arm_global(failpoint::PT_META_COMMITTED, 1);
+    let f = child_row(&dir, "item-0049", 49);
+    let res = svc.put_entry_async(&f).await;
+    failpoint::disarm_global(failpoint::PT_META_COMMITTED);
+    // core 因 apply panic 而 fatal——本笔提交结果不确定（Error/挂断均算
+    // 「kill 生效」形态），但后续必须可恢复
+    if res.is_ok() {
+        // 分裂点笔已 ACK（panic 发生在 ack 之后的收尾批），仍属死亡形态
+    }
+
+    // 重开：恢复路径收尾 splitting，全量键集完整
+    svc.crash_async().await;
+    tokio::task::spawn_blocking(move || drop(svc))
+        .await
+        .expect("drop svc");
+    let svc2 = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || HubService::open_with_threshold(&root, 50).expect("reopen")
+    })
+    .await
+    .expect("join");
+    let parts = svc2.hub_partition_info();
+    assert!(
+        parts.iter().all(|(_, _, sp, _)| !sp),
+        "no splitting residue: {parts:?}"
+    );
+    let mut names = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = svc2
+            .list_children_async(&dir.entry_id, cursor.as_ref(), 97)
+            .await
+            .expect("page");
+        let done = page.next_cursor.is_none();
+        for it in page.items {
+            names.push(it.name);
+        }
+        if done {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    let mut expected: Vec<String> = (0..50u16).map(|i| format!("item-{i:04}")).collect();
+    expected.sort();
+    names.sort();
+    assert_eq!(names, expected, "keyset must survive split-kill");
+    // 服务恢复：继续 raft 写
+    let post = child_row(&dir, "post-recovery", 99);
+    svc2.put_entry_async(&post)
+        .await
+        .expect("post-recovery put");
+    assert!(svc2
+        .get_entry_async(&post.entry_id)
+        .await
+        .expect("get")
+        .is_some());
+    svc2.crash_async().await;
+    tokio::task::spawn_blocking(move || drop(svc2))
+        .await
+        .expect("drop svc2");
+}

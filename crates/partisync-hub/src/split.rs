@@ -31,6 +31,39 @@ pub mod failpoint {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
+    /// 布防表（进程共享形态）。
+    #[derive(Default)]
+    struct ArmedTable {
+        inner: std::collections::HashMap<&'static str, usize>,
+    }
+
+    impl ArmedTable {
+        fn arm(&mut self, point: &'static str, hits: usize) {
+            self.inner.insert(point, hits);
+        }
+        fn disarm(&mut self, point: &'static str) {
+            self.inner.remove(point);
+        }
+        /// 返回 Some(fire) 表示本表已布防该点；None = 未布防（回落 thread-local）。
+        fn hit(&mut self, point: &str) -> Option<bool> {
+            let remain = self.inner.get_mut(point)?;
+            *remain = remain.saturating_sub(1);
+            let fire = *remain == 0;
+            if fire {
+                self.inner.remove(point);
+            }
+            Some(fire)
+        }
+    }
+
+    /// 进程内共享布防表（组拓扑 failpoint 矩阵：命中发生在组内 runtime 线程）。
+    static GLOBAL_ARMED: std::sync::LazyLock<std::sync::Mutex<ArmedTable>> =
+        std::sync::LazyLock::new(|| {
+            std::sync::Mutex::new(ArmedTable {
+                inner: std::collections::HashMap::new(),
+            })
+        });
+
     thread_local! {
         static ARMED: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
     }
@@ -53,6 +86,22 @@ pub mod failpoint {
         });
     }
 
+    /// 跨线程布防（组拓扑矩阵用）：命中计数进程内共享。
+    pub fn arm_global(point: &'static str, panic_on_hit: usize) {
+        GLOBAL_ARMED
+            .lock()
+            .expect("global armed lock")
+            .arm(point, panic_on_hit.max(1));
+    }
+
+    /// 撤除指定全局布防（测试收尾）。
+    pub fn disarm_global(point: &'static str) {
+        GLOBAL_ARMED
+            .lock()
+            .expect("global armed lock")
+            .disarm(point);
+    }
+
     /// 撤除本线程全部布防。
     pub fn disarm_all() {
         ARMED.with(|armed| armed.borrow_mut().clear());
@@ -60,6 +109,14 @@ pub mod failpoint {
 
     /// 命中计数；到达布防阈值则注入崩溃（先撤自身布防再 panic）。
     pub(crate) fn hit(point: &'static str) {
+        // 全局布防优先（跨线程命中——raft SM apply 运行在组内 runtime 线程，
+        // 与布防线程不同，T07 矩阵用）；未布防再查 thread-local（WP01 直连形态）。
+        if let Some(fire) = GLOBAL_ARMED.lock().expect("global armed lock").hit(point) {
+            if fire {
+                panic!("failpoint: injected crash at {point} (global)");
+            }
+            return;
+        }
         let fire = ARMED.with(|armed| {
             let mut armed = armed.borrow_mut();
             match armed.get_mut(point) {
