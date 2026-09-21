@@ -333,18 +333,30 @@ impl HubService {
         &self.registry
     }
 
+    /// 当前 leader 提示（演示面用；None = 选举中）。
+    #[must_use]
+    pub fn registry_leader_hint(&self) -> Option<u64> {
+        self.replica.current_leader()
+    }
+
     /// 写入 entry（raft 线性一致：commit+apply 后应答）。
     ///
     /// # Errors
     /// raft 错误。
     pub fn put_entry(&self, row: &EntryRow) -> Result<(), ReplicaError> {
+        self.rt.block_on(self.put_entry_async(row))
+    }
+
+    /// [`Self::put_entry`] 的异步形态（运行在调用方 runtime 上）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn put_entry_async(&self, row: &EntryRow) -> Result<(), ReplicaError> {
         let cmd = encode_cmd(&HubCmd::Put(row.clone()))
             .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
-        self.rt.block_on(async {
-            let h = self.replica.submit(cmd).await?;
-            h.ack().await?;
-            Ok(())
-        })
+        let h = self.replica.submit(cmd).await?;
+        h.ack().await?;
+        Ok(())
     }
 
     /// 读取 entry（线性一致 + 读时修复，WP01 §4 同构）。
@@ -352,7 +364,18 @@ impl HubService {
     /// # Errors
     /// raft 或引擎错误。
     pub fn get_entry(&self, entry_id: &[u8; 16]) -> Result<Option<EntryRow>, ReplicaError> {
-        self.rt.block_on(self.replica.ensure_linearizable())?;
+        self.rt.block_on(self.get_entry_async(entry_id))
+    }
+
+    /// [`Self::get_entry`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 或引擎错误。
+    pub async fn get_entry_async(
+        &self,
+        entry_id: &[u8; 16],
+    ) -> Result<Option<EntryRow>, ReplicaError> {
+        self.replica.ensure_linearizable().await?;
         self.hub.get_entry(entry_id).map_err(into_replica)
     }
 
@@ -361,13 +384,19 @@ impl HubService {
     /// # Errors
     /// raft 错误。
     pub fn remove_entry(&self, entry_id: &[u8; 16]) -> Result<(), ReplicaError> {
+        self.rt.block_on(self.remove_entry_async(entry_id))
+    }
+
+    /// [`Self::remove_entry`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn remove_entry_async(&self, entry_id: &[u8; 16]) -> Result<(), ReplicaError> {
         let cmd = encode_cmd(&HubCmd::Remove(*entry_id))
             .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
-        self.rt.block_on(async {
-            let h = self.replica.submit(cmd).await?;
-            h.ack().await?;
-            Ok(())
-        })
+        let h = self.replica.submit(cmd).await?;
+        h.ack().await?;
+        Ok(())
     }
 
     /// 改名/移动（raft 线性一致；O(1)——不重写后代）。
@@ -380,18 +409,30 @@ impl HubService {
         new_parent: Option<[u8; 16]>,
         new_name: &str,
     ) -> Result<(), ReplicaError> {
+        self.rt
+            .block_on(self.rename_entry_async(entry_id, new_parent, new_name))
+    }
+
+    /// [`Self::rename_entry`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 或引擎错误。
+    pub async fn rename_entry_async(
+        &self,
+        entry_id: &[u8; 16],
+        new_parent: Option<[u8; 16]>,
+        new_name: &str,
+    ) -> Result<(), ReplicaError> {
         let cmd = encode_cmd(&HubCmd::Rename(*entry_id, new_parent, new_name.to_owned()))
             .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
-        self.rt.block_on(async {
-            let h = self.replica.submit(cmd).await?;
-            let (_, resp) = h.ack_with_response().await?;
-            if resp.first() == Some(&0x01) {
-                return Err(ReplicaError::Io(std::io::Error::other(
-                    "entry missing or tombstoned",
-                )));
-            }
-            Ok(())
-        })
+        let h = self.replica.submit(cmd).await?;
+        let (_, resp) = h.ack_with_response().await?;
+        if resp.first() == Some(&0x01) {
+            return Err(ReplicaError::Io(std::io::Error::other(
+                "entry missing or tombstoned",
+            )));
+        }
+        Ok(())
     }
 
     /// keyset 分页列出 children（线性一致 + 读时修复，WP01 §4 同构）。
@@ -404,7 +445,21 @@ impl HubService {
         cursor: Option<&crate::ChildCursor>,
         limit: u32,
     ) -> Result<crate::ChildrenPage, ReplicaError> {
-        self.rt.block_on(self.replica.ensure_linearizable())?;
+        self.rt
+            .block_on(self.list_children_async(dir_id, cursor, limit))
+    }
+
+    /// [`Self::list_children`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 或引擎错误。
+    pub async fn list_children_async(
+        &self,
+        dir_id: &[u8; 16],
+        cursor: Option<&crate::ChildCursor>,
+        limit: u32,
+    ) -> Result<crate::ChildrenPage, ReplicaError> {
+        self.replica.ensure_linearizable().await?;
         self.hub
             .list_children(dir_id, cursor, limit)
             .map_err(into_replica)

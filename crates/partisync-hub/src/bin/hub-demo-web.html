@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>PartiSync Hub — raft 门面 + 空间注册表演示</title>
+<style>
+  :root { --bg:#0f1420; --panel:#1a2233; --line:#2a3550; --tx:#dce3f2; --dim:#8ea0c0; --ok:#5ad19a; --bad:#ff7a7a; --acc:#6ea8ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--tx); font:14px/1.5 -apple-system,"PingFang SC",sans-serif; }
+  header { padding:14px 22px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+  h1 { font-size:17px; margin:0; }
+  header .sub { color:var(--dim); font-size:12px; }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:14px 22px; max-width:1200px; margin:0 auto; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  h2 { font-size:14px; margin:0 0 10px; color:var(--acc); }
+  input, select, button { background:#0d1220; color:var(--tx); border:1px solid var(--line); border-radius:6px; padding:6px 9px; font-size:13px; }
+  button { cursor:pointer; background:var(--acc); color:#08101f; font-weight:600; border:none; }
+  button.ghost { background:transparent; color:var(--acc); border:1px solid var(--acc); }
+  button:active { transform:translateY(1px); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin:6px 0; align-items:center; }
+  .row input, .row select { flex:1; min-width:90px; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; font-size:13px; }
+  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:500; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .dim { color:var(--dim); }
+  pre { background:#0d1220; border:1px solid var(--line); border-radius:6px; padding:8px; overflow-x:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .note { color:var(--dim); font-size:12px; margin-top:6px; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; border:1px solid var(--line); margin-right:6px; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PartiSync Hub 演示 <span class="tag">raft 双组</span><span class="tag">线性一致</span><span class="tag">D2 盐</span><span class="tag">角色 ACL</span></h1>
+  <div class="sub" id="status">…</div>
+</header>
+<main>
+  <section>
+    <h2>数据面（pid=1 · raft 门面）</h2>
+    <div class="row">
+      <input id="dirHex" placeholder="父目录 id（hex，空 = 根演示目录）" style="flex:2">
+      <button onclick="ensureRoot()">建根目录</button>
+    </div>
+    <div class="row">
+      <input id="newName" placeholder="名称">
+      <select id="newKind"><option value="file">file</option><option value="dir">dir</option></select>
+      <button onclick="createEntry()">put_entry（raft 写）</button>
+    </div>
+    <div class="row">
+      <input id="renId" placeholder="目标 id（hex）">
+      <input id="renName" placeholder="新名">
+      <button class="ghost" onclick="renameEntry()">rename（O(1)）</button>
+      <input id="getId" placeholder="点查 id（hex）">
+      <button class="ghost" onclick="getEntry()">get（ReadIndex）</button>
+    </div>
+    <table id="tbl"><thead><tr><th>名称</th><th>kind</th><th>id</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="note">写 = raft commit+apply 后应答（三段持久）；读 = ReadIndex 确认后读本机平面。分裂由 apply 侧确定性触发（阈值 50）。</div>
+  </section>
+  <section>
+    <h2>分区表（pid=1 · m-meta 实时）</h2>
+    <table id="parts"><thead><tr><th>pid</th><th>start</th><th>splitting</th><th>count</th></tr></thead><tbody></tbody></table>
+    <div class="note">分裂 = 元数据-only（keyspace 收敛后）：splitting 行批 + active 批。</div>
+  </section>
+  <section>
+    <h2>空间注册表（pid=0 · D2 盐接线）</h2>
+    <div class="row">
+      <input id="spId" placeholder="space_id（如 demo）" value="demo">
+      <input id="spRoot" placeholder="根 entry hex（粘上面 id）">
+      <input id="spOwner" placeholder="owner 设备 hex（自定 64 位）" style="flex:2">
+      <button onclick="createSpace()">create_space</button>
+    </div>
+    <div class="row">
+      <button class="ghost" onclick="getSpace()">读空间行</button>
+      <span class="note">创建者 = 首任 Owner；kdf_salt 由 CSPRNG 生成并随 raft 命令持久化（D2）。</span>
+    </div>
+    <pre id="spaceOut">（尚未读取）</pre>
+  </section>
+  <section>
+    <h2>角色 ACL playground（owner/editor/viewer）</h2>
+    <div class="row">
+      <input id="mSpace" placeholder="space_id" value="demo">
+      <input id="mActor" placeholder="actor hex" style="flex:2">
+      <input id="mTarget" placeholder="target hex" style="flex:2">
+      <select id="mRole"><option>editor</option><option>viewer</option><option>owner</option></select>
+      <button onclick="setMember()">set_member</button>
+    </div>
+    <div class="row">
+      <input id="cDev" placeholder="device hex" style="flex:2">
+      <select id="cAct"><option value="read">read</option><option value="write">write</option><option value="admin">admin</option></select>
+      <button class="ghost" onclick="doCheck()">check 权限</button>
+    </div>
+    <pre id="aclOut">（提示：先在上方建空间并把 owner hex 填入 actor）</pre>
+    <div class="note">规则：read=全员成员；write=editor+；admin=owner。SM 侧强制：非 Owner 管成员 → Forbidden；最后一名 Owner 不可降/移。</div>
+  </section>
+</main>
+<script>
+let rootId = localStorage.getItem('rootId') || null;
+const $ = id => document.getElementById(id);
+function hex(n){let a=new Uint8Array(n);crypto.getRandomValues(a);return [...a].map(b=>b.toString(16).padStart(2,'0')).join('');}
+async function api(path, body, method){
+  const opt = body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}
+                   : {method: method||'GET'};
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(()=>({error:r.status}));
+  if (!r.ok) throw j;
+  return j;
+}
+async function ensureRoot(){
+  const r = await api('/api/entries', {parent_hex:'00'.repeat(16), name:'root', kind:'dir'}, 'POST');
+  rootId = r.id_hex; localStorage.setItem('rootId', rootId);
+  $('dirHex').value = rootId;
+  refresh(); status();
+}
+async function refresh(){
+  const parent = $('dirHex').value || rootId || '00'.repeat(16);
+  const items = await api('/api/entries?parent_hex=' + parent);
+  $('tbl').querySelector('tbody').innerHTML = items.map(it =>
+    `<tr><td>${it.name}${it.deleted?' <span class="bad">墓碑</span>':''}</td><td class="dim">${it.kind}</td>`+
+    `<td class="dim" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${it.id_hex}</td>`+
+    `<td><button class="ghost" onclick="del('${it.id_hex}')">删</button></td></tr>`).join('');
+  const parts = await api('/api/partitions');
+  $('parts').querySelector('tbody').innerHTML = parts.map(p =>
+    `<tr><td>${p.pid}</td><td class="dim">${p.start_hex||'(∅)'}</td>`+
+    `<td>${p.splitting?'<span class="bad">splitting</span>':'<span class="ok">active</span>'}</td><td>${p.count}</td></tr>`).join('');
+}
+async function createEntry(){
+  if (!rootId) { rootId = '00'.repeat(16); }
+  const parent = $('dirHex').value || rootId;
+  await api('/api/entries', {parent_hex: parent, name: $('newName').value, kind: $('newKind').value}, 'POST');
+  $('newName').value=''; refresh(); status();
+}
+async function del(id){ await api('/api/entries/'+id, null, 'DELETE'); refresh(); }
+async function renameEntry(){
+  await api('/api/rename', {id_hex:$('renId').value, parent_hex:$('dirHex').value, name:$('renName').value}, 'POST');
+  $('renName').value=''; refresh();
+}
+async function getEntry(){
+  const j = await api('/api/entries/'+$('getId').value);
+  $('spaceOut').textContent = JSON.stringify(j, null, 2);
+}
+async function status(){
+  const j = await api('/api/status');
+  $('status').textContent = `pid=0 注册表 + pid=1 数据 · leader=${j.groups[0].leader_hint ?? '选举中'} · ${j.semantics}`;
+}
+async function createSpace(){
+  const j = await api('/api/spaces/'+($('spId').value||'demo'),
+    {root_hex: $('spRoot').value || rootId || '00'.repeat(16), owner_hex: $('spOwner').value || hex(32)}, 'POST');
+  $('spaceOut').textContent = JSON.stringify(j, null, 2);
+}
+async function getSpace(){
+  const j = await api('/api/spaces/'+($('spId').value||'demo'));
+  $('spaceOut').textContent = JSON.stringify(j, null, 2);
+}
+async function setMember(){
+  const j = await api('/api/spaces/'+($('spId').value||'demo')+'/members',
+    {actor_hex:$('mActor').value, target_hex:$('mTarget').value, role:$('mRole').value}, 'POST');
+  $('aclOut').textContent = JSON.stringify(j, null, 2);
+  if (j.ok) getSpace();
+}
+async function doCheck(){
+  const j = await api('/api/check',
+    {space_id:$('mSpace').value||'demo', device_hex:$('cDev').value, action:$('cAct').value}, 'POST');
+  $('aclOut').textContent = JSON.stringify(j, null, 2);
+}
+status(); refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -465,6 +465,20 @@ impl RegistryService {
         root_entry_id: [u8; 16],
         owner: DeviceId,
     ) -> Result<SpaceRow, RegistryError> {
+        self.handle
+            .block_on(self.create_space_async(space_id, root_entry_id, owner))
+    }
+
+    /// [`Self::create_space`] 的异步形态。
+    ///
+    /// # Errors
+    /// 已存在（`Exists`）或 raft 错误。
+    pub async fn create_space_async(
+        &self,
+        space_id: &str,
+        root_entry_id: [u8; 16],
+        owner: DeviceId,
+    ) -> Result<SpaceRow, RegistryError> {
         let salt = random_kdf_salt();
         let created_at_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -477,7 +491,7 @@ impl RegistryService {
             salt,
             created_at_ns,
         };
-        let flag = self.submit(cmd)?;
+        let flag = self.submit_async(cmd).await?;
         flag_to_error(flag)?;
         Ok(SpaceRow {
             root_entry_id,
@@ -492,7 +506,15 @@ impl RegistryService {
     /// # Errors
     /// raft 错误。
     pub fn space(&self, space_id: &str) -> Result<Option<SpaceRow>, RegistryError> {
-        self.handle.block_on(self.replica.ensure_linearizable())?;
+        self.handle.block_on(self.space_async(space_id))
+    }
+
+    /// [`Self::space`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn space_async(&self, space_id: &str) -> Result<Option<SpaceRow>, RegistryError> {
+        self.replica.ensure_linearizable().await?;
         self.read_row(space_id)
     }
 
@@ -507,12 +529,29 @@ impl RegistryService {
         target: DeviceId,
         role: Role,
     ) -> Result<(), RegistryError> {
-        let flag = self.submit(RegistryCmd::SetMember {
-            actor,
-            space_id: space_id.to_owned(),
-            target,
-            role,
-        })?;
+        self.handle
+            .block_on(self.set_member_async(actor, space_id, target, role))
+    }
+
+    /// [`Self::set_member`] 的异步形态。
+    ///
+    /// # Errors
+    /// `Forbidden`/`Missing` 或 raft 错误。
+    pub async fn set_member_async(
+        &self,
+        actor: DeviceId,
+        space_id: &str,
+        target: DeviceId,
+        role: Role,
+    ) -> Result<(), RegistryError> {
+        let flag = self
+            .submit_async(RegistryCmd::SetMember {
+                actor,
+                space_id: space_id.to_owned(),
+                target,
+                role,
+            })
+            .await?;
         flag_to_error(flag)
     }
 
@@ -526,11 +565,27 @@ impl RegistryService {
         space_id: &str,
         target: DeviceId,
     ) -> Result<(), RegistryError> {
-        let flag = self.submit(RegistryCmd::RemoveMember {
-            actor,
-            space_id: space_id.to_owned(),
-            target,
-        })?;
+        self.handle
+            .block_on(self.remove_member_async(actor, space_id, target))
+    }
+
+    /// [`Self::remove_member`] 的异步形态。
+    ///
+    /// # Errors
+    /// `Forbidden`/`Missing` 或 raft 错误。
+    pub async fn remove_member_async(
+        &self,
+        actor: DeviceId,
+        space_id: &str,
+        target: DeviceId,
+    ) -> Result<(), RegistryError> {
+        let flag = self
+            .submit_async(RegistryCmd::RemoveMember {
+                actor,
+                space_id: space_id.to_owned(),
+                target,
+            })
+            .await?;
         flag_to_error(flag)
     }
 
@@ -544,7 +599,21 @@ impl RegistryService {
         device: DeviceId,
         action: Action,
     ) -> Result<(), RegistryError> {
-        let Some(row) = self.space(space_id)? else {
+        self.handle
+            .block_on(self.check_async(space_id, device, action))
+    }
+
+    /// [`Self::check`] 的异步形态。
+    ///
+    /// # Errors
+    /// `Forbidden`/`Missing`。
+    pub async fn check_async(
+        &self,
+        space_id: &str,
+        device: DeviceId,
+        action: Action,
+    ) -> Result<(), RegistryError> {
+        let Some(row) = self.space_async(space_id).await? else {
             return Err(RegistryError::Missing);
         };
         let Some(role) = row.members.get(&device.to_hex()) else {
@@ -579,13 +648,18 @@ impl RegistryService {
             .and_then(|g| serde_json::from_slice(&g).ok()))
     }
 
+    #[allow(dead_code)] // bins 仅用异步形态；同步形态供测试/非 runtime 线程
     fn submit(&self, cmd: RegistryCmd) -> Result<u8, RegistryError> {
+        // 同步形态（测试/非 runtime 线程用）；demo 走 submit_async
+        self.handle.block_on(self.submit_async(cmd))
+    }
+
+    /// [`Self::submit`] 的异步形态（运行在调用方 runtime 上）。
+    async fn submit_async(&self, cmd: RegistryCmd) -> Result<u8, RegistryError> {
         let payload =
             serde_json::to_vec(&cmd).map_err(|e| RegistryError::Io(format!("cmd encode: {e}")))?;
-        self.handle.block_on(async {
-            let h = self.replica.submit(payload).await?;
-            let (_, resp) = h.ack_with_response().await?;
-            Ok(resp.first().copied().unwrap_or(FLAG_MISSING))
-        })
+        let h = self.replica.submit(payload).await?;
+        let (_, resp) = h.ack_with_response().await?;
+        Ok(resp.first().copied().unwrap_or(FLAG_MISSING))
     }
 }
