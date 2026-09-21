@@ -2311,6 +2311,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "fastcdc",
+ "fjall",
  "partisync-core",
  "proptest",
  "reed-solomon-erasure",

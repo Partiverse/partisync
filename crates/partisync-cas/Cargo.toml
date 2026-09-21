@@ -14,6 +14,7 @@ tokio = { workspace = true }  # ADR-0002：spawn_blocking 文件哈希
 serde = { workspace = true }   # ADR-0002：CasStats 序列化
 serde_json = { workspace = true } # pack v2 索引行序列化
 reed-solomon-erasure = "6"    # ADR-0014：RS(10,4) 纠删（纯 safe）
+fjall = { workspace = true } # ADR-0011：修复队列持久化（m-pack-repair keyspace）
 
 [dev-dependencies]
 proptest = { workspace = true }
