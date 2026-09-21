@@ -27,6 +27,7 @@ use tokio::runtime::Runtime;
 use crate::encode::EntryRow;
 use crate::entry_plane::HubError;
 use crate::raft_store::{HubTypeConfig, RaftSnapshotBuilderStore, RaftStateMachineStore};
+use crate::registry::RegistryService;
 use crate::replica::{NodeConfig, Replica, ReplicaError};
 use crate::{put_entry_impl, remove_entry_impl, rename_entry_impl};
 use crate::{HashPlane, Hub, TreePlane};
@@ -260,10 +261,14 @@ fn business_error(e: HubError) -> openraft::StorageError<u64> {
 }
 
 /// raft 复制语义之上的 Hub 门面（WP01 API 同构；v0.1 单节点组）。
+///
+/// 同库承载两个 raft 组：数据组（pid=1，[`Self::hub`] 平面）与
+/// 空间注册表组（pid=0，[`Self::registry`]，裁定 4）。
 pub struct HubService {
     rt: Runtime,
     replica: Replica,
     hub: Hub,
+    registry: RegistryService,
 }
 
 /// 门面配置。
@@ -313,8 +318,19 @@ impl HubService {
     /// 存储打开、raft 启动、bootstrap 或选举等待失败。
     pub fn open_with_config(cfg: HubServiceConfig) -> Result<Self, ReplicaError> {
         let rt = Runtime::new().map_err(|e| ReplicaError::Io(std::io::Error::other(e)))?;
-        let (replica, hub) = rt.block_on(open_async(&cfg))?;
-        Ok(Self { rt, replica, hub })
+        let (replica, hub, registry) = rt.block_on(open_async(&cfg))?;
+        Ok(Self {
+            rt,
+            replica,
+            hub,
+            registry,
+        })
+    }
+
+    /// 空间注册表服务（全局组 pid=0；裁定 4）。
+    #[must_use]
+    pub fn registry(&self) -> &RegistryService {
+        &self.registry
     }
 
     /// 写入 entry（raft 线性一致：commit+apply 后应答）。
@@ -481,10 +497,21 @@ impl HubService {
     }
 }
 
-/// 异步打开：建库/平面 → 业务状态机 → raft → bootstrap → 等leader。
-async fn open_async(cfg: &HubServiceConfig) -> Result<(Replica, Hub), ReplicaError> {
+/// 异步打开：建库/平面 → 注册表组（pid=0）→ 业务状态机 → 数据组
+/// （pid=1）→ bootstrap → 等 leader。
+async fn open_async(
+    cfg: &HubServiceConfig,
+) -> Result<(Replica, Hub, RegistryService), ReplicaError> {
     let db = fjall::Database::open(fjall::Config::new(&cfg.root))?;
     let hub = Hub::attach(db.clone(), cfg.split_threshold).map_err(into_replica)?;
+    let registry = RegistryService::open_on(
+        &db,
+        &cfg.root,
+        cfg.election_timeout_ms,
+        cfg.heartbeat_interval_ms,
+    )
+    .await
+    .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
     let (_, sm_generic) = crate::open_raft_stores(&db, 1)?;
     let sm = HubStateMachine::attach(db.clone(), sm_generic, cfg.split_threshold)
         .map_err(into_replica)?;
@@ -501,7 +528,7 @@ async fn open_async(cfg: &HubServiceConfig) -> Result<(Replica, Hub), ReplicaErr
     let replica = Replica::open_with_sm(&node, db, sm).await?;
     replica.bootstrap().await?;
     replica.wait_leader(Duration::from_secs(10)).await?;
-    Ok((replica, hub))
+    Ok((replica, hub, registry))
 }
 
 fn into_replica(e: HubError) -> ReplicaError {

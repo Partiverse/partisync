@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use partisync_hub::registry::{Action, DeviceId, RegistryError, Role};
 use partisync_hub::replica::ReplicaError;
 use partisync_hub::service::HubService;
 use partisync_hub::{
@@ -377,4 +378,203 @@ fn t02_row_encoding_compat_through_raft() {
         kind: KIND_FILE,
         deleted: false,
     };
+}
+
+// ===== T03：空间注册表 / D2 盐接线 / 角色 ACL（SPEC M3-WP03 裁定 3/4/5） =====
+
+fn dev(n: u8) -> DeviceId {
+    let mut k = [0u8; 32];
+    k[0] = n;
+    DeviceId(k)
+}
+
+#[test]
+fn t03_create_space_d2_salt_persist_and_derive() {
+    let root = tmp_root("reg-d2");
+    let svc = HubService::open_with_threshold(&root, 300).expect("open");
+    let row = svc
+        .registry()
+        .create_space("space-alpha", [7u8; 16], dev(1))
+        .expect("create");
+    // D2：盐为 CSPRNG 16B（非全零）且持久于注册表行
+    assert_eq!(row.kdf_salt.len(), 16);
+    assert!(row.kdf_salt.iter().any(|b| *b != 0));
+    assert_eq!(
+        row.members.get(&dev(1).to_hex()),
+        Some(&Role::Owner),
+        "creator = first owner"
+    );
+
+    // 重开（bootstrap 幂等）→ 盐/成员可读
+    svc.registry().crash();
+    drop(svc);
+    let svc2 = HubService::open_with_threshold(&root, 300).expect("reopen");
+    let row2 = svc2
+        .registry()
+        .space("space-alpha")
+        .expect("read")
+        .expect("row");
+    assert_eq!(row2.kdf_salt, row.kdf_salt);
+    assert_eq!(row2.members, row.members);
+
+    // D2 验收：显式盐派生路径一致（argon2_master_key_with_salt）
+    let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let k1 = partisync_sync::crypto::argon2_master_key_with_salt(mnemonic, &row.kdf_salt);
+    let k2 = partisync_sync::crypto::argon2_master_key_with_salt(mnemonic, &row2.kdf_salt);
+    assert_eq!(*k1, *k2, "persisted salt drives identical master key");
+    // 重复创建 → Exists 且原行不被改写
+    assert!(matches!(
+        svc2.registry()
+            .create_space("space-alpha", [9u8; 16], dev(2)),
+        Err(RegistryError::Exists)
+    ));
+    let after = svc2
+        .registry()
+        .space("space-alpha")
+        .expect("read")
+        .expect("row");
+    assert_eq!(after.kdf_salt, row.kdf_salt, "original row untouched");
+    svc2.registry().crash();
+}
+
+#[test]
+fn t03_role_matrix_enforcement() {
+    let root = tmp_root("reg-matrix");
+    let svc = HubService::open_with_threshold(&root, 300).expect("open");
+    let reg = svc.registry();
+    let (owner, editor, viewer, outsider) = (dev(1), dev(2), dev(3), dev(4));
+    reg.create_space("s", [1u8; 16], owner).expect("create");
+    reg.set_member(owner, "s", editor, Role::Editor)
+        .expect("set editor");
+    reg.set_member(owner, "s", viewer, Role::Viewer)
+        .expect("set viewer");
+
+    // 读：全员可读；非成员拒绝
+    for who in [owner, editor, viewer] {
+        assert!(reg.check("s", who, Action::Read).is_ok());
+    }
+    assert!(matches!(
+        reg.check("s", outsider, Action::Read),
+        Err(RegistryError::Forbidden)
+    ));
+    // 写：editor/owner 可，viewer/非成员拒绝
+    for who in [owner, editor] {
+        assert!(reg.check("s", who, Action::Write).is_ok());
+    }
+    for who in [viewer, outsider] {
+        assert!(matches!(
+            reg.check("s", who, Action::Write),
+            Err(RegistryError::Forbidden)
+        ));
+    }
+    // 管理：owner 可，editor/viewer 拒绝
+    assert!(reg.check("s", owner, Action::Admin).is_ok());
+    for who in [editor, viewer] {
+        assert!(matches!(
+            reg.check("s", who, Action::Admin),
+            Err(RegistryError::Forbidden)
+        ));
+    }
+    // 缺空间 → Missing
+    assert!(matches!(
+        reg.check("nope", owner, Action::Read),
+        Err(RegistryError::Missing)
+    ));
+
+    // 成员管理强制：非 Owner set_member → Forbidden 且无副作用
+    assert!(matches!(
+        reg.set_member(editor, "s", outsider, Role::Editor),
+        Err(RegistryError::Forbidden)
+    ));
+    let row = reg.space("s").expect("read").expect("row");
+    assert!(
+        !row.members.contains_key(&outsider.to_hex()),
+        "no side effect"
+    );
+    // Owner 提升 outsider → Editor 生效
+    reg.set_member(owner, "s", outsider, Role::Editor)
+        .expect("promote");
+    assert!(reg.check("s", outsider, Action::Write).is_ok());
+    reg.crash();
+}
+
+#[test]
+fn t03_last_owner_lockout_protection() {
+    let root = tmp_root("reg-lock");
+    let svc = HubService::open_with_threshold(&root, 300).expect("open");
+    let reg = svc.registry();
+    let (owner, other) = (dev(1), dev(2));
+    reg.create_space("s", [1u8; 16], owner).expect("create");
+    // 单 Owner：不可移除自己
+    assert!(matches!(
+        reg.remove_member(owner, "s", owner),
+        Err(RegistryError::Forbidden)
+    ));
+    // 不可降级自己
+    assert!(matches!(
+        reg.set_member(owner, "s", owner, Role::Viewer),
+        Err(RegistryError::Forbidden)
+    ));
+    // 添第二 Owner 后可移除自己
+    reg.set_member(owner, "s", other, Role::Owner)
+        .expect("add owner2");
+    reg.remove_member(owner, "s", owner).expect("remove self");
+    let row = reg.space("s").expect("read").expect("row");
+    assert_eq!(row.members.get(&owner.to_hex()), None);
+    assert_eq!(row.members.get(&other.to_hex()), Some(&Role::Owner));
+    reg.crash();
+}
+
+#[test]
+fn t03_registry_random_ops_vs_model() {
+    // 随机操作序列 × 参考模型：Forbidden 操作无副作用、状态最终一致
+    let root = tmp_root("reg-model");
+    let svc = HubService::open_with_threshold(&root, 300).expect("open");
+    let reg = svc.registry();
+    let devs = [dev(1), dev(2), dev(3), dev(4)];
+    reg.create_space("s", [1u8; 16], devs[0]).expect("create");
+
+    // 模型：members 表（hex→role）；reg.ops 为 raft 串行，单线程顺序应用
+    let mut model: std::collections::BTreeMap<String, Role> =
+        std::collections::BTreeMap::from([(devs[0].to_hex(), Role::Owner)]);
+    let mut sm = 0x5EED_2028u64;
+    for step in 0..30u64 {
+        sm = sm.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let actor = devs[(sm >> 33) as usize % 4];
+        let target = devs[(sm >> 40) as usize % 4];
+        let role = match (sm >> 47) % 3 {
+            0 => Role::Owner,
+            1 => Role::Editor,
+            _ => Role::Viewer,
+        };
+        let actor_is_owner = model.get(&actor.to_hex()) == Some(&Role::Owner);
+        let would_lock = model.get(&target.to_hex()) == Some(&Role::Owner)
+            && role != Role::Owner
+            && model.values().filter(|r| **r == Role::Owner).count() == 1;
+        sm = sm.wrapping_mul(6364136223846793005).wrapping_add(1);
+        if (sm >> 50).is_multiple_of(2) {
+            // set_member
+            let res = reg.set_member(actor, "s", target, role);
+            let expected_ok = actor_is_owner && !would_lock;
+            assert_eq!(res.is_ok(), expected_ok, "step {step} set mismatch");
+            if expected_ok {
+                model.insert(target.to_hex(), role);
+            }
+        } else {
+            // remove_member
+            let res = reg.remove_member(actor, "s", target);
+            let target_is_last_owner = model.get(&target.to_hex()) == Some(&Role::Owner)
+                && model.values().filter(|r| **r == Role::Owner).count() == 1;
+            let expected_ok =
+                actor_is_owner && model.contains_key(&target.to_hex()) && !target_is_last_owner;
+            assert_eq!(res.is_ok(), expected_ok, "step {step} remove mismatch");
+            if expected_ok {
+                model.remove(&target.to_hex());
+            }
+        }
+        // 无副作用核验：Forbidden 后成员表与模型一致
+        let row = reg.space("s").expect("read").expect("row");
+        assert_eq!(row.members, model, "model divergence at step {step}");
+    }
+    reg.crash();
 }

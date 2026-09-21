@@ -248,6 +248,12 @@ impl Replica {
         self.node_id
     }
 
+    /// 节点 Database 句柄（注册表等业务节复用同一库）。
+    #[must_use]
+    pub fn database(&self) -> &Database {
+        &self._db
+    }
+
     /// 组 id（= 分区 pid）。
     #[must_use]
     pub fn group_id(&self) -> u64 {

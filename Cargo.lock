@@ -2306,6 +2306,7 @@ dependencies = [
  "fjall",
  "openraft",
  "partisync-core",
+ "partisync-sync",
  "proptest",
  "serde",
  "serde_json",

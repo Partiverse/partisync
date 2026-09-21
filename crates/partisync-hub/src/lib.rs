@@ -10,6 +10,7 @@ pub mod entry_plane;
 pub mod ksconv;
 pub mod net;
 pub mod raft_store;
+pub mod registry;
 pub mod replica;
 pub mod router;
 pub mod service;
