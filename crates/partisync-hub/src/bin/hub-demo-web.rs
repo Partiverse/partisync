@@ -32,7 +32,7 @@ struct App {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut root = PathBuf::from("target/hub-demo-web");
-    let mut addr: std::net::SocketAddr = "127.0.0.1:8091".parse()?;
+    let mut addr: std::net::SocketAddr = "0.0.0.0:8091".parse()?; // 局域网可达
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {

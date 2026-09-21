@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use partisync_hub::acl::{AuthError, Authorizer, SignedRequest};
 use partisync_hub::registry::{Action, DeviceId, RegistryError, Role};
 use partisync_hub::replica::ReplicaError;
 use partisync_hub::service::HubService;
@@ -577,4 +578,138 @@ fn t03_registry_random_ops_vs_model() {
         assert_eq!(row.members, model, "model divergence at step {step}");
     }
     reg.crash();
+}
+
+/// ===== T05：设备会话鉴权（签名信封 + 验签 + 防重放 + 角色强制） =====
+
+#[test]
+fn t05_signed_request_authorization_matrix() {
+    use ed25519_dalek::SigningKey;
+    let root = tmp_root("acl-auth");
+    let svc = HubService::open_with_threshold(&root, 300).expect("open");
+    let reg = svc.registry();
+    let owner_seed = [1u8; 32];
+    let owner_sk = SigningKey::from_bytes(&owner_seed);
+    let owner_vk = owner_sk.verifying_key().to_bytes();
+    reg.create_space("s", [1u8; 16], DeviceId(owner_vk))
+        .expect("create");
+    // 第二设备注册为 Viewer
+    let viewer_sk = SigningKey::from_bytes(&[2u8; 32]);
+    let viewer_vk = viewer_sk.verifying_key().to_bytes();
+    reg.set_member(DeviceId(owner_vk), "s", DeviceId(viewer_vk), Role::Viewer)
+        .expect("add viewer");
+
+    let auth = Authorizer::new();
+    let mk = |device_hex: String, action: &str, nonce: u64, sk: &SigningKey| {
+        let mut req = SignedRequest {
+            device_hex,
+            space_id: "s".into(),
+            action: action.into(),
+            nonce,
+            signature_hex: String::new(),
+        };
+        req.sign(sk).expect("sign");
+        req
+    };
+    let owner_hex = hex_of(owner_vk);
+    let viewer_hex = hex_of(viewer_vk);
+
+    // Owner 签名 admin/write/read → 全部允许
+    for (i, action) in ["read", "write", "admin"].iter().enumerate() {
+        let req = mk(owner_hex.clone(), action, 10 + i as u64, &owner_sk);
+        assert!(auth.authorize(reg, &req).is_ok(), "{action} by owner");
+    }
+    // Viewer 签名 read → 允许；write → Forbidden
+    let req = mk(viewer_hex.clone(), "read", 10, &viewer_sk);
+    assert!(auth.authorize(reg, &req).is_ok());
+    let req = mk(viewer_hex.clone(), "write", 11, &viewer_sk);
+    assert!(matches!(
+        auth.authorize(reg, &req),
+        Err(AuthError::Forbidden(RegistryError::Forbidden))
+    ));
+    // 非成员 → Forbidden
+    let outsider_sk = SigningKey::from_bytes(&[9u8; 32]);
+    let outsider_hex = hex_of(outsider_sk.verifying_key().to_bytes());
+    let req = mk(outsider_hex, "read", 1, &outsider_sk);
+    assert!(matches!(
+        auth.authorize(reg, &req),
+        Err(AuthError::Forbidden(RegistryError::Forbidden))
+    ));
+    reg.crash();
+}
+
+#[test]
+fn t05_signature_tamper_and_nonce_replay_rejected() {
+    use ed25519_dalek::SigningKey;
+    let root = tmp_root("acl-replay");
+    let svc = HubService::open_with_threshold(&root, 300).expect("open");
+    let reg = svc.registry();
+    let sk = SigningKey::from_bytes(&[5u8; 32]);
+    let vk = sk.verifying_key().to_bytes();
+    reg.create_space("s", [1u8; 16], DeviceId(vk))
+        .expect("create");
+    let auth = Authorizer::new();
+    let dev_hex = hex_of(vk);
+
+    // 合法首笔
+    let mut req = SignedRequest {
+        device_hex: dev_hex.clone(),
+        space_id: "s".into(),
+        action: "write".into(),
+        nonce: 7,
+        signature_hex: String::new(),
+    };
+    req.sign(&sk).expect("sign");
+    assert!(auth.authorize(reg, &req).is_ok());
+
+    // 重放（同 nonce）→ Replay
+    let replay = req.clone();
+    assert!(matches!(
+        auth.authorize(reg, &replay),
+        Err(AuthError::Replay)
+    ));
+
+    // 回退 nonce → Replay
+    let mut older = SignedRequest {
+        nonce: 3,
+        ..req.clone()
+    };
+    older.sign(&sk).expect("sign");
+    assert!(matches!(
+        auth.authorize(reg, &older),
+        Err(AuthError::Replay)
+    ));
+
+    // 篡改 action（载荷被改）→ BadSignature
+    let mut tampered = SignedRequest {
+        nonce: 8,
+        ..req.clone()
+    };
+    tampered.action = "admin".into();
+    tampered.sign(&sk).expect("sign");
+    tampered.action = "write".into(); // 签名仍是 admin 版
+    assert!(matches!(
+        auth.authorize(reg, &tampered),
+        Err(AuthError::BadSignature)
+    ));
+
+    // 伪造身份（签名与声称 vk 不匹配）→ BadSignature
+    let impostor = SigningKey::from_bytes(&[6u8; 32]);
+    let mut fake = SignedRequest {
+        device_hex: dev_hex.clone(),
+        space_id: "s".into(),
+        action: "write".into(),
+        nonce: 20,
+        signature_hex: String::new(),
+    };
+    fake.sign(&impostor).expect("sign with impostor key");
+    assert!(matches!(
+        auth.authorize(reg, &fake),
+        Err(AuthError::BadSignature)
+    ));
+    reg.crash();
+}
+
+fn hex_of(bytes: [u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

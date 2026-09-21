@@ -5,6 +5,7 @@
 //! 读时修复）；M3-WP02 T02/T03（keyspace 收敛 + openraft storage-v2 →
 //! fjall 存储适配器）；基准报告归 T06/T07。
 
+pub mod acl;
 pub mod encode;
 pub mod entry_plane;
 pub mod ksconv;
