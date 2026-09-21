@@ -1,12 +1,15 @@
 //! 内容仓库（CAS）——调研方案 §5.9。
 //!
 //! 当前内容：内容寻址主哈希（BLAKE3）、[`chunker`]（内容定义分块，P1–P3）、
-//! [`store`]（内容寻址块库 + 引用计数，P4）。pack/EC 归 M3。
+//! [`store`]（内容寻址块库 + 引用计数，P4）、[`ec`]（RS(10,4) 纠删，
+//! ADR-0014）。pack 归 M3-WP04 单独提交。
 
 pub mod chunker;
+pub mod ec;
 pub mod store;
 
 pub use chunker::{chunk_boundaries, chunk_root, CdcConfig, CdcConfigError};
+pub use ec::shards_to_data;
 pub use store::{put_chunks, CasStats, ChunkStore};
 
 use std::fs::File;
@@ -16,7 +19,6 @@ use std::path::Path;
 use partisync_core::error::{classify_io, PartisyError, Severity};
 
 /// 字节流的内容身份（blake3 hex，64 字符小写）。
-#[must_use]
 pub fn content_hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }

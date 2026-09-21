@@ -26,3 +26,6 @@ wildcards = "deny"
 [advisories]
 version = 2
 yanked = "deny"
+# ADR-0014（2026-09-21 附注）：reed-solomon-erasure v6 锁 parking_lot v0.11 → instant v0.1.13
+# unmaintained，无已知漏洞；等上游升 parking_lot ≥ 0.12 后撤销本豁免。
+ignore = ["RUSTSEC-2024-0384"]
