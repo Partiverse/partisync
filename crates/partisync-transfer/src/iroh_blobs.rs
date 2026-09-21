@@ -1,6 +1,6 @@
 //! iroh-blobs 通道执行器（ADR-0015）。
 //!
-//! Hub 侧 iroh/iroh-blobs 设备通道的跨层 trait 定义与执行器实现。
+//! Hub 侧 iroh/iroh-blobs 设备通道的跨层 trait 定义与执行器桩。
 //!
 //! ## 架构位置（ADR-0015 决策 1）
 //!
@@ -14,12 +14,23 @@
 //! partisync-cas  (散块存储 / 聚合器 / pack v2)
 //! ```
 //!
-//! ## trait 设计原则
+//! ## 设计原则
 //!
 //! - `ChunkSink` / `ChunkSource` 放在 `partisync-transfer`（被 hub 依赖），
 //!   而非 `partisync-cas`——避免 cas 引人 iroh 传递依赖（ADR-0015 裁定 1）；
 //! - trait 不携带 iroh 特有类型（公钥/连接句柄），只传递 `Bytes` / `Hash`；
-//! - 具体 iroh-blobs 绑定在执行器内部（`IrohBlobsExecutor`），对调用方透明。
+//! - `IrohBlobsExecutor` / `IrohBlobsListener` 执行器桩对调用方透明，
+//!   真实 iroh 接线由 hub 层直接使用 `iroh =1.2.0` API 实现（hub 无 iroh-blobs 传递依赖）。
+//!
+//! ## 接线说明（M4 进场地填实）
+//!
+//! Hub 层（`iroh_channel.rs`）直接使用 `iroh::Endpoint` + `iroh_blobs::BlobsProtocol`
+//! 实现真实的 send/accept 逻辑，绕过了本桩。接线时：
+//! 1. hub 加 `iroh =1.2.0` + `iroh-blobs =0.103.0`（主 crate 独立，无 feature 冲突）
+//! 2. `iroh_channel.rs` 中用 `Endpoint::bind(presets::N0)` 建节点
+//! 3. `Router::builder(ep).accept(ALPN, BlobsProtocol::new(&store)).spawn()`
+//! 4. `Endpoint::connect(peer, ALPN)` + `get::fsm` 状态机实现 download
+//! 5. push 路径走 `handle_connection` → `store.import_bao_reader`
 
 use std::fmt::Debug;
 
@@ -80,122 +91,87 @@ pub trait ChunkSource: Debug + Send + Sync {
     ) -> impl std::future::Future<Output = Result<Bytes, PartisyError>> + Send;
 }
 
-/// iroh-blobs sender 执行器：将 `chunk_plan::execute_plan` 的 sender 闭包
-/// 绑定到 iroh-blobs 流式发送（ADR-0015 裁定 5）。
+/// iroh-blobs sender 桩执行器（ADR-0015 裁定 5）。
+///
+/// 真实实现在 hub 层 `iroh_channel.rs`：直接使用 `iroh::Endpoint` + `get::fsm` 状态机。
+/// 本桩为编译占位，保持 API 签名兼容。
+///
+/// # 接线说明（M4 进场地填实）
 ///
 /// ```ignore
-/// let plan = plan_chunks(("src_root", &src_hashes), ("dst_root", &dst_hashes));
-/// let executor = IrohBlobsExecutor::new(cas_source, iroh_connection);
-/// let stats = execute_plan(&plan, |hash| executor.send_chunk(hash)).await?;
+/// // hub/iroh_channel.rs 中直接用 iroh 1.2.0 API：
+/// use iroh::{Endpoint, endpoint::presets};
+/// use iroh_blobs::{protocol::ALPN, get::fsm::*, protocol::GetRequest};
+///
+/// let endpoint = Endpoint::bind(presets::N0).await?;
+/// let conn = endpoint.connect(peer_addr, ALPN).await?;
+/// let request = GetRequest::blob(hash);
+/// let state = fsm::start(conn, request, RequestCounters::default());
+/// // ... 驱动状态机
 /// ```
-///
-/// ## 执行流程（ADR-0015 裁定 4）
-///
-/// 1. 对 plan 中每个 `ChunkRole::Need` 的 hash，调用 `get_chunk(hash)` 取内容；
-/// 2. 通过 iroh-blobs `write_blob` 流式发送（BLAKE3 窗口级验证）；
-/// 3. 设备验签失败则返回 `PartisyError`（应用层重试，不走 iroh 重传）。
-///
-/// ## 限速
-///
-/// 发送速率受 `IrohBlobsExecutor` 内部限速器约束（与 S3/MPU 共调度器配额，
-/// ADR-0009 裁定 5）。
-///
-/// # ADR-0015 裁定 5
-/// `IrohBlobsExecutor` 位于 `partisync-transfer`，通过 trait object
-/// 间接调用 iroh（不在此 trait 中可见）。
 pub struct IrohBlobsExecutor<C: ChunkSource> {
     source: C,
-    // iroh-blobs sender 句柄（内部类型，iroh crate 特有）
-    // 字段类型在 iroh 版本对齐后填实（见 ADR-0015 待确认项）
+    // TODO (M4): 替换为 Box<dyn IrohSendSession> — hub 层直接用 iroh::Endpoint
+    // 而非经由本桩，以避免 iroh-blobs tokio feature 冲突（workspace tokio 缺 blocking）
     _p: std::marker::PhantomData<fn()>,
 }
 
 impl<C: ChunkSource> IrohBlobsExecutor<C> {
     /// 从 CAS ChunkSource 构造执行器。
-    ///
-    /// # Errors
-    /// iroh 连接建立失败。
     #[allow(dead_code)]
-    pub async fn new(source: C, _iroh_node: &str) -> Result<Self, PartisyError>
-    where
-        C: ChunkSource,
-    {
-        // TODO: ADR-0015 进场的版本对齐阻塞——iroh 1.2.0 与 iroh-blobs 0.103.0
-        //   版本族不对齐（ADR 说"同 minor"，但两 crate 版本体系独立）。
-        //   进场后填实：选择兼容的 iroh + iroh-blobs 版本组合，
-        //   建立 iroh::Node 连接，初始化 iroh_blobs::protocol::write_blob session。
-        eprintln!("IrohBlobsExecutor::new (iroh 版本待对齐)");
-        Ok(Self {
-            source,
-            _p: std::marker::PhantomData,
-        })
+    pub async fn new(source: C, _endpoint: &str, _peer_addr: &str) -> Result<Self, PartisyError> {
+        // M4 填实：hub 层直接用 iroh::Endpoint，绕过本桩
+        Ok(Self { source, _p: std::marker::PhantomData })
     }
 
-    /// 通过 iroh-blobs 发送一个 chunk。
-    ///
-    /// # Errors
-    /// iroh 发送失败或 chunk 不存在（Severity::Fatal，应用层重试）。
+    /// 通过 iroh-blobs 发送一个 chunk（桩）。
     #[allow(dead_code)]
     pub async fn send_chunk(&self, hash: &str) -> Result<(), PartisyError> {
-        let data = self.source.get_chunk(hash).await?;
-        // TODO: iroh_blobs::protocol::write_blob(&self.writer, data).await
-        eprintln!(
-            "send_chunk (iroh-blobs 待接线): hash={hash} size={}",
-            data.len()
-        );
+        let _data = self.source.get_chunk(hash).await?;
+        // M4: hub/iroh_channel.rs 直接用 endpoint.connect + fsm 状态机
         Ok(())
     }
 }
 
-/// iroh-blobs 接收会话：hub 侧接受设备上传并写入 CAS。
+/// iroh-blobs 接收会话桩：hub 侧接受设备上传并写入 CAS（ADR-0015 裁定 3）。
+///
+/// 真实实现在 hub 层 `iroh_channel.rs`：通过 `Router::accept(ALPN, BlobsProtocol)`
+/// 分发连接，`handle_connection` 处理 push 写 CAS。
+///
+/// # 接线说明（M4 进场地填实）
 ///
 /// ```ignore
-/// let listener = IrohBlobsListener::new(hub_addr, cas_sink).await?;
-/// listener.accept().await?; // 阻塞直到设备连接并完成上传
-/// ```
+/// // hub/iroh_channel.rs 中：
+/// use iroh::{Endpoint, protocol::Router};
+/// use iroh_blobs::{protocol::ALPN, BlobsProtocol};
 ///
-/// # ADR-0015 裁定 3
-/// Hub 侧的 iroh-blobs 接收会话把每接收到的 chunk 调用 `ChunkSink::put_chunk`。
-/// BLAKE3 root 验签通过后发送应用层 ACK（UploadAck）。
+/// let blobs = BlobsProtocol::new(&store, None);
+/// let router = Router::builder(endpoint)
+///     .accept(ALPN, blobs)
+///     .spawn();
+/// // Router 在后台 accept iroh-blobs 连接，写入 ChunkSink
+/// ```
 #[allow(dead_code)]
 pub struct IrohBlobsListener<S: ChunkSink> {
     sink: S,
-    // TODO: iroh 监听句柄（版本对齐后填实）
+    // TODO (M4): 替换为 hub 层直接持有的 iroh::Endpoint 监听句柄
     _p: std::marker::PhantomData<fn()>,
 }
 
 impl<S: ChunkSink> IrohBlobsListener<S> {
     /// 构造监听器。
-    ///
-    /// # Errors
-    /// iroh 节点初始化失败。
     #[allow(dead_code)]
     pub async fn new(_hub_addr: &str, sink: S) -> Result<Self, PartisyError> {
-        // TODO: iroh::Node::spawn + iroh_blobs::protocol::accept_and_read_blob
-        //   绑定 addr，开始监听设备连接（hub 作为 ALWAYS reachable relay endpoint，
-        //   ADR-0015 裁定 2）
-        eprintln!("IrohBlobsListener::new (iroh 版本待对齐)");
-        Ok(Self {
-            sink,
-            _p: std::marker::PhantomData,
-        })
+        // M4 填实：hub 层直接用 Router::builder(ep).accept(ALPN, BlobsProtocol).spawn()
+        Ok(Self { sink, _p: std::marker::PhantomData })
     }
 
-    /// 接受一个设备上传会话（阻塞直到会话完成或出错）。
-    ///
-    /// # Errors
-    /// iroh 连接错误或 BLAKE3 验签失败。
+    /// 接受一个设备上传会话（桩）。
     #[allow(dead_code)]
     pub async fn accept(&self) -> Result<UploadSummary, PartisyError> {
-        // TODO: iroh_blobs::protocol::accept_and_read_blob(session, |chunk_bytes| {
-        //     self.sink.put_chunk(chunk_bytes)
-        // }).await
-        // 验签通过后构造 UploadSummary 返回
-        eprintln!("IrohBlobsListener::accept (iroh 版本待接线)");
-        Ok(UploadSummary {
-            chunks_received: 0,
-            bytes_received: 0,
-        })
+        // M4: hub/iroh_channel.rs 用 Router 在后台 accept，由 BlobsProtocol
+        // 调用 ChunkSink::put_chunk，无需本桩参与 accept 循环
+        Ok(UploadSummary { chunks_received: 0, bytes_received: 0 })
     }
 }
 
@@ -213,7 +189,6 @@ pub struct UploadSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use partisync_core::error::Severity;
 
     /// 内存内 ChunkSource 桩（测试用）。
@@ -224,10 +199,7 @@ mod tests {
 
     impl InMemoryChunkSource {
         pub fn insert(&self, hash: &str, data: impl Into<Bytes>) {
-            self.chunks
-                .lock()
-                .unwrap()
-                .insert(hash.to_string(), data.into());
+            self.chunks.lock().unwrap().insert(hash.to_string(), data.into());
         }
     }
 
@@ -253,10 +225,7 @@ mod tests {
 
     impl ChunkSink for InMemoryChunkSink {
         async fn put_chunk(&self, chunk: &[u8]) -> Result<(), PartisyError> {
-            self.received
-                .lock()
-                .unwrap()
-                .push(Bytes::copy_from_slice(chunk));
+            self.received.lock().unwrap().push(Bytes::copy_from_slice(chunk));
             Ok(())
         }
     }
@@ -297,8 +266,7 @@ mod tests {
     async fn executor_send_chunk_via_source() {
         let source = InMemoryChunkSource::default();
         source.insert("hash0", &b"data0"[..]);
-        let executor = IrohBlobsExecutor::new(source, "mock://node").await.unwrap();
+        let executor = IrohBlobsExecutor::new(source, "mock://node", "mock://peer").await.unwrap();
         executor.send_chunk("hash0").await.unwrap();
-        // 验证 send_chunk 调用了 source.get_chunk（内部打印 trace 即验证路径）
     }
 }

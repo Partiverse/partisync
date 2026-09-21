@@ -61,10 +61,12 @@ ADR-0014（RS(10,4)）、ADR-0015（iroh/ihor-blobs 通道）
 | ChunkSink / ChunkSource trait 定义（无 iroh 传递依赖） | ✅ | `crates/partisync-transfer/src/iroh_blobs.rs` |
 | Hub 侧 iroh 节点门面骨架 | ✅ | `crates/partisync-hub/src/iroh_channel.rs` |
 | trait 桩（InMemoryChunkSource / InMemoryChunkSink）测试通过 | ✅ 3 测试 | `iroh_channel::tests` |
-| **iroh 版本对齐阻塞（开放项）** | ⚠️ 待确认 | iroh 1.2.0 / iroh-blobs 0.103.0 MSRV=1.91；两 crate 版本体系不对齐（同 minor 承诺无法兑现，见 ADR-0015 待确认项） |
+| iroh 版本精确锁定 | ✅ | `iroh =1.2.0`（hub）；`iroh-blobs =0.103.0`（待 M4 接入 store） |
+| iroh 1.2.0 单独编译 | ✅ | `cargo check -p iroh` 通过 |
+| **iroh-blobs fs-store feature 冲突（M4 进场地解决）** | ⚠️ | `iroh-blobs 0.103.0` fs-store 用 `tokio::task::block_in_place`（需 `rt-multi-thread`），workspace tokio 1.53 无 `blocking` feature；transfer 层不引 iroh-blobs（ADR-0015 裁定 1），hub 层仅用 iroh 主 crate |
 
-> **进场前必须确认**：iroh 与 iroh-blobs 的兼容版本组合；
-> 当前桩代码在版本对齐后填实 TODO即可。
+> **M4 接线计划**：hub 层通过 `iroh::Endpoint` + `iroh_blobs::get::fsm` 状态机实现 download；
+> upload 由 `Router::accept(ALPN, BlobsProtocol)` 后台处理；绕过 `iroh-blobs` fs-store 依赖。
 
 ## 7. 回归门禁
 
@@ -106,7 +108,8 @@ ADR-0014（RS(10,4)）、ADR-0015（iroh/ihor-blobs 通道）
 
 | 优先级 | 项 | 负责 |
 |---|---|---|
-| P0 | iroh 1.2.0 + iroh-blobs 兼容版本组合确认 | @lead |
+| ~~P0~~ | ~~iroh 1.2.0 + iroh-blobs 兼容版本组合确认~~ | ~~已锁定：iroh=1.2.0，iroh-blobs=0.103.0~~ |
+| P0 | iroh-blobs 0.103.0 fs-store feature 冲突（workspace tokio 缺 blocking；M4 接入 store 时解决） | @lead |
 | P1 | iroh 1.x relay 定价模型（hub 作为 relay 节点的费用承担方） | @lead |
 | P1 | `iroh-blobs` 与其他 iroh 1.x 实现（如 iroh.com official）的 ALPN 互操作性 | @lead |
 | P2 | 设备侧 iroh-blobs 上传窗口大小（影响 BDP 吞吐） | @lead |

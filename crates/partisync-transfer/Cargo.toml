@@ -10,6 +10,9 @@ partisync-core = { path = "../partisync-core", version = "0.1.0" } # M2-WP05 chu
 blake3 = { workspace = true } # M2-WP05 块根哈希（如需 blake3-based chunk_root 校验）
 serde = { workspace = true } # M2-WP05 ChunkPlan JSON 序列化（可选）
 bytes = "1" # M3-WP04-T06 ChunkSink/ChunkSource trait（Bytes 类型）
+# iroh =1.2.0 + iroh-blobs =0.103.0 不放在 transfer 层：
+# ADR-0015 裁定 1：iroh 类型不穿透 ChunkSink/ChunkSource trait 公共 API
+# 具体 iroh-blobs 执行器在 hub 层接线（partisync-hub 自身依赖 iroh，无 feature 冲突）
 
 [dev-dependencies]
 tokio = { workspace = true } # M2-WP05 execute_plan 异步测试
