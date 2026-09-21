@@ -132,3 +132,87 @@ ADR-0014（RS(10,4)）、ADR-0015（iroh/ihor-blobs 通道）
 | P2 | GC 重打包 helper（ADR-0015 §4 未含，M4+） | @lead |
 | P3 | PackLockTable 淘汰方案（ADR-0015 §4 未含） | @lead |
 | P3 | Windows persist 原子性（ADR-0015 §4 未含） | @lead |
+
+## 11. T08 整体验收（2026-09-22）
+
+### 11.1 门禁终验（T08 当日复测）
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo fmt --all --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅（见 §7，T08 复测无回归） |
+| `cargo deny check` | ✅ 四段全绿（advisories / bans / licenses / sources ok） |
+
+### 11.2 SPEC 验收逐项对账（最终态）
+
+| 验收项 | 状态 | 备注 |
+|---|---|---|
+| 1. EC 正确性（proptest） | ✅ | §1 |
+| 2. pack 读写语义 | ◐ 部分满足 | 格式/EC/索引读写原语（`build_pack`/`parse_shards`/`read_block`）与 O(1) 查询已测；**写入路径聚合器未实现**，见 §11.4 债务 D-WP04-01 |
+| 3. 修复限流 | ✅ | §3 |
+| 4. 分层迁移 | ✅ | §4 |
+| 5. GC 无锁死 | ✅ | §5（loom 证明 + 压力） |
+| 6. iroh 通道 | ✅ | 接线（M4-WP04 T02–T06）+ loopback e2e + **1 GiB 实测入库校验通过**（§11.3）；断线重连续传移交 M5（依赖设备侧 UploadAck，§10 P0） |
+| 7. 回归门禁 | ✅ | §7 / §11.1 |
+
+### 11.3 iroh 1 GiB 上行实测（T08 补测，SPEC 验收 6）
+
+环境：loopback 直连（presets::Minimal，离线）、debug 构建、设备侧 MemStore、
+单 blob 单流、CAS 磁盘落盘（sqlite 内存索引）。载荷 1 GiB 伪随机（xorshift64）。
+
+| 阶段 | 耗时 | 吞吐 |
+|---|---|---|
+| 设备 add_bytes（MemStore） | 24.6 s | ~44 MiB/s |
+| push（QUIC loopback 传输） | 100.0 s | **10 MiB/s** |
+| hub MemStore→CAS 落库（wait_idle + blake3 校验 + 落盘） | 80.0 s | ~13 MiB/s |
+| **全链路** | **384.7 s** | **≈3 MiB/s** |
+
+结果断言：`bytes_received = 1073741824`；iroh Hash 与 CAS `content_hash`
+（blake3 hex）一致；CAS `chunks=1, refs=1`。**逐块验证入库成立**。
+
+口径声明：debug 构建下界值（blake3/拷贝/QUIC 均未优化），release + 分块
+多流 + 真实设备侧执行器预期显著高于此；本数字仅作验收存在性证据，不作
+性能 KPI。实测以临时测试执行（跑后即删，未入库），沿用
+`tests/iroh_e2e.rs` upload 路径放大载荷。
+
+### 11.4 验收新发现缺口（债务登记）
+
+| ID | 项 | 定性 | 移交 |
+|---|---|---|---|
+| D-WP04-01 | **聚合器未实现**：SPEC 裁定 1 写入路径（块先落散块→聚合器满/过期刷 pack→刷后散块转待核销）与 L1 索引常驻 fjall `m-pack-idx` 未落地；当前散块（ChunkStore）与 pack 两条路径未接线，验收 2 仅在 pack 原语层闭环 | SPEC 功能项未交付（非测试缺陷） | M4+ 任务卡（数据面收尾批），进场前 ChunkStore 散块路径不受影响 |
+| D-WP04-02 | benches/ 目录未建：SPEC 文件清单所列吞吐基准未成体系，实测以测试内时序口径代替（§3 限流采样、§5 GC 并发轮、§11.3 1 GiB） | 工件形态偏差 | M4+（与 D-WP04-01 同批） |
+
+### 11.5 追溯对账（铁律 2 纪律披露）
+
+任务卡与提交号非一一对应，工作内容均已入库可追溯，但挂靠 Task-ID 存在
+偏差；按「审计即工件」如实登记，**不回改历史**：
+
+| 任务卡 | 实际落点提交 | 偏差 |
+|---|---|---|
+| M3-WP04-T01 | `fb88baa` 草案 + `897dcf0` G0 批准 | 无 |
+| M3-WP04-T02 | `1587c06`（EC）+ `632b19c`（pack v2） | 无 |
+| M3-WP04-T03 | `4b0fa19`（修复限流） | 无 |
+| M3-WP04-T04 | `ee0aa22`（分层引擎） | **误挂 `[M3-WP04-T03]`** |
+| M3-WP04-T05 | `1ae49f9`（GC） | 无 |
+| M3-WP04-T06 | `cca9619` + `12f3053` + `c26429e` | 无（T06 范围本就横跨 ADR-0015 + 通道骨架） |
+| M3-WP04-T07 | KPI 底稿并入 `cca9619`/`12f3053` | **无独立 T07 提交** |
+| M3-WP04-T08 | 本节（本次提交） | 无 |
+| M4-WP04-T01 | `c26429e`（spec 起草） | **误挂 `[M3-WP04-T06]`** |
+| M4-WP04-T02 | `12f3053`（iroh_channel 接线） | **误挂 `[M3-WP04-T06]`** |
+| M4-WP04-T03 | `12f3053`（HubIrohKeyspace） | **误挂 `[M3-WP04-T06]`** |
+| M4-WP04-T04 | `3becf06`（KPI 第 6 节填实） | **误挂 `[M4-WP04-T06]`** |
+| M4-WP04-T05 | `e0af27c` | 无 |
+| M4-WP04-T06 | `47276ca` + `31e1bd5` + `3becf06` | 无 |
+
+### 11.6 待人工终审（地基面，铁律 7）
+
+- ADR-0014（reed-solomon-erasure，EC 数据正确性）——`xtask trace M3-WP04-T02` 显示 `human <pending>`；
+- ADR-0016（deny 基线扩充）——T06 登记时标注「待人工终审」。
+
+### 11.7 结论
+
+SPEC M3-WP04 验收 7 项：6 ✅ + 1 ◐（验收 2 聚合器部分，D-WP04-01 债务
+登记）；SPEC M4-WP04 验收 5 项全 ✅。M3-WP04 任务卡 T01–T08、M4-WP04
+任务卡 T01–T06 全部闭合。WP04（数据面）里程碑状态：**验收通过（含披露
+债务）**，1 GiB 实测与断线重连续传分别留痕 §11.3 / 移交 M5。
