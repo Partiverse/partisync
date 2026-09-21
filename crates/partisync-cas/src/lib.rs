@@ -2,10 +2,11 @@
 //!
 //! 当前内容：内容寻址主哈希（BLAKE3）、[`chunker`]（内容定义分块，P1–P3）、
 //! [`store`]（内容寻址块库 + 引用计数，P4）、[`ec`]（RS(10,4) 纠删，
-//! ADR-0014）。pack 归 M3-WP04 单独提交。
+//! ADR-0014）与 [`pack`]（pack v2 格式，M3-WP04 裁定 1）。
 
 pub mod chunker;
 pub mod ec;
+pub mod pack;
 pub mod store;
 
 pub use chunker::{chunk_boundaries, chunk_root, CdcConfig, CdcConfigError};

@@ -2315,6 +2315,7 @@ dependencies = [
  "proptest",
  "reed-solomon-erasure",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
 ]
