@@ -85,9 +85,12 @@ mod tests {
     use super::{HubIrohKeyspace, HubIrohKeyspaceImpl};
 
     fn temp_db() -> (Arc<fjall::Database>, std::path::PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("partisync-hub-ks-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        // 每次调用唯一目录：并行测试共用同一路径会互删目录 + 触发 fjall
+        // 同进程库锁冲突（Locked / NotFound，M4-WP04-T06 回归修复）
+        let dir = std::env::temp_dir().join(format!(
+            "partisync-hub-ks-test-{}",
+            partisync_core::Ulid::now()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Arc::new(fjall::Database::open(fjall::Config::new(&dir)).unwrap());
         (db, dir)

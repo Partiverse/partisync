@@ -27,6 +27,7 @@ tracing = "0.1" # M4-WP04-T02：iroh_channel 日志（warn/info/debug）
 
 [dev-dependencies]
 proptest = { workspace = true }
+partisync-cas = { path = "../partisync-cas", version = "0.1.0" } # M4-WP04-T06 端到端集成测试：ChunkStore 作 ChunkSink/ChunkSource
 
 [lib]
 bench = false # 无 #[bench]；阻止 cargo 为 lib 生成默认 libtest bench 目标

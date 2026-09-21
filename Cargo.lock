@@ -3833,6 +3833,7 @@ dependencies = [
  "iroh-base",
  "iroh-blobs",
  "openraft",
+ "partisync-cas",
  "partisync-core",
  "partisync-graph",
  "partisync-sync",
@@ -3887,6 +3888,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytes",
+ "partisync-cas",
  "partisync-core",
  "serde",
  "tokio",
