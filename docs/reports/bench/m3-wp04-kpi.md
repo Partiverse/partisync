@@ -66,19 +66,29 @@ ADR-0014（RS(10,4)）、ADR-0015（iroh/ihor-blobs 通道）
 | HubIrohKeyspace 测试通过 | ✅ 3 测试 | `iroh_keyspace::tests` |
 | iroh 版本精确锁定 | ✅ | `iroh =1.2.0`（hub）；`iroh-blobs =0.103.0` |
 | iroh + iroh-blobs 单独编译 | ✅ | `cargo check -p iroh -p iroh-blobs` 通过 |
-| **iroh-blobs fs-store feature 冲突（M4 进场地解决）** | ⚠️ | `iroh-blobs 0.103.0` fs-store 用 `tokio::task::block_in_place`（需 `rt-multi-thread`），workspace tokio 1.53 无 `blocking` feature；transfer 层不引 iroh-blobs（ADR-0015 裁定 1），hub 层仅用 iroh 主 crate + MemStore |
+| **ChunkStore 实现 ChunkSink/ChunkSource（M4-WP04-T05）** | ✅ | `transfer::iroh_blobs` impl（孤儿规则落点：trait 本地 crate；transfer→cas 向下依赖，ADR-0015 链既定）；3 单测 |
+| **MemStore→CAS 增量同步（M4-WP04-T05）** | ✅ | `iroh_channel::handle_incoming`：逐流内联处理 + wait_idle 收敛 + blake3 校验 + `put_chunk` 原子 refcount |
+| **iroh 通道端到端集成测试（M4-WP04-T06）** | ✅ 2 测试 8/8 稳定 | `tests/iroh_e2e.rs`：loopback 直连（presets::Minimal，离线不依赖 relay）；push→MemStore→CAS 落库断言 + CAS source→fsm 下发全路径 |
+| **iroh-blobs fs-store feature 冲突（已绕过闭环）** | ✅ 绕过 | hub 层仅用 `Endpoint` + `handle_stream`/`get::fsm` + MemStore 暂存，CAS 由 ChunkStore 经 trait 提供，fs-store 未引入（原 ⚠️ P0 项闭合） |
 
-> **M4 接线计划**：hub 层通过 `iroh::Endpoint` + `iroh_blobs::get::fsm` 状态机实现 download；
-> upload 由 `handle_connection(conn, MemStore)` 后台处理；绕过 `iroh-blobs` fs-store 依赖。
+> **M4 接线落地记录（T02/T05/T06）**：
+> - upload：设备 push → `StreamPair::accept` 逐流内联 `handle_stream` → MemStore
+>   暂存 → `wait_idle` 收敛 → blake3 校验 → CAS `ChunkSink`。
+> - download：`IrohBlobsExecutor`（CAS `ChunkSource`）→ `Endpoint::connect` →
+>   `get::fsm` 状态机全路径。
+> - **协议发现**：iroh-blobs 0.103 push 为 fire-and-forget（设备 `send.finish()`
+>   即返回、不读 hub 应答，`recv.stop(0)` 直接关闭接收向）——设备 push 后立即关
+>   连接会导致 hub 尚未 accept 流、数据随连接丢弃。按 SPEC §2 UploadAck 契约，
+>   设备侧必须保持连接至 hub 同步完成（M5 设备侧执行器落地确认机制）。
 
-## 7. 回归门禁
+## 7. 回归门禁（M4-WP04-T06 复核）
 
 | 门禁 | 结果 |
 |---|---|
 | `cargo fmt --all` | ✅ |
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
-| `cargo test --workspace` | ✅ 全 workspace 通过 |
-| `cargo deny check` | ✅（RUSTSEC-2024-0384 豁免已登记于 ADR-0014） |
+| `cargo test --workspace` | ✅ exit 0（hub lib 23、iroh_e2e 2×8 轮稳定、wp01 21、wp03 19 复验；iroh_keyspace 并行隔离缺陷已修，见 T06 提交披露） |
+| `cargo deny check` | ✅ 四段全绿（licenses +Unlicense/MPL-2.0、advisories +3 条 unmaintained 豁免，**ADR-0016**；此前会话的 ✅ 系网络失败未跑完，本行以 T06 实测纠正） |
 
 ## 8. 验收对账（SPEC M3-WP04 §验收标准）
 
@@ -89,7 +99,7 @@ ADR-0014（RS(10,4)）、ADR-0015（iroh/ihor-blobs 通道）
 | 修复限流 | ✅ 已测 |
 | 分层迁移 | ✅ 已测 |
 | GC 无锁死 | ✅ 已测 |
-| iroh 通道 | ⚠️ 桩骨架完成；iroh 版本对齐待确认 |
+| iroh 通道 | ✅ 接线完成（M4-WP04 T02–T06）：真实 upload/download + 端到端测试 |
 | 回归门禁 | ✅ 全绿 |
 
 ## 9. 工件清单
@@ -102,8 +112,10 @@ ADR-0014（RS(10,4)）、ADR-0015（iroh/ihor-blobs 通道）
 | `crates/partisync-cas/src/tier.rs` | 分层引擎 NVMe→HDD→S3 |
 | `crates/partisync-cas/src/gc.rs` | 分代 GC + 宽限期 + per-pack 锁 + 原子认领 |
 | `crates/partisync-cas/tests/gc.rs` | 24 测试 + 2 proptest + 2 loom |
-| `crates/partisync-transfer/src/iroh_blobs.rs` | ChunkSink/ChunkSource trait + iroh-blobs 桩执行器 |
-| `crates/partisync-hub/src/iroh_channel.rs` | Hub 侧 iroh 节点门面 + 桩实现 |
+| `crates/partisync-transfer/src/iroh_blobs.rs` | ChunkSink/ChunkSource trait + ChunkStore 实现 + iroh-blobs 桩执行器 |
+| `crates/partisync-hub/src/iroh_channel.rs` | Hub 侧 iroh 节点门面 + MemStore→CAS 同步 + 下行执行器 |
+| `crates/partisync-hub/src/iroh_keyspace.rs` | HubIrohKeyspace fjall 实现（`h-iroh-node`） |
+| `crates/partisync-hub/tests/iroh_e2e.rs` | iroh 通道端到端集成测试（loopback，离线可跑） |
 | `docs/adr/0014-reed-solomon-erasure.md` | RS crate 选型决策 |
 | `docs/adr/0015-iroh-device-channel-hub-side.md` | iroh/ihor-blobs 通道接线决策 |
 
@@ -112,7 +124,8 @@ ADR-0014（RS(10,4)）、ADR-0015（iroh/ihor-blobs 通道）
 | 优先级 | 项 | 负责 |
 |---|---|---|
 | ~~P0~~ | ~~iroh 1.2.0 + iroh-blobs 兼容版本组合确认~~ | ~~已锁定：iroh=1.2.0，iroh-blobs=0.103.0~~ |
-| P0 | iroh-blobs 0.103.0 fs-store feature 冲突（workspace tokio 缺 blocking；M4 接入 store 时解决） | @lead |
+| ~~P0~~ | ~~iroh-blobs 0.103.0 fs-store feature 冲突~~ | ~~已绕过闭环：hub 层 MemStore 暂存 + CAS ChunkStore trait 通道，fs-store 未引入~~ |
+| P0 | iroh-blobs push fire-and-forget 语义 → M5 设备侧执行器须实现 UploadAck（保持连接至 hub 同步完成） | @lead |
 | P1 | iroh 1.x relay 定价模型（hub 作为 relay 节点的费用承担方） | @lead |
 | P1 | `iroh-blobs` 与其他 iroh 1.x 实现（如 iroh.com official）的 ALPN 互操作性 | @lead |
 | P2 | 设备侧 iroh-blobs 上传窗口大小（影响 BDP 吞吐） | @lead |
