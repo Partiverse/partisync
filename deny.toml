@@ -17,6 +17,8 @@ allow = [
     "0BSD", # ADR-0011：varint-rs（fjall 传递依赖）
     "BSL-1.0", # ADR-0011：xxhash-rust（fjall 传递依赖）
     "CDLA-Permissive-2.0", # ADR-0012：webpki-root-certs（rustls-platform-verifier 链）
+    "Unlicense", # ADR-0016：async_io_stream/pharos/ws_stream_wasm（iroh-blobs wasm 链）
+    "MPL-2.0", # ADR-0016：attohttpc（iroh-blobs 链，文件级 copyleft）
 ]
 
 [bans]
@@ -28,4 +30,12 @@ version = 2
 yanked = "deny"
 # ADR-0014（2026-09-21 附注）：reed-solomon-erasure v6 锁 parking_lot v0.11 → instant v0.1.13
 # unmaintained，无已知漏洞；等上游升 parking_lot ≥ 0.12 后撤销本豁免。
-ignore = ["RUSTSEC-2024-0384"]
+# ADR-0016（2026-09-21）：iroh/iroh-blobs 传递链 unmaintained 三条——
+# atomic-polyfill(heapless→postcard)、paste(netdev→iroh)、proc-macro-error(genawaiter→bao-tree)；
+# 均无已知漏洞、无安全升级路径，上游切换后撤销。
+ignore = [
+    "RUSTSEC-2024-0384", # ADR-0014
+    "RUSTSEC-2023-0089", # ADR-0016
+    "RUSTSEC-2024-0436", # ADR-0016
+    "RUSTSEC-2024-0370", # ADR-0016
+]
