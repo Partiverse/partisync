@@ -231,6 +231,14 @@ impl Bm25Index {
             .map_err(|e| err("tantivy commit", e))
     }
 
+    /// 显式重载 reader（用于 OnCommitWithDelay 策略下确保下一次 search 看到最新写入）。
+    ///
+    /// # Errors
+    /// 重载错误 → Fatal。
+    pub fn reload(&self) -> Result<(), PartisyError> {
+        self.reader.reload().map_err(|e| err("tantivy reload", e))
+    }
+
     /// 执行 BM25 查询。
     ///
     /// # Errors

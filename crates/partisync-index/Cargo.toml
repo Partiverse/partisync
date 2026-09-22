@@ -21,6 +21,8 @@ async-trait = { workspace = true }
 dirs = { workspace = true }
 blake3 = { workspace = true } # vector.rs content_id → u64 key 映射
 sqlx = { workspace = true } # writer.rs SidecarReader 读 sidecar_items（缺声明系 WP02-T02 遗漏，T06 未编译验证所致）
+serde = { workspace = true } # eval/runner.rs 解析 corpus.tsv/queries.jsonl/qrels.jsonl（M4-WP06）
+serde_json = { workspace = true } # eval/runner.rs 报告 JSON 序列化
 # reranker 和 embed 模型走同一 fastembed 族（ADR-0018 批次）
 fastembed = { workspace = true, optional = true }
 
@@ -29,6 +31,7 @@ tempfile = "3"
 criterion = { workspace = true }
 partisync-ai = { path = "../partisync-ai", version = "0.1.0" }
 tokio = { workspace = true } # #[tokio::test]（engine/hybrid 测试）
+serde_json = { workspace = true } # wp06_eval.rs 报告 JSON 序列化
 
 
 [lints]
