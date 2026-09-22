@@ -40,9 +40,11 @@ async fn main() {
         Some("ls") => ls_cmd(&args[1..]).await,
         Some("find") => find_cmd(&args[1..]).await,
         Some("dedupe") => dedupe_cmd(&args[1..]).await,
+        Some("search") => search_cmd(&args[1..]).await,
         _ => {
             eprintln!(
                 "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]
+  partisync search <query> [--db <path>] [--index-root <path>] [--mode hybrid|bm25] [--limit N]  混合检索
   partisync sidecar-run <root> [--db <path>] [--sidecar-dir <dir>]   Sidecar 管线（缩略图/EXIF/嵌入）
   partisync sidecar-status [--db <path>]",
                 env!("CARGO_PKG_VERSION")
@@ -630,6 +632,120 @@ pub(crate) fn fmt_bytes(n: i64) -> String {
         format!("{n} B")
     } else {
         format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+async fn search_cmd(args: &[String]) -> i32 {
+    let Some(query) = args.first().filter(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("用法: partisync search <query> [--db <path>] [--index-root <path>] [--mode hybrid|bm25] [--limit N]");
+        return 2;
+    };
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let index_root = flag_value(args, "--index-root")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".partisync")
+                .join("index")
+        });
+    let mode = flag_value(args, "--mode").unwrap_or_else(|| "hybrid".into());
+    let limit = flag_value(args, "--limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20)
+        .min(100);
+
+    let store = match open_db(&db).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+
+    let config = partisync_index::IndexEngineConfig {
+        index_root,
+        enable_reranker: false,
+        reranker_model_dir: None,
+    };
+    let engine = match partisync_index::IndexEngine::open_or_create(config) {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("error: 打开索引: {err}");
+            return 1;
+        }
+    };
+
+    match mode.as_str() {
+        "bm25" => {
+            let result = engine
+                .bm25_only(partisync_index::Bm25Query {
+                    query: query.clone(),
+                    limit,
+                    include_transcript: true,
+                })
+                .await;
+            match result {
+                Ok(r) => {
+                    println!(
+                        "模式: BM25（{limit} 条，耗时 {timing_ms:?}ms）",
+                        timing_ms = r.timing_ms
+                    );
+                    for hit in &r.hits {
+                        let hl = hit.highlight.as_deref().unwrap_or("-");
+                        println!(
+                            "  [{score:.4}] {content_id}  {hl}",
+                            score = hit.score,
+                            content_id = hit.content_id,
+                            hl = hl
+                        );
+                    }
+                    println!("（{} 条结果）", r.total);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            }
+        }
+        "hybrid" | _ => {
+            // hybrid 模式需要查询向量，这里用 fake 向量演示
+            // 真实场景：query_embedding 模型生成向量后传入
+            eprintln!("note: 混合检索需 embedding 模型生成查询向量，当前仅支持 --mode bm25");
+            eprintln!("提示: 用 --mode bm25 做纯全文检索");
+            // 回退到 BM25
+            let result = engine
+                .bm25_only(partisync_index::Bm25Query {
+                    query: query.clone(),
+                    limit,
+                    include_transcript: true,
+                })
+                .await;
+            match result {
+                Ok(r) => {
+                    println!(
+                        "模式: BM25（hybrid 回退，{limit} 条，耗时 {timing_ms:?}ms）",
+                        timing_ms = r.timing_ms
+                    );
+                    for hit in &r.hits {
+                        let hl = hit.highlight.as_deref().unwrap_or("-");
+                        println!(
+                            "  [{score:.4}] {content_id}  {hl}",
+                            score = hit.score,
+                            content_id = hit.content_id,
+                            hl = hl
+                        );
+                    }
+                    println!("（{} 条结果）", r.total);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            }
+        }
     }
 }
 

@@ -10,6 +10,7 @@ partisync-core = { path = "../partisync-core", version = "0.1.0" }
 partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
 partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
 partisync-ai = { path = "../partisync-ai", version = "0.1.0" } # M4-WP01 sidecar 调度
+partisync-index = { path = "../partisync-index", version = "0.1.0" } # M4-WP02 检索引擎
 md-5 = { workspace = true } # S3 ETag
 partisync-provider = { path = "../partisync-provider", version = "0.1.0" }
 base64 = "0.22"
@@ -19,6 +20,7 @@ tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+dirs = { workspace = true }
 
 [lints]
 workspace = true
