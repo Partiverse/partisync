@@ -17,10 +17,15 @@ serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 sqlx = { workspace = true }
-rmcp = { workspace = true, features = ["server", "transport-io"] }
+rmcp = { workspace = true, features = ["server", "transport-io", "transport-child-process"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+# e2e 测试用 client 侧（serve_client/RoleClient + TokioChildProcess）
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 
 # windows: use server-side-http transport instead of stdio
 [target.'cfg(target_family = "windows")'.dependencies]

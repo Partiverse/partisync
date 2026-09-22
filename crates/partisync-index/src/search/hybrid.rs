@@ -160,7 +160,7 @@ impl HybridSearch {
     pub async fn search(&self, req: HybridQuery) -> Result<HybridResult, PartisyError> {
         let start = std::time::Instant::now();
 
-        let limit = req.limit.min(100).max(1);
+        let limit = req.limit.clamp(1, 100);
         let bm25_limit = 100.min(limit * 5); // BM25 top-100 足够 RRF 候选
 
         // BM25 查询（async）
@@ -269,7 +269,7 @@ impl HybridSearch {
     ) -> Result<HybridResult, PartisyError> {
         let start = std::time::Instant::now();
 
-        let limit = req.limit.min(100).max(1);
+        let limit = req.limit.clamp(1, 100);
         let bm25_limit = 100.min(limit * 5);
 
         let bm25_result = self

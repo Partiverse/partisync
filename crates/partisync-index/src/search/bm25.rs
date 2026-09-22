@@ -96,7 +96,6 @@ fn err(what: &str, e: impl std::fmt::Display) -> PartisyError {
 /// 实例持有 `Index`（不可变）和 `IndexWriter`（可变，共享写锁）。
 /// 查询走独立 `IndexReader`。
 pub struct Bm25Index {
-    index: Index,
     writer: RwLock<IndexWriter>,
     reader: IndexReader,
     parser: QueryParser,
@@ -137,7 +136,6 @@ impl Bm25Index {
             QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field, tx_field]);
 
         Ok(Self {
-            index,
             writer: RwLock::new(writer),
             reader,
             parser,

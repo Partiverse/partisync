@@ -426,35 +426,33 @@ impl ServerHandler for McpServerState {
         std::future::ready(Ok(ListToolsResult::with_all_items(all_tools())))
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResponse, ErrorData>> + Send + '_ {
-        async move {
-            let args = request
-                .arguments
-                .map(JsonValue::Object)
-                .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args = request
+            .arguments
+            .map(JsonValue::Object)
+            .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
 
-            let result = match request.name.as_ref() {
-                "asset_search" => self.asset_search(&args).await,
-                "asset_read" => self.asset_read(&args).await,
-                "asset_organize" => self.asset_organize(&args).await,
-                "dataset_export" => self.dataset_export(&args).await,
-                "job_status" => self.job_status(&args).await,
-                other => {
-                    return Err(ErrorData::invalid_params(
-                        format!("unknown tool: {other}"),
-                        None,
-                    ))
-                }
-            };
-            // CallToolResult → CallToolResponse::Complete
-            match result {
-                Ok(r) => Ok(CallToolResponse::Complete(r)),
-                Err(e) => Err(e),
+        let result = match request.name.as_ref() {
+            "asset_search" => self.asset_search(&args).await,
+            "asset_read" => self.asset_read(&args).await,
+            "asset_organize" => self.asset_organize(&args).await,
+            "dataset_export" => self.dataset_export(&args).await,
+            "job_status" => self.job_status(&args).await,
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown tool: {other}"),
+                    None,
+                ))
             }
+        };
+        // CallToolResult → CallToolResponse::Complete
+        match result {
+            Ok(r) => Ok(CallToolResponse::Complete(r)),
+            Err(e) => Err(e),
         }
     }
 }
@@ -1090,7 +1088,9 @@ pub async fn run_mcp_server(
     let state = McpServerState::new(graph_db_path)
         .await
         .map_err(|e| format!("failed to open graph.db: {e}"))?;
-    rmcp::service::serve_server(state, stdio()).await?;
+    // RunningService drop 即 shutdown——必须 waiting 到客户端断开（stdio EOF）
+    let service = rmcp::service::serve_server(state, stdio()).await?;
+    service.waiting().await?;
     Ok(())
 }
 

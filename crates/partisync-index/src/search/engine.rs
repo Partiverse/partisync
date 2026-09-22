@@ -56,7 +56,6 @@ pub struct IndexEngine {
     bm25: Arc<Bm25Index>,
     vector: Arc<VectorStore>,
     hybrid: HybridSearch,
-    config: IndexEngineConfig,
 }
 
 impl IndexEngine {
@@ -124,7 +123,6 @@ impl IndexEngine {
             bm25,
             vector,
             hybrid,
-            config,
         })
     }
 
