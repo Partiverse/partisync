@@ -3,15 +3,55 @@
 日期: 2026-09-22 · 环境: Apple Silicon (arm64, macOS 25.6.0, 24 GB) ·
 release profile · 关联: SPEC M4-WP03 验收标准、ADR-0019（rmcp = 3.4.0）
 
+## 0. 开放项闭合（2026-09-22 续接会话回填）
+
+T05 时登记的开放项处理结果：
+
+| 优先级 | 开放项 | 结果 |
+|---|---|---|
+| P0 | cargo deny check rmcp 进场复核 | ✅ **四段全绿**（licenses/bans/sources 真实退出码 0；advisories `--offline` 本地缓存 DB 通过——GitHub 不可达无法 fetch 最新，缓存截至上次成功同步；bans 曾 FAIL：gateway path 依赖缺 version 补齐后通过） |
+| P0 | dataset_export record_count 实测 | ✅ 内存库测试覆盖（`dataset_export_writes_jsonl_shards`：分片写入 + 内容断言 + record_count 断言） |
+| P1 | job_status checkpoint 格式对齐 | ✅ 已对齐——graph/jobs.rs `set_status(checkpoint=COALESCE)`：**sidecar 作业不写 checkpoint**（checkpoint 仅 indexer 作业使用，值为路径字符串非 JSON）；job_status 做宽松解析（JSON stage/next 字段，非 JSON 原样返回），格式演进不破坏 |
+| P1 | set_tag 原子性 | ✅ 单事务重写——asset_organize 全部操作在单 `BEGIN..COMMIT` 内执行，任一失败整体回滚（测试 `asset_organize_bad_content_rolls_back_tx` 验证回滚） |
+| P2 | 分片导出（>10,000 条） | ✅ `shard_size` 参数实装（每片记录数，缺省单文件），LIMIT 10000 上限保留为防御边界 |
+| **P0** | **MCP e2e 集成测试（真实 AI Agent 调用）** | ⏸ **用户指令后置为独立待办**——本会话完成工具级离线测试（10 例）替代覆盖 handler 行为 |
+
+### 附带修复（WP02 遗留债务，阻塞 WP03 编译，一并披露）
+
+T05 后首次真正编译 partisync-index（WP02-T06 时 numkong 阻塞从未编译过），
+暴露 6 类错误 + 2 个行为 bug，全部修复：
+
+| 问题 | 修复 |
+|---|---|
+| `usearch::Options` 不存在（真实 API = `IndexOptions` plain struct + `MetricKind::Cos` + `ScalarKind`） | vector.rs 全量重写，API 口径逐一从 usearch 2.26.2 源码核实 |
+| usearch key 为 `u64`（WP02 代码传 String） | content_id → blake3 前 8 字节 u64 映射（`content_key`），碰撞概率披露于模块文档 |
+| usearch 要求 reserve 先行（"Reserve capacity ahead of insertions!"） | upsert 前容量检查 2× 扩容 |
+| `sqlx` 未在 index/Cargo.toml 声明（writer.rs 使用） | 补依赖声明（WP02-T02 遗漏） |
+| `hybrid::` 模块路径 + 私有类型跨模块导入（engine.rs） | imports 重整：Bm25Hit 等直接从 bm25/vector 源头导入 |
+| `Box<dyn Future>` await 不稳定（E0277） | `Bm25Source` trait 签名改 `Pin<Box<dyn Future>>` |
+| tantivy 0.26：`QueryParser::for_index` 需 `Vec<Field>`；`TopDocs` 需 `.order_by_score()`；`commit()` 返回 `Opstamp` 且需 `&mut` | bm25.rs 逐一对源码核实修正 |
+| writer.rs `tag_entry` 表名/关联列错（schema 实为 `entry_tag`，经 `entry_path` 关联） | 修正 SQL（WP02 笔误） |
+| **行为 bug**：`open_or_create` 以「目录存在」判 tantivy 打开（预建空目录即炸） | 判据改 `meta.json` 存在 |
+| **行为 bug**：bm25 `err()` 吞掉底层错误信息 | source 保留 `{what}: {e}` |
+| byteorder `read_f32_into` 误用 | 改 `f32::from_le_bytes` 手写（byteorder 依赖此后无引用） |
+
+### numkong SIMD 编译障碍（环境问题，本轮找到可行绕过）
+
+Apple Clang 16 编译 numkong SME 探针 TU 时 clang 前端直接崩溃（Abort trap 6），
+`NUMKONG_DISABLE_SIMD=1` 单独无效（探针仍测 SME）。**可行绕过**：
+`NK_TARGET_<ISA>=0` 环境变量强制关闭全部 SVE/SME 探针（numkong 7.8.2 build.rs:438
+支持 env override），NEON 路径正常编译。完整环境变量清单见 numkong-env 惯例
+（16 个 NK_TARGET_* 变量）。此为构建环境解法，代码零改动。
+
 ## 1. 口径声明（诚实标注）
 
-- **MCP 端到端未实测**：stdio 传输可被外部 MCP Client 调用，
-  但真实 AI Agent 端到端场景（归类→预览→提交→导出 manifest）需集成测试；
+- **工具级测试 10 例全绿**（gateway 内存 SQLite + index 单元测试 6 例），
+  真实 MCP Client（stdio JSON-RPC 往返）与 AI Agent 端到端场景待独立待办；
 - **graph.db 路径**：`~/.partisync/graph.db`（可通过 `run_mcp_server(path)` 覆盖）；
-- **numkong SIMD**：与 WP02 相同环境问题，不影响 MCP 工具本身；
-- **asset_organize 幂等性**：add_tag/remove_tag/set_tag 均幂等；
-  delete 为软删除（entry.state=1），不物理删除 content；
-- **dataset_export 规模**：最多导出 10,000 条（LIMIT），向量数据不含原始向量。
+- **numkong SIMD**：SVE/SME 探针强制关闭下编译（见 §0），NEON 可用；
+- **asset_organize 幂等性**：add_tag/remove_tag/set_tag 均幂等（entry_tag
+  ON CONFLICT DO UPDATE 复活墓碑行）；delete 为软删除（entry.state=1）；
+- **dataset_export 规模**：防御上限 10,000 条；分片经 `shard_size` 参数。
 
 ## 2. 工具清单与上游接入
 
@@ -48,8 +88,9 @@ release profile · 关联: SPEC M4-WP03 验收标准、ADR-0019（rmcp = 3.4.0�
 | content_ids 精确导出 | ✅ | IN 子句精确过滤 |
 | mime_kind 前缀过滤 | ✅ | LIKE 匹配 |
 | JSONL 每行一条记录 | ✅ | 流式写，无内存堆积 |
-| record_count / total_bytes 正确 | ⚠️ 待补 | 需真实数据验证 |
+| record_count / total_bytes 正确 | ✅ | 内存库测试断言（§0 P0 闭合） |
 | 24h 过期提示 | ✅ | expires_at_ns = now + 86_400_000_000_000 |
+| 分片导出（shard_size） | ✅ | 测试覆盖每片记录数与内容断言 |
 
 ## 6. job_status 正确性
 
@@ -57,7 +98,7 @@ release profile · 关联: SPEC M4-WP03 验收标准、ADR-0019（rmcp = 3.4.0�
 |---|---|---|
 | 无 job_id 时返回最近 20 条 | ✅ | ORDER BY created_ns DESC LIMIT 20 |
 | job_id 精确查找 | ✅ | AND kind='sidecar' 过滤 |
-| checkpoint JSON 解析 current_stage | ⚠️ 占位 | checkpoint 格式依赖 jobs.rs 实际序列化，需对齐 |
+| checkpoint 解析 current_stage | ✅ | 已对齐：sidecar 作业不写 checkpoint（仅 indexer 用），宽松解析非 JSON 原样返回（§0 P1 闭合） |
 | status 0-4 → 字符串映射 | ✅ | queued/running/interrupted/done/failed |
 
 ## 7. MCP 传输（RMCP 2026-07-28）
@@ -69,22 +110,16 @@ release profile · 关联: SPEC M4-WP03 验收标准、ADR-0019（rmcp = 3.4.0�
 | Tool 输入/输出 JSON Schema | ✅ | rmcp schema 支持 |
 | 错误返回 `server::Error` | ✅ | InvalidParams / InternalError / ToolNotFound |
 
-## 8. 依赖与门禁
+## 8. 依赖与门禁（2026-09-22 续接会话实测）
 
 | 门禁 | 结果 |
 |---|---|
 | `cargo fmt --all --check` | ✅ |
-| `cargo clippy --workspace --all-targets -- -D warnings` | ⚠️ 待 CI（numkong 环境问题） |
-| `cargo test -p partisync-gateway` | ⚠️ 待补（桩测试） |
-| `cargo deny check` | ⚠️ 待补（ADR-0019 新增 rmcp 进场） |
+| `cargo clippy -p partisync-index -p partisync-gateway --all-targets -- -D warnings` | ✅ 0 warning（SVE/SME 探针关闭环境） |
+| `cargo test -p partisync-index` | ✅ 6/6（bm25/vector/hybrid/engine） |
+| `cargo test -p partisync-gateway` | ✅ 10/10（五工具内存库测试） |
+| `cargo deny check` 四段 | ✅ licenses/bans/sources exit 0；advisories `--offline`（本地缓存 DB，网络故障披露见 §0） |
 
-## 9. 开放项（不阻塞验收）
+## 9. 开放项（状态见 §0 闭合表）
 
-| 优先级 | 项 | 说明 |
-|---|---|---|
-| P0 | MCP e2e 集成测试 | 真实 MCP Client 调用五大工具 |
-| P0 | dataset_export record_count/total_bytes 实测 | 需合成数据验证 |
-| P0 | `cargo deny check` rmcp 新增 | ADR-0019 基线对齐 |
-| P1 | job_status checkpoint 格式对齐 | 依赖 jobs.rs 实际序列化格式 |
-| P1 | set_tag 原子性改进 | 两步操作可合并为一个事务 |
-| P2 | 分片导出（> 10,000 条） | 当前硬限 10,000 |
+唯一剩余：**P0 MCP e2e 集成测试**（真实 AI Agent 调用）——用户指令后置为独立待办。

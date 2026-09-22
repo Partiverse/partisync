@@ -5236,6 +5236,7 @@ name = "partisync-index"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "byteorder",
  "criterion",
  "dirs 5.0.1",
@@ -5243,8 +5244,10 @@ dependencies = [
  "partisync-ai",
  "partisync-core",
  "partisync-graph",
+ "sqlx",
  "tantivy",
  "tempfile",
+ "tokio",
  "usearch",
 ]
 

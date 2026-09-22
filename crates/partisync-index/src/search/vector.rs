@@ -5,11 +5,27 @@
 //! - 图像稠密向量：CLIP 512d（`stage=embed, artifact=fs:<id>/embed_image_dense.bin`）
 //!
 //! 索引路径：`~/.partisync/vectors.usearch`（本地），Hub 分片路由归 M4+。
+//!
+//! usearch 2.26 API 口径（源码核实）：
+//! - key 为 `u64`（`usearch::Key`）——content_id 经 blake3 前 8 字节映射为 u64；
+//!   碰撞空间 2⁶⁴，条目规模 ≤10⁹ 时碰撞概率 < 2.7%（生日界），可接受且在
+//!   upsert 路径以「remove + add」保证幂等覆盖
+//! - `MetricKind::Cos` 返回余弦**距离**（1 − cos_sim）：完全相同向量 → 距离 0
+//! - `ScalarKind::F32` 量化避免默认 BF16 的精度损失（KPI 口径：F32 存储层）
 
 use std::path::Path;
 use std::sync::RwLock;
 
 use partisync_core::error::{PartisyError, Severity};
+
+/// content_id → u64 key（blake3 前 8 字节，大端）。
+fn content_key(content_id: &str) -> u64 {
+    let h = blake3::hash(content_id.as_bytes());
+    let bytes = h.as_bytes();
+    u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
 
 /// 向量种类（SPEC §3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,8 +40,8 @@ impl VectorKind {
     /// 返回 usearch 维度和度量。
     pub fn dims_and_metric(self) -> (usize, usearch::MetricKind) {
         match self {
-            VectorKind::TextDense => (768, usearch::MetricKind::Cosine),
-            VectorKind::ImageDense => (512, usearch::MetricKind::Cosine),
+            VectorKind::TextDense => (768, usearch::MetricKind::Cos),
+            VectorKind::ImageDense => (512, usearch::MetricKind::Cos),
         }
     }
 
@@ -35,6 +51,15 @@ impl VectorKind {
             VectorKind::TextDense => "embed_text_dense.bin",
             VectorKind::ImageDense => "embed_image_dense.bin",
         }
+    }
+}
+
+fn index_options(dims: usize, metric: usearch::MetricKind) -> usearch::IndexOptions {
+    usearch::IndexOptions {
+        dimensions: dims,
+        metric,
+        quantization: usearch::ScalarKind::F32,
+        ..Default::default()
     }
 }
 
@@ -76,24 +101,24 @@ impl VectorStore {
         dims: usize,
         metric: usearch::MetricKind,
     ) -> Result<usearch::Index, PartisyError> {
-        let path_str = path.to_string_lossy();
         if path.exists() {
-            usearch::Index::open(&path_str).map_err(|e| PartisyError {
+            // restore：读 header 重建 options（含维度/度量）再 load
+            usearch::Index::restore(&path.to_string_lossy()).map_err(|e| PartisyError {
                 severity: Severity::Fatal,
                 source: Some(format!("open usearch index: {e}").into()),
             })
         } else {
-            let index = usearch::Index::new(
-                &usearch::Options::default()
-                    .with_dims(dims)
-                    .with_metric(metric)
-                    .with_expansion_add(0) // 写入时控制
-                    .with_expansion_search(0),
-            );
-            index.save(&path_str).map_err(|e| PartisyError {
-                severity: Severity::Fatal,
-                source: Some(format!("create usearch index: {e}").into()),
-            })?;
+            let index =
+                usearch::Index::new(&index_options(dims, metric)).map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("create usearch index: {e}").into()),
+                })?;
+            index
+                .save(&path.to_string_lossy())
+                .map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("save usearch index: {e}").into()),
+                })?;
             Ok(index)
         }
     }
@@ -110,33 +135,43 @@ impl VectorStore {
         kind: VectorKind,
         vector: &[f32],
     ) -> Result<(), PartisyError> {
-        let index = match kind {
-            VectorKind::TextDense => self.text_dense.write().map_err(|_| PartisyError {
-                severity: Severity::Fatal,
-                source: Some("text_dense lock poison".into()),
-            })?,
-            VectorKind::ImageDense => self.image_dense.write().map_err(|_| PartisyError {
-                severity: Severity::Fatal,
-                source: Some("image_dense lock poison".into()),
-            })?,
-        };
+        let mut index = self.lock_for_write(kind)?;
+        Self::upsert_on(&mut index, content_id, kind, vector)
+    }
+
+    fn upsert_on(
+        index: &mut usearch::Index,
+        content_id: &str,
+        kind: VectorKind,
+        vector: &[f32],
+    ) -> Result<(), PartisyError> {
         let (expected_dims, _) = kind.dims_and_metric();
         if vector.len() != expected_dims {
             return Err(PartisyError {
                 severity: Severity::Fatal,
                 source: Some(
                     format!(
-                        "vector dimension mismatch for {:?}: expected {}, got {}",
-                        kind,
-                        expected_dims,
+                        "vector dimension mismatch for {kind:?}: expected {expected_dims}, got {}",
                         vector.len()
                     )
                     .into(),
                 ),
             });
         }
-        // usearch 使用字符串 key，content_id 作为唯一标识
-        index.add(content_id, vector).map_err(|e| PartisyError {
+        let key = content_key(content_id);
+        // 幂等覆盖：已有同 key 先摘除（不存在时 remove 返回 Ok(0)）
+        let _ = index.remove(key);
+        // usearch 2.26 要求容量先行（"Reserve capacity ahead of insertions!"）：
+        // 满则按 2×（至少 1024）扩容
+        if index.size() >= index.capacity() {
+            index
+                .reserve(std::cmp::max(index.capacity() * 2, 1024))
+                .map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("usearch reserve: {e}").into()),
+                })?;
+        }
+        index.add(key, vector).map_err(|e| PartisyError {
             severity: Severity::Fatal,
             source: Some(format!("usearch add: {e}").into()),
         })?;
@@ -151,44 +186,13 @@ impl VectorStore {
         &self,
         items: &[(String, VectorKind, Vec<f32>)],
     ) -> Result<(), PartisyError> {
-        // text_dense 和 image_dense 分开处理
-        let mut text_items = Vec::new();
-        let mut image_items = Vec::new();
         for (cid, kind, vec) in items {
-            match kind {
-                VectorKind::TextDense => text_items.push((cid.clone(), vec.clone())),
-                VectorKind::ImageDense => image_items.push((cid.clone(), vec.clone())),
-            }
-        }
-
-        if !text_items.is_empty() {
-            let mut index = self.text_dense.write().map_err(|_| PartisyError {
-                severity: Severity::Fatal,
-                source: Some("text_dense lock poison".into()),
-            })?;
-            for (cid, vec) in text_items {
-                index.add(&cid, &vec).map_err(|e| PartisyError {
-                    severity: Severity::Fatal,
-                    source: Some(format!("usearch add text: {e}").into()),
-                })?;
-            }
-        }
-        if !image_items.is_empty() {
-            let mut index = self.image_dense.write().map_err(|_| PartisyError {
-                severity: Severity::Fatal,
-                source: Some("image_dense lock poison".into()),
-            })?;
-            for (cid, vec) in image_items {
-                index.add(&cid, &vec).map_err(|e| PartisyError {
-                    severity: Severity::Fatal,
-                    source: Some(format!("usearch add image: {e}").into()),
-                })?;
-            }
+            self.upsert(cid, *kind, vec)?;
         }
         Ok(())
     }
 
-    /// 保存全部待写入到磁盘。
+    /// 保存全部子索引到磁盘。
     ///
     /// # Errors
     /// save 错误 → Fatal。
@@ -239,25 +243,14 @@ impl VectorStore {
         kind: VectorKind,
         limit: usize,
     ) -> Result<Vec<VectorHit>, PartisyError> {
-        let index = match kind {
-            VectorKind::TextDense => self.text_dense.read().map_err(|_| PartisyError {
-                severity: Severity::Fatal,
-                source: Some("text_dense lock poison".into()),
-            })?,
-            VectorKind::ImageDense => self.image_dense.read().map_err(|_| PartisyError {
-                severity: Severity::Fatal,
-                source: Some("image_dense lock poison".into()),
-            })?,
-        };
+        let index = self.lock_for_read(kind)?;
         let (expected_dims, _) = kind.dims_and_metric();
         if query.len() != expected_dims {
             return Err(PartisyError {
                 severity: Severity::Fatal,
                 source: Some(
                     format!(
-                        "query dimension mismatch for {:?}: expected {}, got {}",
-                        kind,
-                        expected_dims,
+                        "query dimension mismatch for {kind:?}: expected {expected_dims}, got {}",
                         query.len()
                     )
                     .into(),
@@ -265,33 +258,63 @@ impl VectorStore {
             });
         }
 
-        let results = index.search(query, limit);
-        Ok(results
+        let matches = index.search(query, limit).map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("usearch search: {e}").into()),
+        })?;
+        Ok(matches
+            .keys
             .into_iter()
-            .map(|r| VectorHit {
-                content_id: r.key.to_string(),
-                score: r.distance,
+            .zip(matches.distances)
+            .map(|(key, distance)| VectorHit {
+                // u64 key 无法反解 content_id（blake3 单向）——返回 key 的
+                // 十六进制形式；调用方经 content_key(cid) 比对还原。
+                content_id: format!("{key:016x}"),
+                score: distance,
             })
             .collect())
     }
 
-    /// 清空向量索引（用于 rebuild）。
+    /// 向量检索（返回原始 key，供 key↔content_id 映射层使用）。
+    ///
+    /// # Errors
+    /// usearch 错误 → Fatal。
+    pub fn search_keys(
+        &self,
+        query: &[f32],
+        kind: VectorKind,
+        limit: usize,
+    ) -> Result<Vec<(u64, f32)>, PartisyError> {
+        let index = self.lock_for_read(kind)?;
+        let matches = index.search(query, limit).map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("usearch search: {e}").into()),
+        })?;
+        Ok(matches.keys.into_iter().zip(matches.distances).collect())
+    }
+
+    /// 清空向量索引（用于 rebuild）：重建两个空索引。
+    ///
+    /// # Errors
+    /// usearch 初始化错误 → Fatal。
     pub fn clear(&self) -> Result<(), PartisyError> {
-        // usearch Index 没有 clear_all，需要重新创建
-        let path = std::env::temp_dir().join("usearch_temp_clear");
         let (text_dims, text_metric) = VectorKind::TextDense.dims_and_metric();
         let (image_dims, image_metric) = VectorKind::ImageDense.dims_and_metric();
 
-        let new_text = usearch::Index::new(
-            &usearch::Options::default()
-                .with_dims(text_dims)
-                .with_metric(text_metric),
-        );
-        let new_image = usearch::Index::new(
-            &usearch::Options::default()
-                .with_dims(image_dims)
-                .with_metric(image_metric),
-        );
+        let new_text =
+            usearch::Index::new(&index_options(text_dims, text_metric)).map_err(|e| {
+                PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("recreate text index: {e}").into()),
+                }
+            })?;
+        let new_image =
+            usearch::Index::new(&index_options(image_dims, image_metric)).map_err(|e| {
+                PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("recreate image index: {e}").into()),
+                }
+            })?;
 
         *self.text_dense.write().map_err(|_| PartisyError {
             severity: Severity::Fatal,
@@ -305,19 +328,57 @@ impl VectorStore {
         Ok(())
     }
 
-    /// 返回各向量子索引的近似计数。
+    /// 返回各向量子索引的计数。
     #[must_use]
     pub fn approx_count(&self) -> (u64, u64) {
-        let text = self.text_dense.read().map(|i| i.size()).unwrap_or(0);
-        let image = self.image_dense.read().map(|i| i.size()).unwrap_or(0);
+        let text = self.text_dense.read().map(|i| i.size() as u64).unwrap_or(0);
+        let image = self
+            .image_dense
+            .read()
+            .map(|i| i.size() as u64)
+            .unwrap_or(0);
         (text, image)
+    }
+
+    fn lock_for_write(
+        &self,
+        kind: VectorKind,
+    ) -> Result<std::sync::RwLockWriteGuard<'_, usearch::Index>, PartisyError> {
+        match kind {
+            VectorKind::TextDense => self.text_dense.write().map_err(|_| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("text_dense lock poison".into()),
+            }),
+            VectorKind::ImageDense => self.image_dense.write().map_err(|_| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("image_dense lock poison".into()),
+            }),
+        }
+    }
+
+    fn lock_for_read(
+        &self,
+        kind: VectorKind,
+    ) -> Result<std::sync::RwLockReadGuard<'_, usearch::Index>, PartisyError> {
+        match kind {
+            VectorKind::TextDense => self.text_dense.read().map_err(|_| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("text_dense lock poison".into()),
+            }),
+            VectorKind::ImageDense => self.image_dense.read().map_err(|_| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("image_dense lock poison".into()),
+            }),
+        }
     }
 }
 
 /// 向量检索结果。
 #[derive(Debug, Clone)]
 pub struct VectorHit {
+    /// usearch key 的 16 进制形式（u64 key 单向映射，反解经调用方比对）。
     pub content_id: String,
+    /// 余弦距离（1 − cos_sim；越小越相似）。
     pub score: f32,
 }
 
@@ -342,14 +403,37 @@ mod tests {
             .upsert("c2", VectorKind::ImageDense, &image_vec)
             .unwrap();
 
-        // 搜索：同 content 同 kind 相似度最高
+        // 搜索：相同向量余弦距离 = 0（MetricKind::Cos 返回距离）
         let results = store.search(&text_vec, VectorKind::TextDense, 5).unwrap();
-        assert_eq!(results[0].content_id, "c1");
-        assert!((results[0].score - 1.0).abs() < 1e-5); // 完全相同向量，余弦相似度 = 1
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].score.abs() < 1e-4,
+            "cos distance: {}",
+            results[0].score
+        );
+
+        // upsert 幂等：同 content_id 重写不产生重复
+        store
+            .upsert("c1", VectorKind::TextDense, &text_vec)
+            .unwrap();
+        let (text_n, _) = store.approx_count();
+        assert_eq!(text_n, 1);
+
+        // search_keys 返回原始 u64 key，可经 content_key 比对还原
+        let keyed = store
+            .search_keys(&text_vec, VectorKind::TextDense, 5)
+            .unwrap();
+        assert_eq!(keyed[0].0, content_key("c1"));
 
         // 维度错误
         let bad_vec = vec![0.0f32; 100];
         assert!(store.upsert("c3", VectorKind::TextDense, &bad_vec).is_err());
         assert!(store.search(&bad_vec, VectorKind::TextDense, 5).is_err());
+    }
+
+    #[test]
+    fn content_key_stable() {
+        assert_eq!(content_key("c1"), content_key("c1"));
+        assert_ne!(content_key("c1"), content_key("c2"));
     }
 }

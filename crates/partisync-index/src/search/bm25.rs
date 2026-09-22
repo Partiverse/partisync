@@ -11,7 +11,7 @@ use std::sync::RwLock;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 
 use partisync_core::error::{PartisyError, Severity};
 
@@ -84,10 +84,10 @@ fn field_ids(schema: &Schema) -> (Field, Field, Field, Field, Field, Field) {
     )
 }
 
-fn err(what: &str, e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> PartisyError {
+fn err(what: &str, e: impl std::fmt::Display) -> PartisyError {
     PartisyError {
         severity: Severity::Fatal,
-        source: Some(what.into()),
+        source: Some(format!("{what}: {e}").into()),
     }
 }
 
@@ -112,15 +112,12 @@ impl Bm25Index {
         let path = path.as_ref();
         let schema = schema();
 
-        let index = if path.exists() {
+        let index = if path.join("meta.json").exists() {
+            // tantivy 索引目录的判据是 meta.json（目录可能已被外部预先创建）
             Index::open_in_dir(path).map_err(|e| err("open tantivy index", e))?
         } else {
-            std::fs::create_dir_all(path).map_err(|e| {
-                err(
-                    "create tantivy index dir",
-                    std::io::Error::new(std::io::ErrorKind::Other, e),
-                )
-            })?;
+            std::fs::create_dir_all(path)
+                .map_err(|e| err("create tantivy index dir", std::io::Error::other(e)))?;
             Index::create_in_dir(path, schema.clone())
                 .map_err(|e| err("create tantivy index", e))?
         };
@@ -135,8 +132,9 @@ impl Bm25Index {
             .try_into()
             .map_err(|e| err("open tantivy reader", e))?;
 
-        let (id_field, fn_field, tags_field, ocr_field, tx_field, _upd_field) = field_ids(&schema);
-        let parser = QueryParser::for_index(&index, [fn_field, tags_field, ocr_field, tx_field]);
+        let (_id_field, fn_field, tags_field, ocr_field, tx_field, _upd_field) = field_ids(&schema);
+        let parser =
+            QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field, tx_field]);
 
         Ok(Self {
             index,
@@ -152,12 +150,10 @@ impl Bm25Index {
     /// # Errors
     /// 写入错误 → Fatal。
     pub fn upsert(&self, doc: IndexedDoc) -> Result<(), PartisyError> {
-        let writer = self.writer.write().map_err(|_| {
-            err(
-                "writer lock poison",
-                std::io::Error::new(std::io::ErrorKind::Other, "RwLock poison"),
-            )
-        })?;
+        let writer = self
+            .writer
+            .write()
+            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))?;
         let (id_field, fn_field, tags_field, ocr_field, tx_field, upd_field) =
             field_ids(&self.schema);
 
@@ -169,7 +165,7 @@ impl Bm25Index {
         let mut d = TantivyDocument::default();
         d.add_text(id_field, &doc.content_id);
         d.add_text(fn_field, &doc.filename);
-        d.add_text(tags_field, &doc.tags.join(" "));
+        d.add_text(tags_field, doc.tags.join(" "));
         if let Some(ref ocr) = doc.ocr_text {
             d.add_text(ocr_field, ocr);
         }
@@ -192,12 +188,10 @@ impl Bm25Index {
         &self,
         docs: impl IntoIterator<Item = IndexedDoc>,
     ) -> Result<(), PartisyError> {
-        let writer = self.writer.write().map_err(|_| {
-            err(
-                "writer lock poison",
-                std::io::Error::new(std::io::ErrorKind::Other, "RwLock poison"),
-            )
-        })?;
+        let writer = self
+            .writer
+            .write()
+            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))?;
         let (id_field, fn_field, tags_field, ocr_field, tx_field, upd_field) =
             field_ids(&self.schema);
 
@@ -208,7 +202,7 @@ impl Bm25Index {
             let mut d = TantivyDocument::default();
             d.add_text(id_field, &doc.content_id);
             d.add_text(fn_field, &doc.filename);
-            d.add_text(tags_field, &doc.tags.join(" "));
+            d.add_text(tags_field, doc.tags.join(" "));
             if let Some(ref ocr) = doc.ocr_text {
                 d.add_text(ocr_field, ocr);
             }
@@ -228,13 +222,15 @@ impl Bm25Index {
     /// # Errors
     /// commit 错误 → Fatal。
     pub fn commit(&self) -> Result<(), PartisyError> {
-        let writer = self.writer.write().map_err(|_| {
-            err(
-                "writer lock poison",
-                std::io::Error::new(std::io::ErrorKind::Other, "RwLock poison"),
-            )
-        })?;
-        writer.commit().map_err(|e| err("tantivy commit", e))
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))?;
+        // tantivy 0.26 commit 返回 Opstamp（u64），丢弃
+        writer
+            .commit()
+            .map(|_| ())
+            .map_err(|e| err("tantivy commit", e))
     }
 
     /// 执行 BM25 查询。
@@ -253,7 +249,7 @@ impl Bm25Index {
         let (id_field, _fn_field, _tags_field, ocr_field, tx_field, _) = field_ids(&self.schema);
 
         let top_docs = searcher
-            .search(&parsed, &TopDocs::with_limit(q.limit))
+            .search(&parsed, &TopDocs::with_limit(q.limit).order_by_score())
             .map_err(|e| err("bm25 search", e))?;
 
         let total = top_docs.len();
@@ -310,16 +306,28 @@ impl Bm25Index {
     /// # Errors
     /// commit 错误 → Fatal。
     pub fn clear(&self) -> Result<(), PartisyError> {
-        let writer = self.writer.write().map_err(|_| {
-            err(
-                "writer lock poison",
-                std::io::Error::new(std::io::ErrorKind::Other, "RwLock poison"),
-            )
-        })?;
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))?;
         writer
             .delete_all_documents()
             .map_err(|e| err("tantivy delete_all", e))?;
-        writer.commit().map_err(|e| err("tantivy commit", e))
+        writer
+            .commit()
+            .map(|_| ())
+            .map_err(|e| err("tantivy commit", e))
+    }
+
+    /// 强制同步刷新 reader（tantivy `OnCommitWithDelay` 是异步后台刷新，
+    /// commit 后立刻检索可能读到旧快照；测试/紧一致场景显式调用）。
+    ///
+    /// # Errors
+    /// reload 错误 → Fatal。
+    pub fn force_reload(&self) -> Result<(), PartisyError> {
+        self.reader
+            .reload()
+            .map_err(|e| err("tantivy reader reload", e))
     }
 
     /// 返回索引当前文档数（近似）。
@@ -359,6 +367,7 @@ mod tests {
         .unwrap();
 
         idx.commit().unwrap();
+        idx.force_reload().unwrap();
 
         // 精确查询
         let result = idx

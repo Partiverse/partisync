@@ -9,9 +9,9 @@ description = "对外网关：FUSE、S3 端点、WebDAV、FTPS、SFTP、MCP Serv
 workspace = true
 
 [dependencies]
-partisync-index = { path = "../partisync-index" }
-partisync-ai = { path = "../partisync-ai" }
-partisync-core = { path = "../partisync-core" }
+partisync-index = { path = "../partisync-index", version = "0.1.0" }
+partisync-ai = { path = "../partisync-ai", version = "0.1.0" }
+partisync-core = { path = "../partisync-core", version = "0.1.0" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -19,6 +19,8 @@ usearch = { workspace = true }
 byteorder = { workspace = true }
 async-trait = { workspace = true }
 dirs = { workspace = true }
+blake3 = { workspace = true } # vector.rs content_id → u64 key 映射
+sqlx = { workspace = true } # writer.rs SidecarReader 读 sidecar_items（缺声明系 WP02-T02 遗漏，T06 未编译验证所致）
 # reranker 和 embed 模型走同一 fastembed 族（ADR-0018 批次）
 fastembed = { workspace = true, optional = true }
 
@@ -26,6 +28,7 @@ fastembed = { workspace = true, optional = true }
 tempfile = "3"
 criterion = { workspace = true }
 partisync-ai = { path = "../partisync-ai", version = "0.1.0" }
+tokio = { workspace = true } # #[tokio::test]（engine/hybrid 测试）
 
 
 [lints]

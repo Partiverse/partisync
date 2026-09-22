@@ -18,7 +18,7 @@ use std::sync::Arc;
 use partisync_core::error::{PartisyError, Severity};
 
 use super::bm25::{self, Bm25Hit, Bm25Query, Bm25Result};
-use super::vector::{self, VectorHit, VectorKind};
+use super::vector::{VectorHit, VectorKind};
 
 /// RRF 融合器（Reciprocal Rank Fusion）。
 /// k 值参考：k=60 在大多数信息检索基准上表现稳健（SPEC §4）。
@@ -109,7 +109,10 @@ fn rrf_fuse(
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     sorted
         .into_iter()
-        .map(|(cid, score)| (cid, score, highlights.remove(&cid)))
+        .map(|(cid, score)| {
+            let hl = highlights.remove(&cid);
+            (cid, score, hl)
+        })
         .collect()
 }
 
@@ -321,7 +324,9 @@ pub trait Bm25Source: Send + Sync {
     fn bm25_search(
         &self,
         q: Bm25Query,
-    ) -> Box<dyn std::future::Future<Output = Result<Bm25Result, PartisyError>> + Send + '_>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Bm25Result, PartisyError>> + Send + '_>,
+    >;
 }
 
 /// 向量数据源 trait。
@@ -414,7 +419,6 @@ mod fastembed_rerank {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     struct FakeBm25 {
         hits: Vec<Bm25Hit>,
@@ -423,8 +427,9 @@ mod tests {
         fn bm25_search(
             &self,
             _: Bm25Query,
-        ) -> Box<dyn std::future::Future<Output = Result<Bm25Result, PartisyError>> + Send + '_>
-        {
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Bm25Result, PartisyError>> + Send + '_>,
+        > {
             Box::pin(async move {
                 Ok(Bm25Result {
                     hits: self.hits.clone(),

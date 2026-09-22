@@ -11,18 +11,13 @@
 //! let result = engine.hybrid_search(query, Default::default()).await?;
 //! ```
 
-use std::path::Path;
 use std::sync::Arc;
 
 use partisync_core::error::{PartisyError, Severity};
 
-use super::bm25::{self, Bm25Index, IndexedDoc};
-use super::hybrid::{
-    Bm25Hit, Bm25Query, Bm25Result, HybridHit, HybridQuery, HybridResult, HybridSearch,
-    HybridVectorKind, SearchFilters, VectorHit, VectorKind, VectorSource,
-};
-use super::vector::{VectorKind as Vk, VectorStore};
-use super::writer::IndexError;
+use super::bm25::{self, Bm25Index, Bm25Query, Bm25Result};
+use super::hybrid::{Bm25Source, HybridQuery, HybridResult, HybridSearch, VectorSource};
+use super::vector::{VectorHit, VectorKind, VectorStore};
 
 /// 检索引擎配置。
 #[derive(Debug, Clone)]
@@ -113,10 +108,16 @@ impl IndexEngine {
             #[cfg(not(feature = "index-rerank"))]
             {
                 let _ = config.enable_reranker; // silence unused warning
-                HybridSearch::new_without_reranker(bm25.clone(), vector.clone())
+                HybridSearch::new_without_reranker(
+                    Arc::new(bm25.clone()) as Arc<dyn Bm25Source>,
+                    Arc::new(vector.clone()) as Arc<dyn VectorSource>,
+                )
             }
         } else {
-            HybridSearch::new_without_reranker(bm25.clone(), vector.clone())
+            HybridSearch::new_without_reranker(
+                Arc::new(bm25.clone()) as Arc<dyn Bm25Source>,
+                Arc::new(vector.clone()) as Arc<dyn VectorSource>,
+            )
         };
 
         Ok(Self {
@@ -196,11 +197,13 @@ impl IndexEngine {
 
 // ─── 实现 hybrid::Bm25Source（用于 HybridSearch）─────────────────────────────
 
-impl hybrid::Bm25Source for Arc<Bm25Index> {
+impl Bm25Source for Arc<Bm25Index> {
     fn bm25_search(
         &self,
         q: Bm25Query,
-    ) -> Box<dyn std::future::Future<Output = Result<Bm25Result, PartisyError>> + Send + '_> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Bm25Result, PartisyError>> + Send + '_>,
+    > {
         // BM25 搜索是同步的，但 trait 要求返回 Future
         let bm25 = self.clone();
         Box::pin(async move { bm25.search(q) })
@@ -209,7 +212,7 @@ impl hybrid::Bm25Source for Arc<Bm25Index> {
 
 // ─── 实现 hybrid::VectorSource（用于 HybridSearch）──────────────────────────
 
-impl hybrid::VectorSource for Arc<VectorStore> {
+impl VectorSource for Arc<VectorStore> {
     /// 文字查询向量搜索（fallback：返回空结果，要求调用方提供 query 向量）。
     fn vector_search(
         &self,
@@ -227,11 +230,7 @@ impl hybrid::VectorSource for Arc<VectorStore> {
         kind: VectorKind,
         limit: usize,
     ) -> Result<Vec<VectorHit>, PartisyError> {
-        let vk = match kind {
-            VectorKind::TextDense => Vk::TextDense,
-            VectorKind::ImageDense => Vk::ImageDense,
-        };
-        self.search(query_vector, vk, limit)
+        self.search(query_vector, kind, limit)
     }
 }
 

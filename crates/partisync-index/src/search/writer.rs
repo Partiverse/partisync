@@ -6,13 +6,12 @@
 //! 3. 增量 upsert 语义（幂等，updated_ns 标记版本）
 //! 4. rebuild（全量从 sidecar_items 重读）
 
-use std::path::Path;
 use std::sync::Arc;
 
 use partisync_core::error::{PartisyError, Severity};
 
-use super::bm25::{self, Bm25Index, IndexedDoc};
-use super::vector::{self, VectorKind, VectorStore};
+use super::bm25::{Bm25Index, IndexedDoc};
+use super::vector::{VectorKind, VectorStore};
 
 /// 索引写入器门面（SPEC §5）。
 ///
@@ -39,8 +38,8 @@ impl IndexWriter {
     pub async fn upsert_content(
         &self,
         content_id: &str,
-        sidecar_store: &SidecarReader,
-        graph_store: &GraphReader,
+        sidecar_store: &dyn SidecarReader,
+        graph_store: &dyn GraphReader,
     ) -> Result<(), IndexError> {
         // 1. 读取 sidecar_items（OCR / transcript / embed 产物）
         let items = sidecar_store
@@ -88,8 +87,7 @@ impl IndexWriter {
         if let Some(artifact) = embed_artifact {
             // artifact 格式："fs:<content_id>/embed_text_dense.bin"
             if let Some(path_str) = artifact.strip_prefix("fs:") {
-                Self::load_and_upsert_vectors(&self.vector, content_id, path_str)
-                    .map_err(IndexError::Vector)?;
+                Self::load_and_upsert_vectors(&self.vector, content_id, path_str)?;
             }
         }
 
@@ -103,8 +101,8 @@ impl IndexWriter {
     pub async fn upsert_batch(
         &self,
         content_ids: &[String],
-        sidecar_store: &SidecarReader,
-        graph_store: &GraphReader,
+        sidecar_store: &dyn SidecarReader,
+        graph_store: &dyn GraphReader,
     ) -> Result<(), IndexError> {
         let mut docs = Vec::with_capacity(content_ids.len());
 
@@ -190,8 +188,8 @@ impl IndexWriter {
     /// clear / commit 错误 → Fatal。
     pub async fn rebuild_index(
         &self,
-        sidecar_store: &SidecarReader,
-        graph_store: &GraphReader,
+        sidecar_store: &dyn SidecarReader,
+        graph_store: &dyn GraphReader,
     ) -> Result<RebuildReport, IndexError> {
         let start = std::time::Instant::now();
 
@@ -225,7 +223,7 @@ impl IndexWriter {
         content_id: &str,
         artifact_path: &str,
     ) -> Result<(), IndexError> {
-        let vecs = Self::load_vector_from_artifact(artifact_path).map_err(IndexError::Vector)?;
+        let vecs = Self::load_vector_from_artifact(artifact_path)?;
         for (kind, vec) in vecs {
             vector
                 .upsert(content_id, kind, &vec)
@@ -282,15 +280,10 @@ impl IndexWriter {
                 ),
             }));
         }
-        let mut vec = vec![0.0f32; count];
-        <byteorder::LittleEndian as byteorder::ReadBytesExt>::read_f32_into(&bytes, &mut vec)
-            .map_err(|e| {
-                IndexError::Vector(PartisyError {
-                    severity: Severity::Fatal,
-                    source: Some(format!("parse f32 vector: {e}").into()),
-                })
-            })?;
-        Ok(vec)
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
     }
 }
 
@@ -443,12 +436,12 @@ impl GraphReader for SqlGraphReader {
 
         let filename = filename.unwrap_or_else(|| content_id.to_string());
 
-        // 取 tags
+        // 取 tags（entry_tag 以 entry_path 为身份，经 entry.path 关联）
         let tag_rows = sqlx::query(
             "SELECT t.name FROM tag t \
-             JOIN tag_entry te ON te.tag_id = t.id \
-             JOIN entry e ON e.id = te.entry_id \
-             WHERE e.content_id = ?",
+             JOIN entry_tag et ON et.tag_id = t.id \
+             JOIN entry e ON e.path = et.entry_path \
+             WHERE e.content_id = ? AND et.deleted = 0 AND t.deleted = 0",
         )
         .bind(content_id)
         .fetch_all(&self.pool)
@@ -458,7 +451,7 @@ impl GraphReader for SqlGraphReader {
             source: Some(format!("get tags: {e}").into()),
         })?;
 
-        let tags = tag_rows.iter().map(|r| sqlx::Row::get(r, "name")).collect();
+        let tags: Vec<String> = tag_rows.iter().map(|r| sqlx::Row::get(r, "name")).collect();
 
         Ok((filename, tags))
     }
