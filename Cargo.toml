@@ -45,9 +45,15 @@ fjall = "3.1" # ADR-0011（M3-WP01 Hub L1 元数据 LSM）
 openraft = { version = "0.9", features = ["serde", "storage-v2"] } # ADR-0013（M3-WP02 分片复制共识；storage-v2=裁定 2 存储面）
 # ADR-0017（M4-WP01 Sidecar 推理与图像栈批次）：重推理栈 feature 门控默认关
 image = "0.25"
+# M4-WP02 混合检索（调研方案 §5.10 锚定版本）
+tantivy = "0.26"       # BM25 全文索引
+usearch = "2.26"       # HNSW 向量索引（调研方案 §8 表）
+byteorder = "1.5"      # 向量文件二进制解析（writer.rs）
+async-trait = "0.1"    # async trait object（writer.rs SidecarReader/GraphReader trait）
+# ADR-0018（M4-WP02 bge-reranker/fastembed 推理批次，feature 门控默认关）
+fastembed = "=7.0.1" # ai-embed/ai-rerank feature（与 ADR-0017 同版本锚定）
 kamadak-exif = "0.6"
 ort = "=2.0.0-rc.13" # ai-ocr feature（rc 版本精确锁定，上游 2.0 正式后跟进）
-fastembed = "=7.0.1" # ai-embed feature（调研方案 §8 既定选型）
 whisper-rs = "=0.16.0" # ai-transcribe feature（C++/cmake 构建链，开启时才编译）
 symphonia = { version = "0.5", default-features = false, features = ["pcm", "mp3", "flac", "ogg", "vorbis", "wav"] } # ai-transcribe：纯 Rust 音频解码（ADR-0017 批注；0.5 线 API 稳定口径）
 

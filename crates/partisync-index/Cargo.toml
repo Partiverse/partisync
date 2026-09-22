@@ -5,5 +5,27 @@ edition.workspace = true
 license.workspace = true
 description = "检索引擎：tantivy 全文 + usearch 向量 + sidecar 管线调度"
 
+[features]
+default = []
+# ADR-0018：reranker/embedding 推理 feature 门控（默认关，避免 CI 全员背负模型下载）
+index-rerank = ["dep:fastembed"]
+index-embed = ["dep:fastembed"]
+
+[dependencies]
+partisync-core = { path = "../partisync-core", version = "0.1.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+tantivy = { workspace = true }
+usearch = { workspace = true }
+byteorder = { workspace = true }
+async-trait = { workspace = true }
+# reranker 和 embed 模型走同一 fastembed 族（ADR-0018 批次）
+fastembed = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { workspace = true }
+partisync-ai = { path = "../partisync-ai", version = "0.1.0" }
+
+
 [lints]
 workspace = true
