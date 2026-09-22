@@ -1,0 +1,51 @@
+content_id	relpath	filename	title	mime	updated_ns	tags
+c32d2f129f5cb403	d0001_vacation_photos_2024.md	vacation_hawaii_2024_photos.md	2024 夏威夷度假照片整理	text/markdown	1704067200000000000	vacation,travel,hawaii,2024,photos
+80d57e368711c7f8	d0002_argon2_migration_notes.md	argon2_migration_notes.md	Argon2id KDF 参数迁移笔记	text/markdown	1704412800000000000	cryptography,kdf,argon2,security,rust
+bd5b9432ed7a11da	d0003_weekly_status_w42.md	weekly_status_2024_W42.md	2024-W42 周状态	text/markdown	1729036800000000000	work,weekly,status,2024,sync
+02167d4777e1724c	d0004_recipe_gongbao_chicken.md	recipe_gongbao_chicken.md	宫保鸡丁 家常做法	text/markdown	1706659200000000000	cooking,recipe,chinese,sichuan,chicken
+8f211804644b8a0f	d0005_meeting_2024_11_15.md	meeting_2024_11_15_product_review.md	2024-11-15 产品评审会议纪要	text/markdown	1731628800000000000	meeting,product,review,2024,q4
+0a2829d1d9c4d27e	d0006_rust_perf_bench.md	rust_perf_bench_methodology.md	Rust 性能基准方法论	text/markdown	1716240000000000000	rust,performance,bench,criterion,methodology
+5f9fe01c13bac6d6	d0007_llm_eval_methodology.md	llm_evaluation_methodology.md	大模型评估方法论	text/markdown	1721116800000000000	llm,ai,evaluation,benchmark,mt-bench
+b17dd551e2ed8dbd	d0008_sqlx_migration_guide.md	sqlx_dynamic_sql_guide.md	sqlx 0.9 动态 SQL 实战	text/markdown	1704412800000000000	rust,sqlx,sql,database,async
+c1d5748cd212e343	d0009_tantivy_bm25_field_design.md	tantivy_bm25_field_design.md	tantivy BM25 多字段设计	text/markdown	1704412800000000000	tantivy,bm25,search,full-text,indexing
+157fb1e27549d76a	d0010_iroh_p2p_intro.md	iroh_p2p_intro.md	iroh P2P 网络入门	text/markdown	1704412800000000000	iroh,p2p,networking,rust,quic
+659dc7d2b09b0738	d0011_mcp_protocol_overview.md	mcp_protocol_overview.md	MCP 协议概览	text/markdown	1704412800000000000	mcp,protocol,ai-agent,json-rpc,model-context-protocol
+e46aaa90d86e601e	d0012_c2pa_overview.md	c2pa_overview.md	C2PA 内容真实性标准	text/markdown	1726348800000000000	c2pa,content-authenticity,provenance,manifest,crypto
+13014abe5a88a55e	d0013_hiking_yosemite_2024.md	hiking_yosemite_2024_09.md	优胜美地徒步 2024-09	text/markdown	1726099200000000000	hiking,yosemite,travel,2024,california
+93941391fa12076e	d0014_books_to_read_2024.md	books_to_read_2024.md	2024 待读书单	text/markdown	1704067200000000000	books,reading-list,2024,personal
+c2fa927542ce3f48	d0015_personal_journal_2024_10_15.md	journal_2024_10_15.md	个人日记 2024-10-15	text/markdown	1728950400000000000	journal,personal,2024,autumn
+988f2177fc141c68	d0016_nyc_trip_2024.md	nyc_trip_2024_12.md	纽约之行 2024-12	text/markdown	1733366400000000000	travel,nyc,new-york,2024,usa
+407c613142ef49ff	d0017_chinese_news_2024_w42.md	china_news_2024_W42.md	国内新闻周记 2024-W42	text/markdown	1729036800000000000	news,china,weekly,2024,politics
+396d6a75db3d6fcf	d0018_cargo_deny_setup.md	cargo_deny_setup.md	cargo deny 配置实战	text/markdown	1704412800000000000	rust,cargo-deny,supply-chain,security,dependency
+762c1fadfa665d36	d0019_fastembed_bge_m3.md	fastembed_bge_m3.md	fastembed BGE-M3 嵌入实践	text/markdown	1704412800000000000	fastembed,bge-m3,embedding,retrieval,semantic-search
+21271a94716af8a0	d0020_usearch_hnsw_pitfalls.md	usearch_hnsw_pitfalls.md	usearch HNSW 实战坑位	text/markdown	1704412800000000000	usearch,hnsw,vector-search,rust,retrieval
+1ef406d846ecb3aa	d0021_tauri_desktop_evaluation.md	tauri_desktop_evaluation.md	Tauri 桌面应用评估	text/markdown	1715817600000000000	tauri,desktop,rust,frontend,webview
+4743dc8d213721f3	d0022_movie_list_2024.md	movies_watched_2024.md	2024 电影片单	text/markdown	1727568000000000000	movies,films,2024,entertainment,list
+e5eb9a0dade0bbe2	d0023_obsidian_workflow.md	obsidian_workflow.md	Obsidian 笔记工作流	text/markdown	1704067200000000000	daily
+76083e374ac3f25f	d0024_3d_printing_kit.md	3d_printing_kit_setup.md	3D 打印套件搭建	text/markdown	1726348800000000000	3d-printing,bambu,prusa,maker,hobby
+495a966ea74400d4	d0025_japan_kyoto_2024.md	japan_kyoto_2024_spring.md	日本京都之行 2024 春	text/markdown	1711324800000000000	travel,japan,kyoto,2024,sakura
+a4df44dc7236d244	d0026_bouldering_intro.md	bouldering_intro.md	抱石入门	text/markdown	1715817600000000000	bouldering,climbing,sport,fitness,hobby
+1a4362994fc62f00	d0027_brew_tea_gongfu.md	brew_tea_gongfu.md	功夫茶入门	text/markdown	1704067200000000000	tea,gongfu,chinese-tea,hobby,ceremony
+deff37b305b0bc9d	d0028_ai_engineer_interview.md	ai_engineer_interview_prep.md	AI 工程师面试准备	text/markdown	1726348800000000000	interview,ai,machine-learning,career,prep
+f7318ce78aced295	d0029_house_renovation_2025.md	house_renovation_2025.md	装修笔记 2025	text/markdown	1727568000000000000	renovation,home,interior,2025,personal
+e24eb4e98250f7a5	d0030_garden_vegetable_2024.md	garden_vegetable_2024.md	阳台种菜 2024	text/markdown	1711324800000000000	gardening,balcony,vegetables,hobby,2024
+a4d7b1cef8a68a03	d0031_k8s_personal_cluster.md	k8s_personal_cluster.md	家庭 K8s 集群搭建	text/markdown	1715817600000000000	kubernetes,k8s,k3s,homelab,self-hosting
+8586c00e0bd3e7f4	d0032_swift_ios_intro.md	swift_ios_intro.md	SwiftUI iOS 开发入门	text/markdown	1704067200000000000	ios,swift,swiftui,mobile,apple
+bc7653cf253e1461	d0033_cryptocurrency_overview.md	cryptocurrency_overview.md	加密货币入门	text/markdown	1704067200000000000	crypto,bitcoin,ethereum,defi,finance
+f5436b2414d8169e	d0034_machine_learning_basics.md	machine_learning_basics.md	机器学习基础	text/markdown	1704067200000000000	machine-learning,deep-learning,neural-networks,python,ai
+0c5ad8fe08e3a0d3	d0035_kanban_personal.md	kanban_personal_gtd.md	个人 GTD 工作流	text/markdown	1704067200000000000	productivity,kanban,gtd,personal,task-management
+98e12a1be153e0df	d0036_podcast_list_2024.md	podcast_list_2024.md	2024 播客订阅	text/markdown	1704067200000000000	podcast,audio,list,entertainment,2024
+53fbcab11951ba11	d0037_run_training_5k.md	run_5k_training_plan.md	5 公里跑步训练	text/markdown	1711324800000000000	running,fitness,training,5k,sport
+55a6c386e2665723	d0038_rust_async_runtime_compare.md	rust_async_runtime_compare.md	Rust async runtime 对比	text/markdown	1704067200000000000	rust,async,tokio,async-std,runtime
+55f45dd1154a50a0	d0039_remote_work_async_comm.md	remote_work_async_communication.md	远程协作异步沟通	text/markdown	1711324800000000000	remote-work,async,communication,productivity,team
+b4800a7503d83fc3	d0040_data_pipeline_design.md	data_pipeline_design.md	数据管道设计	text/markdown	1715817600000000000	data-engineering,pipeline,etl,streaming,design
+153c0cb9dd57a1c3	d0041_hiking_gear_checklist.md	hiking_gear_checklist.md	徒步装备清单	text/markdown	1704067200000000000	hiking,gear,outdoor,checklist,equipment
+edb86296454eac98	d0042_audio_books_2024.md	audiobooks_2024.md	2024 有声书单	text/markdown	1727568000000000000	audiobooks,listening,books,2024,entertainment
+7239fed62b507467	d0043_open_source_licenses.md	open_source_licenses_comparison.md	开源许可证对比	text/markdown	1704067200000000000	open-source,license,mit,apache,gpl,legal
+c4ca85efe1aec44d	d0044_ai_agent_frameworks.md	ai_agent_frameworks_comparison.md	AI Agent 框架对比	text/markdown	1726348800000000000	ai-agent,langchain,langgraph,autogen,frameworks
+1ab3b26ad171416a	d0045_markdown_writing_style.md	markdown_writing_style_guide.md	...	text/markdown	1704067200000000000	...
+9947c5b72c927705	d0046_performance_optimization.md	performance_optimization_methodology.md	性能优化方法论	text/markdown	1715817600000000000	performance,optimization,profiling,methodology,engineering
+7f0c9f4aa22da03b	d0047_github_actions_patterns.md	github_actions_patterns.md	GitHub Actions 模式	text/markdown	1704067200000000000	github-actions,ci,devops,automation,yaml
+50b43337071b7041	d0048_redis_vs_sqlite.md	redis_vs_sqlite_choice.md	Redis vs SQLite 选择	text/markdown	1704067200000000000	redis,sqlite,database,choice,engineering
+25a3a1c18f3de645	d0049_apollo_graphql_intro.md	graphql_introduction.md	GraphQL 入门	text/markdown	1704067200000000000	graphql,api,rest,typescript,server
+2637d2889cbcab2a	d0050_year_end_review_2024.md	year_end_review_2024.md	2024 年终回顾	text/markdown	1735603200000000000	personal,review,2024,year-end,reflection

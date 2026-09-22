@@ -1,0 +1,593 @@
+{
+  "c32d2f129f5cb403": {
+    "title": "2024 夏威夷度假照片整理",
+    "filename": "vacation_hawaii_2024_photos.md",
+    "tags": [
+      "vacation",
+      "travel",
+      "hawaii",
+      "2024",
+      "photos"
+    ],
+    "path": "d0001_vacation_photos_2024.md"
+  },
+  "80d57e368711c7f8": {
+    "title": "Argon2id KDF 参数迁移笔记",
+    "filename": "argon2_migration_notes.md",
+    "tags": [
+      "cryptography",
+      "kdf",
+      "argon2",
+      "security",
+      "rust"
+    ],
+    "path": "d0002_argon2_migration_notes.md"
+  },
+  "bd5b9432ed7a11da": {
+    "title": "2024-W42 周状态",
+    "filename": "weekly_status_2024_W42.md",
+    "tags": [
+      "work",
+      "weekly",
+      "status",
+      "2024",
+      "sync"
+    ],
+    "path": "d0003_weekly_status_w42.md"
+  },
+  "02167d4777e1724c": {
+    "title": "宫保鸡丁 家常做法",
+    "filename": "recipe_gongbao_chicken.md",
+    "tags": [
+      "cooking",
+      "recipe",
+      "chinese",
+      "sichuan",
+      "chicken"
+    ],
+    "path": "d0004_recipe_gongbao_chicken.md"
+  },
+  "8f211804644b8a0f": {
+    "title": "2024-11-15 产品评审会议纪要",
+    "filename": "meeting_2024_11_15_product_review.md",
+    "tags": [
+      "meeting",
+      "product",
+      "review",
+      "2024",
+      "q4"
+    ],
+    "path": "d0005_meeting_2024_11_15.md"
+  },
+  "0a2829d1d9c4d27e": {
+    "title": "Rust 性能基准方法论",
+    "filename": "rust_perf_bench_methodology.md",
+    "tags": [
+      "rust",
+      "performance",
+      "bench",
+      "criterion",
+      "methodology"
+    ],
+    "path": "d0006_rust_perf_bench.md"
+  },
+  "5f9fe01c13bac6d6": {
+    "title": "大模型评估方法论",
+    "filename": "llm_evaluation_methodology.md",
+    "tags": [
+      "llm",
+      "ai",
+      "evaluation",
+      "benchmark",
+      "mt-bench"
+    ],
+    "path": "d0007_llm_eval_methodology.md"
+  },
+  "b17dd551e2ed8dbd": {
+    "title": "sqlx 0.9 动态 SQL 实战",
+    "filename": "sqlx_dynamic_sql_guide.md",
+    "tags": [
+      "rust",
+      "sqlx",
+      "sql",
+      "database",
+      "async"
+    ],
+    "path": "d0008_sqlx_migration_guide.md"
+  },
+  "c1d5748cd212e343": {
+    "title": "tantivy BM25 多字段设计",
+    "filename": "tantivy_bm25_field_design.md",
+    "tags": [
+      "tantivy",
+      "bm25",
+      "search",
+      "full-text",
+      "indexing"
+    ],
+    "path": "d0009_tantivy_bm25_field_design.md"
+  },
+  "157fb1e27549d76a": {
+    "title": "iroh P2P 网络入门",
+    "filename": "iroh_p2p_intro.md",
+    "tags": [
+      "iroh",
+      "p2p",
+      "networking",
+      "rust",
+      "quic"
+    ],
+    "path": "d0010_iroh_p2p_intro.md"
+  },
+  "659dc7d2b09b0738": {
+    "title": "MCP 协议概览",
+    "filename": "mcp_protocol_overview.md",
+    "tags": [
+      "mcp",
+      "protocol",
+      "ai-agent",
+      "json-rpc",
+      "model-context-protocol"
+    ],
+    "path": "d0011_mcp_protocol_overview.md"
+  },
+  "e46aaa90d86e601e": {
+    "title": "C2PA 内容真实性标准",
+    "filename": "c2pa_overview.md",
+    "tags": [
+      "c2pa",
+      "content-authenticity",
+      "provenance",
+      "manifest",
+      "crypto"
+    ],
+    "path": "d0012_c2pa_overview.md"
+  },
+  "13014abe5a88a55e": {
+    "title": "优胜美地徒步 2024-09",
+    "filename": "hiking_yosemite_2024_09.md",
+    "tags": [
+      "hiking",
+      "yosemite",
+      "travel",
+      "2024",
+      "california"
+    ],
+    "path": "d0013_hiking_yosemite_2024.md"
+  },
+  "93941391fa12076e": {
+    "title": "2024 待读书单",
+    "filename": "books_to_read_2024.md",
+    "tags": [
+      "books",
+      "reading-list",
+      "2024",
+      "personal"
+    ],
+    "path": "d0014_books_to_read_2024.md"
+  },
+  "c2fa927542ce3f48": {
+    "title": "个人日记 2024-10-15",
+    "filename": "journal_2024_10_15.md",
+    "tags": [
+      "journal",
+      "personal",
+      "2024",
+      "autumn"
+    ],
+    "path": "d0015_personal_journal_2024_10_15.md"
+  },
+  "988f2177fc141c68": {
+    "title": "纽约之行 2024-12",
+    "filename": "nyc_trip_2024_12.md",
+    "tags": [
+      "travel",
+      "nyc",
+      "new-york",
+      "2024",
+      "usa"
+    ],
+    "path": "d0016_nyc_trip_2024.md"
+  },
+  "407c613142ef49ff": {
+    "title": "国内新闻周记 2024-W42",
+    "filename": "china_news_2024_W42.md",
+    "tags": [
+      "news",
+      "china",
+      "weekly",
+      "2024",
+      "politics"
+    ],
+    "path": "d0017_chinese_news_2024_w42.md"
+  },
+  "396d6a75db3d6fcf": {
+    "title": "cargo deny 配置实战",
+    "filename": "cargo_deny_setup.md",
+    "tags": [
+      "rust",
+      "cargo-deny",
+      "supply-chain",
+      "security",
+      "dependency"
+    ],
+    "path": "d0018_cargo_deny_setup.md"
+  },
+  "762c1fadfa665d36": {
+    "title": "fastembed BGE-M3 嵌入实践",
+    "filename": "fastembed_bge_m3.md",
+    "tags": [
+      "fastembed",
+      "bge-m3",
+      "embedding",
+      "retrieval",
+      "semantic-search"
+    ],
+    "path": "d0019_fastembed_bge_m3.md"
+  },
+  "21271a94716af8a0": {
+    "title": "usearch HNSW 实战坑位",
+    "filename": "usearch_hnsw_pitfalls.md",
+    "tags": [
+      "usearch",
+      "hnsw",
+      "vector-search",
+      "rust",
+      "retrieval"
+    ],
+    "path": "d0020_usearch_hnsw_pitfalls.md"
+  },
+  "1ef406d846ecb3aa": {
+    "title": "Tauri 桌面应用评估",
+    "filename": "tauri_desktop_evaluation.md",
+    "tags": [
+      "tauri",
+      "desktop",
+      "rust",
+      "frontend",
+      "webview"
+    ],
+    "path": "d0021_tauri_desktop_evaluation.md"
+  },
+  "4743dc8d213721f3": {
+    "title": "2024 电影片单",
+    "filename": "movies_watched_2024.md",
+    "tags": [
+      "movies",
+      "films",
+      "2024",
+      "entertainment",
+      "list"
+    ],
+    "path": "d0022_movie_list_2024.md"
+  },
+  "e5eb9a0dade0bbe2": {
+    "title": "Obsidian 笔记工作流",
+    "filename": "obsidian_workflow.md",
+    "tags": [
+      "daily"
+    ],
+    "path": "d0023_obsidian_workflow.md"
+  },
+  "76083e374ac3f25f": {
+    "title": "3D 打印套件搭建",
+    "filename": "3d_printing_kit_setup.md",
+    "tags": [
+      "3d-printing",
+      "bambu",
+      "prusa",
+      "maker",
+      "hobby"
+    ],
+    "path": "d0024_3d_printing_kit.md"
+  },
+  "495a966ea74400d4": {
+    "title": "日本京都之行 2024 春",
+    "filename": "japan_kyoto_2024_spring.md",
+    "tags": [
+      "travel",
+      "japan",
+      "kyoto",
+      "2024",
+      "sakura"
+    ],
+    "path": "d0025_japan_kyoto_2024.md"
+  },
+  "a4df44dc7236d244": {
+    "title": "抱石入门",
+    "filename": "bouldering_intro.md",
+    "tags": [
+      "bouldering",
+      "climbing",
+      "sport",
+      "fitness",
+      "hobby"
+    ],
+    "path": "d0026_bouldering_intro.md"
+  },
+  "1a4362994fc62f00": {
+    "title": "功夫茶入门",
+    "filename": "brew_tea_gongfu.md",
+    "tags": [
+      "tea",
+      "gongfu",
+      "chinese-tea",
+      "hobby",
+      "ceremony"
+    ],
+    "path": "d0027_brew_tea_gongfu.md"
+  },
+  "deff37b305b0bc9d": {
+    "title": "AI 工程师面试准备",
+    "filename": "ai_engineer_interview_prep.md",
+    "tags": [
+      "interview",
+      "ai",
+      "machine-learning",
+      "career",
+      "prep"
+    ],
+    "path": "d0028_ai_engineer_interview.md"
+  },
+  "f7318ce78aced295": {
+    "title": "装修笔记 2025",
+    "filename": "house_renovation_2025.md",
+    "tags": [
+      "renovation",
+      "home",
+      "interior",
+      "2025",
+      "personal"
+    ],
+    "path": "d0029_house_renovation_2025.md"
+  },
+  "e24eb4e98250f7a5": {
+    "title": "阳台种菜 2024",
+    "filename": "garden_vegetable_2024.md",
+    "tags": [
+      "gardening",
+      "balcony",
+      "vegetables",
+      "hobby",
+      "2024"
+    ],
+    "path": "d0030_garden_vegetable_2024.md"
+  },
+  "a4d7b1cef8a68a03": {
+    "title": "家庭 K8s 集群搭建",
+    "filename": "k8s_personal_cluster.md",
+    "tags": [
+      "kubernetes",
+      "k8s",
+      "k3s",
+      "homelab",
+      "self-hosting"
+    ],
+    "path": "d0031_k8s_personal_cluster.md"
+  },
+  "8586c00e0bd3e7f4": {
+    "title": "SwiftUI iOS 开发入门",
+    "filename": "swift_ios_intro.md",
+    "tags": [
+      "ios",
+      "swift",
+      "swiftui",
+      "mobile",
+      "apple"
+    ],
+    "path": "d0032_swift_ios_intro.md"
+  },
+  "bc7653cf253e1461": {
+    "title": "加密货币入门",
+    "filename": "cryptocurrency_overview.md",
+    "tags": [
+      "crypto",
+      "bitcoin",
+      "ethereum",
+      "defi",
+      "finance"
+    ],
+    "path": "d0033_cryptocurrency_overview.md"
+  },
+  "f5436b2414d8169e": {
+    "title": "机器学习基础",
+    "filename": "machine_learning_basics.md",
+    "tags": [
+      "machine-learning",
+      "deep-learning",
+      "neural-networks",
+      "python",
+      "ai"
+    ],
+    "path": "d0034_machine_learning_basics.md"
+  },
+  "0c5ad8fe08e3a0d3": {
+    "title": "个人 GTD 工作流",
+    "filename": "kanban_personal_gtd.md",
+    "tags": [
+      "productivity",
+      "kanban",
+      "gtd",
+      "personal",
+      "task-management"
+    ],
+    "path": "d0035_kanban_personal.md"
+  },
+  "98e12a1be153e0df": {
+    "title": "2024 播客订阅",
+    "filename": "podcast_list_2024.md",
+    "tags": [
+      "podcast",
+      "audio",
+      "list",
+      "entertainment",
+      "2024"
+    ],
+    "path": "d0036_podcast_list_2024.md"
+  },
+  "53fbcab11951ba11": {
+    "title": "5 公里跑步训练",
+    "filename": "run_5k_training_plan.md",
+    "tags": [
+      "running",
+      "fitness",
+      "training",
+      "5k",
+      "sport"
+    ],
+    "path": "d0037_run_training_5k.md"
+  },
+  "55a6c386e2665723": {
+    "title": "Rust async runtime 对比",
+    "filename": "rust_async_runtime_compare.md",
+    "tags": [
+      "rust",
+      "async",
+      "tokio",
+      "async-std",
+      "runtime"
+    ],
+    "path": "d0038_rust_async_runtime_compare.md"
+  },
+  "55f45dd1154a50a0": {
+    "title": "远程协作异步沟通",
+    "filename": "remote_work_async_communication.md",
+    "tags": [
+      "remote-work",
+      "async",
+      "communication",
+      "productivity",
+      "team"
+    ],
+    "path": "d0039_remote_work_async_comm.md"
+  },
+  "b4800a7503d83fc3": {
+    "title": "数据管道设计",
+    "filename": "data_pipeline_design.md",
+    "tags": [
+      "data-engineering",
+      "pipeline",
+      "etl",
+      "streaming",
+      "design"
+    ],
+    "path": "d0040_data_pipeline_design.md"
+  },
+  "153c0cb9dd57a1c3": {
+    "title": "徒步装备清单",
+    "filename": "hiking_gear_checklist.md",
+    "tags": [
+      "hiking",
+      "gear",
+      "outdoor",
+      "checklist",
+      "equipment"
+    ],
+    "path": "d0041_hiking_gear_checklist.md"
+  },
+  "edb86296454eac98": {
+    "title": "2024 有声书单",
+    "filename": "audiobooks_2024.md",
+    "tags": [
+      "audiobooks",
+      "listening",
+      "books",
+      "2024",
+      "entertainment"
+    ],
+    "path": "d0042_audio_books_2024.md"
+  },
+  "7239fed62b507467": {
+    "title": "开源许可证对比",
+    "filename": "open_source_licenses_comparison.md",
+    "tags": [
+      "open-source",
+      "license",
+      "mit",
+      "apache",
+      "gpl",
+      "legal"
+    ],
+    "path": "d0043_open_source_licenses.md"
+  },
+  "c4ca85efe1aec44d": {
+    "title": "AI Agent 框架对比",
+    "filename": "ai_agent_frameworks_comparison.md",
+    "tags": [
+      "ai-agent",
+      "langchain",
+      "langgraph",
+      "autogen",
+      "frameworks"
+    ],
+    "path": "d0044_ai_agent_frameworks.md"
+  },
+  "1ab3b26ad171416a": {
+    "title": "...",
+    "filename": "markdown_writing_style_guide.md",
+    "tags": [
+      "..."
+    ],
+    "path": "d0045_markdown_writing_style.md"
+  },
+  "9947c5b72c927705": {
+    "title": "性能优化方法论",
+    "filename": "performance_optimization_methodology.md",
+    "tags": [
+      "performance",
+      "optimization",
+      "profiling",
+      "methodology",
+      "engineering"
+    ],
+    "path": "d0046_performance_optimization.md"
+  },
+  "7f0c9f4aa22da03b": {
+    "title": "GitHub Actions 模式",
+    "filename": "github_actions_patterns.md",
+    "tags": [
+      "github-actions",
+      "ci",
+      "devops",
+      "automation",
+      "yaml"
+    ],
+    "path": "d0047_github_actions_patterns.md"
+  },
+  "50b43337071b7041": {
+    "title": "Redis vs SQLite 选择",
+    "filename": "redis_vs_sqlite_choice.md",
+    "tags": [
+      "redis",
+      "sqlite",
+      "database",
+      "choice",
+      "engineering"
+    ],
+    "path": "d0048_redis_vs_sqlite.md"
+  },
+  "25a3a1c18f3de645": {
+    "title": "GraphQL 入门",
+    "filename": "graphql_introduction.md",
+    "tags": [
+      "graphql",
+      "api",
+      "rest",
+      "typescript",
+      "server"
+    ],
+    "path": "d0049_apollo_graphql_intro.md"
+  },
+  "2637d2889cbcab2a": {
+    "title": "2024 年终回顾",
+    "filename": "year_end_review_2024.md",
+    "tags": [
+      "personal",
+      "review",
+      "2024",
+      "year-end",
+      "reflection"
+    ],
+    "path": "d0050_year_end_review_2024.md"
+  }
+}

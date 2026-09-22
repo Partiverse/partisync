@@ -1,0 +1,25 @@
+{"id": "Q01", "text": "夏威夷 度假", "type": "short-keyword", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q02", "text": "2024 年我去看樱花的地方 行程", "type": "long-narrative", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q03", "text": "argon2_migration_notes", "type": "filename-exact", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q04", "text": "kdf 密码学", "type": "tag-keyword", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q05", "text": "travel itinerary California park", "type": "synonym-cross-lang", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q06", "text": "tantivy BM25 多字段", "type": "exact-tech", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q07", "text": "2024 秋季 周报", "type": "time-filter", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q08", "text": "川菜 家常菜 鸡丁", "type": "cooking", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q09", "text": "想读的技术书", "type": "books", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q10", "text": "async rust runtime tokio 选择", "type": "mixed-lang", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q11", "text": "MCP 协议 工具 调用", "type": "protocol", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q12", "text": "supply chain deny advisories 配置", "type": "tech-specific", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q13", "text": "P2P QUIC 节点 中继", "type": "tech-deep", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q14", "text": "usearch HNSW 索引 reserve", "type": "code-pattern", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q15", "text": "性能基准 criterion 火焰图", "type": "perf", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q16", "text": "攀岩 室内 难度 V 字头", "type": "hobby-sport", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q17", "text": "5 公里 训练 心率 间歇", "type": "training-plan", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q18", "text": "今天想了什么 反思", "type": "journal-mood", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q19", "text": "预算 100平 装修 流程", "type": "home-renovation", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q20", "text": "远程团队 异步沟通 文档", "type": "remote-work", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q21", "text": "Tauri WebView 桌面 应用", "type": "framework", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q22", "text": "C2PA", "type": "single-token", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q23", "text": "fastembed BGE 嵌入 向量", "type": "embedding-deep", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q24", "text": "sqlite 嵌入式 关系型", "type": "multi-field", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
+{"id": "Q25", "text": "区块链 以太坊 智能合约 部署", "type": "no-relevant", "limit": 20, "include_transcript": true, "vector_kind": "auto"}
