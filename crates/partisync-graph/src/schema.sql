@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS content (
     id   TEXT PRIMARY KEY,            -- blake3 hex（内容身份，调研方案 §5.3 ContentIdentity）
     size INTEGER NOT NULL,
     mime TEXT,
-    kind TEXT
+    kind TEXT,
+    c2pa TEXT                        -- v15（M4-WP05）：C2PA manifest store report JSON（可空，调研方案 §5.3）
 );
 
 CREATE TABLE IF NOT EXISTS entry (

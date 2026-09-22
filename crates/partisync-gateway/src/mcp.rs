@@ -101,6 +101,7 @@ pub struct SidecarStages {
     pub ocr: String,
     pub transcribe: String,
     pub embed: String,
+    pub c2pa: String, // M4-WP05：管线第六 stage（state=valid/invalid/absent/…）
 }
 
 #[derive(Debug, Serialize)]
@@ -604,6 +605,7 @@ impl McpServerState {
             ocr: stage_status("ocr"),
             transcribe: stage_status("transcribe"),
             embed: stage_status("embed"),
+            c2pa: stage_status("c2pa"),
         };
 
         let tags: Vec<String> = if entry_path.is_empty() {
@@ -1176,7 +1178,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO sidecar_items (content_id, stage, status, detail, updated_ns) VALUES \
              ('c1','embed',2,'dim=768 model=bge-m3',1), \
-             ('c1','ocr',2,NULL,1), ('c1','transcribe',3,NULL,1)",
+             ('c1','ocr',2,NULL,1), ('c1','transcribe',3,NULL,1), \
+             ('c1','c2pa',2,'state=Valid label=urn:uuid:test bytes=456',1)",
         )
         .execute(pool)
         .await
@@ -1202,6 +1205,7 @@ mod tests {
         assert_eq!(v["mime_kind"], "image/jpeg");
         assert_eq!(v["sidecar_stages"]["embed"], "done");
         assert_eq!(v["sidecar_stages"]["transcribe"], "skipped");
+        assert_eq!(v["sidecar_stages"]["c2pa"], "done");
         assert_eq!(v["embedding"]["text_dim"], 768);
         assert_eq!(v["embedding"]["text_model"], "bge-m3");
     }

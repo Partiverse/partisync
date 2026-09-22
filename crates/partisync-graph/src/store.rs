@@ -310,6 +310,11 @@ impl Store {
         let _ = sqlx::raw_sql("ALTER TABLE space_crypto ADD COLUMN kdf_salt BLOB")
             .execute(pool)
             .await;
+        // v15（M4-WP05）：content.c2pa C2PA manifest store report JSON
+        //（新库 schema 已含；旧库防御性补列，duplicate 吞错）
+        let _ = sqlx::raw_sql("ALTER TABLE content ADD COLUMN c2pa TEXT")
+            .execute(pool)
+            .await;
         Ok(())
     }
 

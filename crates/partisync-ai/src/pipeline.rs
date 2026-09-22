@@ -252,10 +252,25 @@ impl Pipeline {
                 .map_err(|e| err("stage 任务中止", e.to_string()))?;
             match outcome {
                 Ok(out) => {
+                    // M4-WP05 裁定 3：c2pa manifest JSON 额外落 content.c2pa
+                    // 列（SQL 级可查）；列写入失败即 stage 失败，不静默丢清单。
+                    let c2pa_json = (row.stage == stage_ids::C2PA)
+                        .then(|| out.blob.clone())
+                        .flatten();
                     let artifact = match out.blob {
                         Some(blob) => Some(self.sink.put(content_id, &row.stage, &blob)?),
                         None => out.artifact,
                     };
+                    if let Some(json_bytes) = c2pa_json {
+                        let json = std::str::from_utf8(&json_bytes)
+                            .map_err(|e| err("c2pa 清单编码", e.to_string()))?;
+                        sqlx::query("UPDATE content SET c2pa = ? WHERE id = ?")
+                            .bind(json)
+                            .bind(content_id)
+                            .execute(store.pool_ref())
+                            .await
+                            .map_err(|e| err("写 content.c2pa", e.to_string()))?;
+                    }
                     items
                         .mark_done(
                             content_id,
