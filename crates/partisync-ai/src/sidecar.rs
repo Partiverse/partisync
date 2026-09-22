@@ -20,15 +20,18 @@ pub mod stage_ids {
     pub const OCR: &str = "ocr";
     pub const TRANSCRIBE: &str = "transcribe";
     pub const EMBED: &str = "embed";
+    pub const C2PA: &str = "c2pa"; // M4-WP05（SPEC 裁定 2）
 }
 
-/// 固定管线次序（stage1 缩略图+EXIF → stage2 OCR → stage3 转写 → stage4 嵌入）。
-pub const STAGE_ORDER: [&str; 5] = [
+/// 固定管线次序（stage1 缩略图+EXIF → stage2 OCR → stage3 转写 →
+/// stage4 嵌入 → stage5 C2PA 校验）。
+pub const STAGE_ORDER: [&str; 6] = [
     stage_ids::THUMBNAIL,
     stage_ids::EXIF,
     stage_ids::OCR,
     stage_ids::TRANSCRIBE,
     stage_ids::EMBED,
+    stage_ids::C2PA,
 ];
 
 /// sidecar_items.status。

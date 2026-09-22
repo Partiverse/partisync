@@ -52,7 +52,7 @@ async fn dedup_savings_unique_counts() {
 
     let enqueued = partisync_ai::sidecar_auto_enqueue(&store).await.unwrap();
     let stats = SidecarStore::new(&store).stats().await.unwrap();
-    let contents = stats.pending / 5; // 5 stage 行/content
+    let contents = stats.pending / partisync_ai::sidecar::STAGE_ORDER.len() as u64; // stage 行/content
     let logical = 120f64;
     let unique = contents as f64;
     let saved = (1.0 - unique / logical) * 100.0;

@@ -30,6 +30,7 @@ pub use sidecar::{
     stage_ids, BlobSink, FsBlobSink, InMemoryBlobSink, ItemStatus, SidecarItemRow, SidecarStats,
     SidecarStore, STAGE_ORDER,
 };
+pub use stages::C2paStage;
 #[cfg(feature = "ai-embed")]
 pub use stages::EmbedStage;
 #[cfg(feature = "ai-ocr")]

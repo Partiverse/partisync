@@ -143,7 +143,10 @@ async fn content_dedup_stage_runs_once() {
     sidecars.ensure_enqueued("c1").await.unwrap();
     sidecars.ensure_enqueued("c1").await.unwrap();
     let stats = sidecars.stats().await.unwrap();
-    assert_eq!(stats.pending, 5, "重复入队 no-op（主键保证）");
+    assert_eq!(
+        stats.pending, 6,
+        "重复入队 no-op（主键保证；M4-WP05 起 6 stage）"
+    );
 
     let thumb = CountingStage::new(stage_ids::THUMBNAIL, MimeKind::Image, Behavior::Ok);
     let loader = InMemoryContentLoader::new([("c1".into(), png_bytes(64, 32))]);
@@ -153,7 +156,7 @@ async fn content_dedup_stage_runs_once() {
     assert_eq!((s2.done, s2.skipped, s2.failed), (0, 0, 0), "重跑全 no-op");
     assert_eq!(thumb.calls(), 1, "stage 恰执行一次");
     let stats = SidecarStore::new(&store).stats().await.unwrap();
-    assert_eq!(stats.pending, 4, "未注册 stage 待后续模型进场补算");
+    assert_eq!(stats.pending, 5, "未注册 stage 待后续模型进场补算");
 }
 
 /// 验收「阶段幂等」：强制重试（pending 复位）重执行，产物字节级稳定、不重复入队。
@@ -390,12 +393,12 @@ fn fs_blob_sink_roundtrip() {
     assert_eq!(sink.get("c1", "embed").unwrap(), None, "缺失返回 None");
 }
 
-/// STAGE_ORDER 固定次序契约（裁定 3）。
+/// STAGE_ORDER 固定次序契约（裁定 3；M4-WP05 起第 6 位为 c2pa 校验）。
 #[test]
 fn stage_order_fixed() {
     assert_eq!(
         STAGE_ORDER,
-        ["thumbnail", "exif", "ocr", "transcribe", "embed"]
+        ["thumbnail", "exif", "ocr", "transcribe", "embed", "c2pa"]
     );
 }
 
@@ -411,20 +414,23 @@ fn item_status_codes() {
 
 // ─── T04：嵌入 + 模型管理 ───────────────────────────────────────────
 
-/// default_stages 组成钉子：五 stage、id 唯一、embed 收尾（T04 后嵌入
-/// 不再是占位）。
+/// default_stages 组成钉子：六 stage、id 唯一、c2pa 收尾（T04 后嵌入
+/// 不再是占位；M4-WP05 追加 c2pa 校验 stage）。
 #[test]
 fn default_stages_composition() {
     let stages = default_stages();
-    assert_eq!(stages.len(), 5);
+    assert_eq!(stages.len(), 6);
     let ids: Vec<&str> = stages.iter().map(|s| s.stage()).collect();
     let mut uniq = ids.clone();
     uniq.sort_unstable();
     uniq.dedup();
-    assert_eq!(uniq.len(), 5, "stage id 唯一");
-    assert_eq!(*ids.last().unwrap(), stage_ids::EMBED, "嵌入收尾");
+    assert_eq!(uniq.len(), 6, "stage id 唯一");
+    assert_eq!(*ids.last().unwrap(), stage_ids::C2PA, "c2pa 收尾");
     // 嵌入 stage 具备真实语义（Image/Text 适用），非占位
-    let embed = stages.last().unwrap();
+    let embed = stages
+        .iter()
+        .find(|s| s.stage() == stage_ids::EMBED)
+        .unwrap();
     assert!(embed.applicable(&MimeKind::Text));
     assert!(embed.applicable(&MimeKind::Image));
 }

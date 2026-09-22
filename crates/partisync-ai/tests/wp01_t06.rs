@@ -105,9 +105,10 @@ async fn e2e_scan_enqueue_pipeline_cli_state() {
 
     // 全链状态可查（CLI sidecar-status 口径）：mime 由 loader 按扩展名
     // 兜底（indexer 不写 mime 列）→ PNG 内容 缩略图+嵌入 done、EXIF 降级；
-    // OCR/转写未注册保持 pending（T05 进场补算）
+    // OCR/转写未注册保持 pending（T05 进场补算）；c2pa 本测试管线未注册
+    // 同保持 pending（M4-WP05 起 3 stage/content 未注册 → 2×3=6）
     let st = SidecarStore::new(&store).stats().await.unwrap();
-    assert_eq!(st.pending, 4, "未注册 stage 待补算");
+    assert_eq!(st.pending, 6, "未注册 stage 待补算");
     assert_eq!(st.running, 0);
     assert_eq!(st.done, 2 * 2, "缩略图+嵌入全 done");
     assert_eq!((st.skipped, st.failed), (2, 0), "EXIF no-exif 降级");

@@ -1,6 +1,7 @@
 //! stage 集注册（T05 后五阶段全部实装：feature 开=真实推理栈，
 //! 关=CI fake，同一条 ModelManager 模型缺失降级语义——裁定 5）。
 
+pub mod c2pa;
 pub mod embed;
 pub mod exif;
 pub mod ocr;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 
 use crate::pipeline::{MimeKind, SidecarStage, StageError, StageInput, StageOutput};
 
+pub use c2pa::C2paStage;
 #[cfg(feature = "ai-embed")]
 pub use embed::EmbedStage;
 pub use embed::{default_embed_stage, FakeEmbedStage, FAKE_EMBED_DIM};
@@ -51,8 +53,8 @@ impl SidecarStage for PlaceholderStage {
     }
 }
 
-/// 默认 stage 集（T05 后五阶段全部实装）：feature 开=真实推理栈，
-/// 关=CI fake（同一条模型缺失降级语义）。
+/// 默认 stage 集（五阶段 + C2PA 校验，M4-WP05）：推理栈 feature 开=真实，
+/// 关=CI fake（同一条模型缺失降级语义）；c2pa 纯 Rust 轻栈不门控（ADR-0020）。
 #[must_use]
 pub fn default_stages() -> Vec<Arc<dyn SidecarStage>> {
     vec![
@@ -61,5 +63,6 @@ pub fn default_stages() -> Vec<Arc<dyn SidecarStage>> {
         default_ocr_stage(),
         default_transcribe_stage(),
         default_embed_stage(),
+        Arc::new(C2paStage::new()),
     ]
 }
