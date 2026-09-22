@@ -128,7 +128,8 @@ Apple Clang 16 编译 numkong SME 探针 TU 时 clang 前端直接崩溃（Abort
 |---|---|
 | **P0 MCP e2e L1（协议层）** | ✅ **闭合**（`ce515aa`）——`partisync-mcp` bin + rmcp client 真实 spawn 子进程：initialize → tools/list → 五工具全链 → 未知工具协议错误，测试 `mcp_stdio_full_chain` 绿。途中修复：`RunningService` drop 即 shutdown（bin 须 `waiting()`） |
 | **P0 MCP e2e L2（DoD 场景）** | ✅ **五步链路全绿**（真实库 INBOX 2914 文件/2797 content）：asset_read（元数据+sidecar 状态）→ asset_organize preview（无事务 ID 不落库）→ commit（`txn_e45b7471`）→ 回读 tags=`["e2e-verified"]` + DB 落库实证（entry_tag deleted=0）→ dataset_export JSONL 落盘（content_id 匹配）。**执行方式披露**：stdio JSON-RPC 直驱 partisync-mcp（协议真实）；ZCode 宿主自动连接未通（见下） |
-| P0 ZCode 宿主 MCP 连接 | ◐ 排查结论：workspace `.zcode/config.json` 未被 Desktop 宿主读取为 MCP 源（日志无 server 启动记录，`listWorkspaceMcpServerStatuses` 有调用但 partisync 未入 runtime 列表——pitfall「desktop-managed 列表覆盖文件」）；已改注册 **user scope** `~/.zcode/cli/config.json`（该文件已确认被宿主读取），待新会话在 Settings → MCP 验证 |
+| P0 ZCode 宿主 MCP 连接 | ✅ **闭合**——两步修复后宿主真实连接：(1) 注册从 workspace `.zcode/config.json` 改至 user scope `~/.zcode/cli/config.json`（Desktop 不读 workspace 文件作 MCP 源）；(2) tools/list 补 SEP-2549 必填字段 `ttlMs`/`cacheScope`（宿主 zod schema 严格校验，rmcp 对 None 省略序列化导致 `invalid_type`——`1a8bb47`）。终态：新会话工具列表出现 `mcp__partisync__*`，Agent 自主调用 `asset_read` 成功返回 `e2e-verified` 标签与 sidecar 状态 |
 | 遗留发现 | `LocalContentLoader` 对 DB 有记录但文件已删的 content（INBOX/temp 下 .tmp）整批 fatal 而非跳过——L2 建库时手动清理 1 条幽灵记录绕过；skip 语义修复留待后续任务 |
 
-**L2 DoD 结论**：归类→预览→提交→导出 manifest 完整链路在真实资产库上验收通过（含落盘产物实证）。
+**L2 DoD 结论**：归类→预览→提交→导出 manifest 完整链路在真实资产库上验收通过（含落盘产物实证）；
+**宿主真实验收通过**（GLM Agent 经 ZCode MCP 集成自主调用工具）。WP03 P0 开放项全部闭合。
