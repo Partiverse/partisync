@@ -6,12 +6,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use partisync_core::Ulid;
 use rmcp::handler::server::{ServerHandler, ServerHandlerEvent};
 use rmcp::transport::io::stdio;
 use rmcp::{server, Tool, ToolCall, ToolCallResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -270,7 +273,7 @@ impl McpServerState {
         });
         let graph_pool = SqlitePoolOptions::new()
             .max_connections(4)
-            .connect(&format!("sqlite:{}?mode=ro", graph_db_path.display()))
+            .connect(&format!("sqlite:{}", graph_db_path.display()))
             .await?;
         Ok(Self {
             index_engine: Arc::new(RwLock::new(None)),
@@ -704,13 +707,19 @@ impl McpServerState {
         .into())
     }
 
-    /// asset_organize 实现（桩，待 T04 graph txn 接入）。
+    /// asset_organize 实现——标签管理 + 软删除。
+    ///
+    /// preview_only=true：只返回操作计划，不写入。
+    /// preview_only=false：立即写入 graph.db（add_tag/remove_tag/set_tag/delete）。
     async fn asset_organize(&self, args: &JsonValue) -> ToolCallResult {
         let input: AssetOrganizeInput = match serde_json::from_value(args.clone()) {
             Ok(v) => v,
             Err(e) => return Err(server::Error::InvalidParams(e.to_string()).into()),
         };
 
+        let pool = self.graph_pool();
+
+        // 构建预览效果描述（预览和执行都复用同一份描述）
         let planned: Vec<PlannedOp> = input
             .operations
             .iter()
@@ -753,7 +762,168 @@ impl McpServerState {
             .into());
         }
 
-        // TODO(T04): write to graph.asset_txn table
+        // 实际执行写入
+        for op in &input.operations {
+            let result = match op.action.as_str() {
+                "add_tag" => {
+                    let tag_name = op.value.as_deref().unwrap_or("").trim();
+                    if tag_name.is_empty() {
+                        continue;
+                    }
+                    // 查找 tag_id（若不存在则创建）
+                    let tag_id: Option<String> = sqlx::query_scalar(
+                        "SELECT id FROM tag WHERE name = ? AND deleted = 0 LIMIT 1",
+                    )
+                    .bind(tag_name)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|e| server::Error::InternalError(format!("tag lookup: {e}")))?;
+
+                    let tag_id = match tag_id {
+                        Some(id) => id,
+                        None => {
+                            let new_id = Ulid::new().to_string();
+                            sqlx::query("INSERT INTO tag (id, space_id, name, deleted, updated_hlc) VALUES (?, 'default', ?, 0, NULL)")
+                                .bind(&new_id)
+                                .bind(tag_name)
+                                .execute(pool)
+                                .await
+                                .map_err(|e| server::Error::InternalError(format!("create tag: {e}")))?;
+                            new_id
+                        }
+                    };
+
+                    // 获取 entry_path
+                    let entry_path: Option<String> =
+                        sqlx::query_scalar("SELECT path FROM entry WHERE content_id = ? LIMIT 1")
+                            .bind(&op.content_id)
+                            .fetch_optional(pool)
+                            .await
+                            .map_err(|e| {
+                                server::Error::InternalError(format!("entry path: {e}"))
+                            })?;
+
+                    if let Some(path) = entry_path {
+                        // INSERT OR IGNORE 防止重复
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO entry_tag (tag_id, entry_path, deleted, updated_hlc) VALUES (?, ?, 0, NULL)",
+                        )
+                        .bind(&tag_id)
+                        .bind(&path)
+                        .execute(pool)
+                        .await
+                        .map_err(|e| server::Error::InternalError(format!("add tag: {e}")))?;
+                    }
+                    Ok(())
+                }
+                "remove_tag" => {
+                    let tag_name = op.value.as_deref().unwrap_or("").trim();
+                    if tag_name.is_empty() {
+                        continue;
+                    }
+                    // 获取 entry_path
+                    let entry_path: Option<String> =
+                        sqlx::query_scalar("SELECT path FROM entry WHERE content_id = ? LIMIT 1")
+                            .bind(&op.content_id)
+                            .fetch_optional(pool)
+                            .await
+                            .map_err(|e| {
+                                server::Error::InternalError(format!("entry path: {e}"))
+                            })?;
+
+                    if let Some(path) = entry_path {
+                        sqlx::query(
+                            "UPDATE entry_tag SET deleted = 1, updated_hlc = NULL WHERE tag_id = (SELECT id FROM tag WHERE name = ? AND deleted = 0) AND entry_path = ?",
+                        )
+                        .bind(tag_name)
+                        .bind(&path)
+                        .execute(pool)
+                        .await
+                        .map_err(|e| server::Error::InternalError(format!("remove tag: {e}")))?;
+                    }
+                    Ok(())
+                }
+                "set_tag" => {
+                    // 等价于 remove_tag + add_tag（软替换）
+                    let tag_name = op.value.as_deref().unwrap_or("").trim();
+                    if tag_name.is_empty() {
+                        continue;
+                    }
+                    let entry_path: Option<String> =
+                        sqlx::query_scalar("SELECT path FROM entry WHERE content_id = ? LIMIT 1")
+                            .bind(&op.content_id)
+                            .fetch_optional(pool)
+                            .await
+                            .map_err(|e| {
+                                server::Error::InternalError(format!("entry path: {e}"))
+                            })?;
+
+                    if let Some(path) = entry_path {
+                        // 软删除现有标签
+                        sqlx::query(
+                            "UPDATE entry_tag SET deleted = 1, updated_hlc = NULL WHERE entry_path = ?",
+                        )
+                        .bind(&path)
+                        .execute(pool)
+                        .await
+                        .map_err(|e| server::Error::InternalError(format!("clear tags: {e}")))?;
+
+                        // 查找或创建目标 tag
+                        let tag_id: Option<String> = sqlx::query_scalar(
+                            "SELECT id FROM tag WHERE name = ? AND deleted = 0 LIMIT 1",
+                        )
+                        .bind(tag_name)
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(|e| server::Error::InternalError(format!("tag lookup: {e}")))?;
+
+                        let tag_id = match tag_id {
+                            Some(id) => id,
+                            None => {
+                                let new_id = Ulid::new().to_string();
+                                sqlx::query(
+                                    "INSERT INTO tag (id, space_id, name, deleted, updated_hlc) VALUES (?, 'default', ?, 0, NULL)",
+                                )
+                                .bind(&new_id)
+                                .bind(tag_name)
+                                .execute(pool)
+                                .await
+                                .map_err(|e| server::Error::InternalError(format!("create tag: {e}")))?;
+                                new_id
+                            }
+                        };
+
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO entry_tag (tag_id, entry_path, deleted, updated_hlc) VALUES (?, ?, 0, NULL)",
+                        )
+                        .bind(&tag_id)
+                        .bind(&path)
+                        .execute(pool)
+                        .await
+                        .map_err(|e| server::Error::InternalError(format!("set tag: {e}")))?;
+                    }
+                    Ok(())
+                }
+                "delete" => {
+                    // 软删除 entry（标记为 placeholder，content 不删除）
+                    sqlx::query("UPDATE entry SET state = 1 WHERE content_id = ?")
+                        .bind(&op.content_id)
+                        .execute(pool)
+                        .await
+                        .map_err(|e| server::Error::InternalError(format!("delete: {e}")))?;
+                    Ok(())
+                }
+                _ => Err(server::Error::InvalidParams(format!(
+                    "unknown action: {}",
+                    op.action
+                ))),
+            };
+
+            if let Err(e) = result {
+                return Err(e);
+            }
+        }
+
         let txn_id = format!("txn_{}", uuid::Uuid::new_v4());
         Ok(serde_json::to_value(AssetOrganizeOutput {
             planned,
@@ -764,15 +934,114 @@ impl McpServerState {
         .into())
     }
 
-    /// dataset_export 实现（桩，待 T04 manifest writer）。
-    async fn dataset_export(&self, _args: &JsonValue) -> ToolCallResult {
-        // TODO(T04): implement manifest writer
+    /// dataset_export 实现——流式写 JSONL manifest。
+    ///
+    /// content_ids 非空时按 ID 精确导出；空时按 filter 过滤。
+    /// include_vectors=true 时 embedding info 仅记录维度/模型（不含原始向量）。
+    async fn dataset_export(&self, args: &JsonValue) -> ToolCallResult {
+        let input: DatasetExportInput = match serde_json::from_value(args.clone()) {
+            Ok(v) => v,
+            Err(e) => return Err(server::Error::InvalidParams(e.to_string()).into()),
+        };
+
+        let pool = self.graph_pool();
+
+        // 构建 WHERE 子句
+        let mut conditions = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+
+        if let Some(ref ids) = input.content_ids {
+            if !ids.is_empty() {
+                let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+                conditions.push(format!("c.id IN ({})", placeholders.join(",")));
+                params.extend(ids.clone());
+            }
+        }
+        if let Some(ref filter) = input.filter {
+            if let Some(ref mime) = filter.mime_kind {
+                conditions.push("c.mime LIKE ?".to_string());
+                params.push(format!("{}%", mime.trim_end_matches('*')));
+            }
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        // 查询内容
+        let query = format!(
+            "SELECT c.id, c.size, c.mime, e.name, e.path, e.mtime_ns \
+             FROM content c \
+             JOIN entry e ON e.content_id = c.id \
+             {where_clause} \
+             LIMIT 10000",
+        );
+
+        #[derive(Debug, sqlx::FromRow)]
+        struct ExportRow {
+            id: String,
+            size: i64,
+            mime: Option<String>,
+            name: String,
+            path: String,
+            mtime_ns: i64,
+        }
+
+        let rows: Vec<ExportRow> = sqlx::query_as(&query)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| server::Error::InternalError(format!("export query: {e}")))?;
+
+        // 写入临时 JSONL 文件
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let manifest_path = format!("/tmp/partisync_export_{}.jsonl", timestamp);
+        let mut file = File::create(&manifest_path)
+            .await
+            .map_err(|e| server::Error::InternalError(format!("create file: {e}")))?;
+
+        let mut record_count = 0u64;
+        let mut total_bytes = 0u64;
+
+        for row in &rows {
+            let record = serde_json::json!({
+                "content_id": row.id,
+                "name": row.name,
+                "path": row.path,
+                "mime_kind": row.mime,
+                "size_bytes": row.size,
+                "mtime_ns": row.mtime_ns,
+                "embedding": input.include_vectors.then(|| serde_json::json!({
+                    "note": "vector data not included in export"
+                })),
+            });
+
+            let line = serde_json::to_string(&record)
+                .map_err(|e| server::Error::InternalError(format!("serialize: {e}")))?;
+            file.write_all(line.as_bytes())
+                .await
+                .map_err(|e| server::Error::InternalError(format!("write: {e}")))?;
+            file.write_all(b"\n")
+                .await
+                .map_err(|e| server::Error::InternalError(format!("write newline: {e}")))?;
+
+            record_count += 1;
+            total_bytes += row.size;
+        }
+
+        file.flush()
+            .await
+            .map_err(|e| server::Error::InternalError(format!("flush: {e}")))?;
+
+        let expires_at_ns =
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) + 86_400_000_000_000; // 24h
+
         Ok(serde_json::to_value(DatasetExportOutput {
-            manifest_path: "/tmp/partisync_export.jsonl".to_string(),
-            record_count: 0,
-            total_bytes: 0,
-            expires_at_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                + 86_400_000_000_000,
+            manifest_path,
+            record_count,
+            total_bytes,
+            expires_at_ns,
         })
         .unwrap()
         .into())
