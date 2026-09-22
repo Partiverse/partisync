@@ -34,9 +34,13 @@ yanked = "deny"
 # ADR-0016（2026-09-21）：iroh/iroh-blobs 传递链 unmaintained 三条——
 # atomic-polyfill(heapless→postcard)、paste(netdev→iroh)、proc-macro-error(genawaiter→bao-tree)；
 # 均无已知漏洞、无安全升级路径，上游切换后撤销。
+# ADR-0020（2026-09-22）：RUSTSEC-2023-0071 rsa Marvin Attack（PKCS#1 v1.5 解密
+# 时序侧信道，私钥运算）——本仓库经 c2pa 仅做签名**验证**（公钥运算），不可达；
+# 上游 RustCrypto #626 立场：无修复版本。撤销条件 = rsa 发布修复版或 c2pa 弃用 rsa。
 ignore = [
     "RUSTSEC-2024-0384", # ADR-0014
     "RUSTSEC-2023-0089", # ADR-0016
     "RUSTSEC-2024-0436", # ADR-0016
     "RUSTSEC-2024-0370", # ADR-0016
+    "RUSTSEC-2023-0071", # ADR-0020
 ]

@@ -59,6 +59,9 @@ whisper-rs = "=0.16.0" # ai-transcribe feature（C++/cmake 构建链，开启时
 symphonia = { version = "0.5", default-features = false, features = ["pcm", "mp3", "flac", "ogg", "vorbis", "wav"] } # ai-transcribe：纯 Rust 音频解码（ADR-0017 批注；0.5 线 API 稳定口径）
 # ADR-0019（M4-WP03 MCP Server 依赖批次）：rmcp = 精确锁定 2026-07-28 spec
 rmcp = "=3.4.0"
+# ADR-0020（M4-WP05 C2PA）：=0.90.22（0.91 需 rustc 1.96 > 钉子 1.94）；
+# 关 default（openssl + 4 套 http），纯 Rust 校验栈 rust_native_crypto
+c2pa = { version = "=0.90.22", default-features = false, features = ["rust_native_crypto"] }
 
 [workspace.lints.rust]
 # 安全政策（执行方案 §5.2）：默认全局禁止 unsafe；确需 unsafe 的 crate 必须在

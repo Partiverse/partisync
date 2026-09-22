@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 blake3 = { workspace = true } # ADR-0002：模型清单 blake3 钉版校验（models.rs）
 image = { workspace = true }
 kamadak-exif = { workspace = true }
+c2pa = { workspace = true } # ADR-0020：C2PA 摄取校验（纯 Rust 轻栈，不门控）
 ort = { workspace = true, optional = true }
 fastembed = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
