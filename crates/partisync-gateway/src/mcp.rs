@@ -3,6 +3,7 @@
 //! 工具清单：asset_search / asset_read / asset_organize / dataset_export / job_status
 //! 传输：stdio（RMCP 推荐），无连接状态。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::handler::server::{ServerHandler, ServerHandlerEvent};
@@ -10,6 +11,7 @@ use rmcp::transport::io::stdio;
 use rmcp::{server, Tool, ToolCall, ToolCallResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use tokio::sync::RwLock;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -228,6 +230,20 @@ pub struct JobInfo {
     pub error: Option<String>,
 }
 
+/// Graph `jobs` 行（内部用）。
+#[derive(Debug, sqlx::FromRow)]
+struct JobRow {
+    id: String,
+    kind: String,
+    status: i64,
+    root: String,
+    done_files: i64,
+    checkpoint: Option<String>,
+    error: Option<String>,
+    created_ns: i64,
+    updated_ns: i64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MCP Server 状态
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,8 +251,38 @@ pub struct JobInfo {
 /// MCP Server 全局状态。
 pub struct McpServerState {
     /// 索引引擎（只读查询）。
-    pub index_engine: Arc<RwLock<Option<partisync_index::search::engine::IndexEngine>>>,
-    // 注意：graph/ai 接入待 T03/T04
+    index_engine: Arc<RwLock<Option<partisync_index::search::engine::IndexEngine>>>,
+    /// Graph SQLite 连接池（只读查询）。
+    graph_pool: SqlitePool,
+}
+
+impl McpServerState {
+    /// 创建并初始化 MCP Server 状态。
+    ///
+    /// `graph_db_path` 默认 `~/.partisync/graph.db`。
+    /// 索引引擎需外部调用者通过 `index_engine()` 访问。
+    pub async fn new(graph_db_path: Option<PathBuf>) -> Result<Self, sqlx::Error> {
+        let graph_db_path = graph_db_path.unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".partisync")
+                .join("graph.db")
+        });
+        let graph_pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect(&format!("sqlite:{}?mode=ro", graph_db_path.display()))
+            .await?;
+        Ok(Self {
+            index_engine: Arc::new(RwLock::new(None)),
+            graph_pool,
+        })
+    }
+
+    /// 返回 Graph 连接池引用。
+    #[must_use]
+    pub fn graph_pool(&self) -> &SqlitePool {
+        &self.graph_pool
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -502,31 +548,157 @@ impl McpServerState {
         .into())
     }
 
-    /// asset_read 实现（桩，待 T03 graph 接入）。
+    /// asset_read 实现——查询 graph.content + entry + sidecar_items + tags。
     async fn asset_read(&self, args: &JsonValue) -> ToolCallResult {
         let input: AssetReadInput = match serde_json::from_value(args.clone()) {
             Ok(v) => v,
             Err(e) => return Err(server::Error::InvalidParams(e.to_string()).into()),
         };
 
-        // TODO(T03): query graph.content + sidecar_items tables
+        let pool = self.graph_pool();
+
+        // 1. 查询 content 表
+        #[derive(Debug, sqlx::FromRow)]
+        struct ContentRow {
+            id: String,
+            size: i64,
+            mime: Option<String>,
+        }
+        let content: Option<ContentRow> =
+            sqlx::query_as("SELECT id, size, mime FROM content WHERE id = ?")
+                .bind(&input.content_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| server::Error::InternalError(format!("content query: {e}")))?;
+
+        let (mime_kind, size_bytes) = match content {
+            Some(c) => (c.mime.unwrap_or_default(), c.size),
+            None => {
+                return Err(server::Error::InvalidParams(format!(
+                    "content_id '{}' not found",
+                    input.content_id
+                ))
+                .into());
+            }
+        };
+
+        // 2. 查询 entry 表（取任意一个指向该 content 的 entry）
+        #[derive(Debug, sqlx::FromRow)]
+        struct EntryRow {
+            id: String,
+            name: String,
+            mtime_ns: i64,
+        }
+        let entry: Option<EntryRow> =
+            sqlx::query_as("SELECT id, name, mtime_ns FROM entry WHERE content_id = ? LIMIT 1")
+                .bind(&input.content_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| server::Error::InternalError(format!("entry query: {e}")))?;
+
+        let (entry_id, name, updated_ns) = match entry {
+            Some(e) => (e.id, e.name, e.mtime_ns),
+            None => (String::new(), String::new(), 0),
+        };
+
+        // 3. 查询 sidecar_items 表
+        #[derive(Debug, sqlx::FromRow)]
+        struct SidecarRow {
+            stage: String,
+            status: i64,
+            detail: Option<String>,
+            updated_ns: i64,
+        }
+        let stages: Vec<SidecarRow> = sqlx::query_as(
+            "SELECT stage, status, detail, updated_ns FROM sidecar_items WHERE content_id = ?",
+        )
+        .bind(&input.content_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| server::Error::InternalError(format!("sidecar query: {e}")))?;
+
+        let stage_status = |s: &str| -> String {
+            stages
+                .iter()
+                .find(|r| r.stage == s)
+                .map(|r| match r.status {
+                    0 => "pending",
+                    1 => "running",
+                    2 => "done",
+                    3 => "skipped",
+                    4 => "failed",
+                    _ => "unknown",
+                })
+                .unwrap_or("not_started")
+                .to_string()
+        };
+
+        let sidecar_stages = SidecarStages {
+            thumbnail: stage_status("thumbnail"),
+            exif: stage_status("exif"),
+            ocr: stage_status("ocr"),
+            transcribe: stage_status("transcribe"),
+            embed: stage_status("embed"),
+        };
+
+        // 4. 查询 tags（通过 entry_tag JOIN tag）
+        #[derive(Debug, sqlx::FromRow)]
+        struct TagRow {
+            name: String,
+        }
+        let tags: Vec<String> = if entry_id.is_empty() {
+            vec![]
+        } else {
+            sqlx::query_scalar::<_, String>(
+                "SELECT t.name FROM tag t
+                 JOIN entry_tag et ON et.tag_id = t.id
+                 WHERE et.entry_path = (
+                     SELECT path FROM entry WHERE id = ?
+                 ) AND et.deleted = 0",
+            )
+            .bind(&entry_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+        };
+
+        // 5. 从 detail 解析 embedding 元数据（artifact 列引用向量文件）
+        let embedding = stages
+            .iter()
+            .find(|r| r.stage == "embed" && r.status == 2 && r.detail.is_some())
+            .map(|r| {
+                let detail = r.detail.as_deref().unwrap_or("");
+                // detail 格式: "dim=N model=X" 或路径引用
+                let text_dim = (|| {
+                    detail
+                        .split_whitespace()
+                        .find(|w| w.starts_with("dim="))
+                        .and_then(|w| w.get(4..))
+                        .and_then(|s| s.parse::<u32>().ok())
+                })();
+                let text_model = detail
+                    .split_whitespace()
+                    .find(|w| w.starts_with("model="))
+                    .map(|w| w.get(6..).unwrap_or("").to_string());
+                EmbeddingInfo {
+                    text_dim,
+                    text_model,
+                    image_dim: None,
+                    image_model: None,
+                }
+            });
+
         Ok(serde_json::to_value(AssetReadOutput {
             content_id: input.content_id,
-            entry_id: "".to_string(),
-            name: "".to_string(),
-            mime_kind: "".to_string(),
-            size_bytes: 0,
+            entry_id,
+            name,
+            mime_kind,
+            size_bytes,
             created_ns: 0,
-            updated_ns: 0,
-            tags: vec![],
-            sidecar_stages: SidecarStages {
-                thumbnail: "unknown".to_string(),
-                exif: "unknown".to_string(),
-                ocr: "unknown".to_string(),
-                transcribe: "unknown".to_string(),
-                embed: "unknown".to_string(),
-            },
-            embedding: None,
+            updated_ns,
+            tags,
+            sidecar_stages,
+            embedding,
         })
         .unwrap()
         .into())
@@ -606,10 +778,81 @@ impl McpServerState {
         .into())
     }
 
-    /// job_status 实现（桩，待 T03 jobs 表接入）。
-    async fn job_status(&self, _args: &JsonValue) -> ToolCallResult {
-        // TODO(T03): query jobs.jobs table
-        Ok(serde_json::to_value(JobStatusOutput { jobs: vec![] })
+    /// job_status 实现——查询 graph.jobs 表（kind='sidecar'）。
+    async fn job_status(&self, args: &JsonValue) -> ToolCallResult {
+        let input: JobStatusInput = match serde_json::from_value(args.clone()) {
+            Ok(v) => v,
+            Err(e) => return Err(server::Error::InvalidParams(e.to_string()).into()),
+        };
+
+        let pool = self.graph_pool();
+
+        let jobs: Vec<JobRow> = if let Some(job_id) = &input.job_id {
+            // 按 ID 精确查
+            sqlx::query_as(
+                "SELECT id, kind, status, root, done_files, checkpoint, error, created_ns, updated_ns \
+                 FROM jobs WHERE id = ? AND kind = 'sidecar'",
+            )
+            .bind(job_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| server::Error::InternalError(format!("job query: {e}")))?
+        } else {
+            // 最近 20 个 sidecar 作业
+            sqlx::query_as(
+                "SELECT id, kind, status, root, done_files, checkpoint, error, created_ns, updated_ns \
+                 FROM jobs WHERE kind = 'sidecar' ORDER BY created_ns DESC LIMIT 20",
+            )
+            .fetch_all(pool)
+            .await
+            .map_err(|e| server::Error::InternalError(format!("jobs query: {e}")))?
+        };
+
+        let infos: Vec<JobInfo> = jobs
+            .into_iter()
+            .map(|j| {
+                let status_str = match j.status {
+                    0 => "queued",
+                    1 => "running",
+                    2 => "interrupted",
+                    3 => "done",
+                    4 => "failed",
+                    _ => "unknown",
+                };
+                // 从 checkpoint JSON 解析当前 stage（简化：checkpoint 存 stage 名）
+                let current_stage = j
+                    .checkpoint
+                    .as_ref()
+                    .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+                    .and_then(|v| v.get("stage"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                // 进度：done_files > 0 时估算
+                let progress_pct = if j.status == 3 {
+                    100
+                } else if j.done_files > 0 {
+                    std::cmp::min(99, (j.done_files * 20) as u8) // 简化估算
+                } else {
+                    0
+                };
+
+                JobInfo {
+                    job_id: j.id,
+                    content_id: j.root,
+                    pipeline: "thumb→exif→ocr→transcribe→embed".to_string(),
+                    status: status_str.to_string(),
+                    current_stage,
+                    progress_pct,
+                    started_at_ns: j.created_ns,
+                    updated_at_ns: j.updated_ns,
+                    error: j.error,
+                }
+            })
+            .collect();
+
+        Ok(serde_json::to_value(JobStatusOutput { jobs: infos })
             .unwrap()
             .into())
     }
@@ -624,13 +867,18 @@ impl McpServerState {
 /// `McpServerState` 实现 `ServerHandler`，后者通过 blanket impl
 /// `impl<H: ServerHandler> Service<RoleServer> for H` 自动满足 `Service<RoleServer>`，
 /// 故直接传 state 给 `serve_server`。
-pub async fn run_mcp_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = McpServerState {
-        index_engine: Arc::new(RwLock::new(None)),
-    };
+/// 运行 MCP Server（RMCP stdio 传输）。
+///
+/// `McpServerState` 实现 `ServerHandler`，后者通过 blanket impl
+/// `impl<H: ServerHandler> Service<RoleServer> for H` 自动满足 `Service<RoleServer>`，
+/// 故直接传 state 给 `serve_server`。
+pub async fn run_mcp_server(
+    graph_db_path: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let state = McpServerState::new(graph_db_path)
+        .await
+        .map_err(|e| format!("failed to open graph.db: {e}"))?;
 
-    // McpServerState: ServerHandler → Service<RoleServer> (blanket impl)
-    // RoleServer is just a zero-sized marker type for the server role
     let transport = stdio();
     rmcp::service::serve_server(state, transport).await?;
 
