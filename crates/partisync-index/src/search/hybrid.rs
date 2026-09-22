@@ -150,17 +150,17 @@ impl HybridSearch {
         }
     }
 
-    /// 执行混合检索。
+    /// 执行混合检索（async）。
     ///
     /// # Errors
     /// BM25 / 向量查询错误 → Fatal。
-    pub fn search(&self, req: HybridQuery) -> Result<HybridResult, PartisyError> {
+    pub async fn search(&self, req: HybridQuery) -> Result<HybridResult, PartisyError> {
         let start = std::time::Instant::now();
 
         let limit = req.limit.min(100).max(1);
         let bm25_limit = 100.min(limit * 5); // BM25 top-100 足够 RRF 候选
 
-        // BM25 查询
+        // BM25 查询（async）
         let bm25_result = self
             .bm25
             .bm25_search(bm25::Bm25Query {
@@ -168,20 +168,20 @@ impl HybridSearch {
                 limit: bm25_limit,
                 include_transcript: req.include_transcript,
             })
+            .await
             .map_err(|e| PartisyError {
                 severity: Severity::Fatal,
                 source: Some(format!("bm25 search: {e}").into()),
             })?;
 
-        // 向量查询
+        // 向量查询（同步，用文字查询时走 text→embedding 生成，这里直接返回空）
+        // 实际向量检索由 `search_with_vector` 接收预计算向量
         let vector_kind = match req.vector_kind {
             HybridVectorKind::TextDense => VectorKind::TextDense,
             HybridVectorKind::ImageDense => VectorKind::ImageDense,
-            HybridVectorKind::Auto => VectorKind::TextDense, // TODO: query embedding 自动选择
+            HybridVectorKind::Auto => VectorKind::TextDense,
         };
 
-        // 生成查询向量（暂不支持文字→向量，需要先跑 embedding，这里做占位）
-        // 实际场景：由调用方通过 `search_with_query_vector` 提供 query 向量
         let vector_result = self
             .vector
             .vector_search(&req.query, vector_kind, bm25_limit)
@@ -191,11 +191,11 @@ impl HybridSearch {
             })?;
 
         // RRF 融合
-        let fused = rrf_fuse(&bm25_result.hits, &vector_result.hits);
+        let fused = rrf_fuse(&bm25_result.hits, &vector_result);
         let total = fused.len();
 
         // 取 top-N 做精排
-        let rerank_candidates = fused.into_iter().take(20).collect::<Vec<_>>();
+        let rerank_candidates: Vec<_> = fused.into_iter().take(20).collect();
 
         let hits = if req.use_reranker {
             #[cfg(feature = "index-rerank")]
@@ -257,7 +257,7 @@ impl HybridSearch {
     ///
     /// # Errors
     /// BM25 / 向量查询错误 → Fatal。
-    pub fn search_with_vector(
+    pub async fn search_with_vector(
         &self,
         query_text: &str,
         query_vector: &[f32],
@@ -276,6 +276,7 @@ impl HybridSearch {
                 limit: bm25_limit,
                 include_transcript: req.include_transcript,
             })
+            .await
             .map_err(|e| PartisyError {
                 severity: Severity::Fatal,
                 source: Some(format!("bm25 search: {e}").into()),
@@ -289,10 +290,10 @@ impl HybridSearch {
                 source: Some(format!("vector search: {e}").into()),
             })?;
 
-        let fused = rrf_fuse(&bm25_result.hits, &vector_result.hits);
+        let fused = rrf_fuse(&bm25_result.hits, &vector_result);
         let total = fused.len();
 
-        let rerank_candidates = fused.into_iter().take(20).collect::<Vec<_>>();
+        let rerank_candidates: Vec<_> = fused.into_iter().take(20).collect();
         let hits = rerank_candidates
             .into_iter()
             .map(|(cid, score, hl)| HybridHit {
@@ -495,6 +496,7 @@ mod tests {
                 include_transcript: true,
                 use_reranker: false,
             })
+            .await
             .unwrap();
 
         // c1 同时在 BM25 和 vector 中，RRF 得分最高

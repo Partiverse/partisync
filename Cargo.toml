@@ -50,6 +50,7 @@ tantivy = "0.26"       # BM25 全文索引
 usearch = "2.26"       # HNSW 向量索引（调研方案 §8 表）
 byteorder = "1.5"      # 向量文件二进制解析（writer.rs）
 async-trait = "0.1"    # async trait object（writer.rs SidecarReader/GraphReader trait）
+dirs = "5"             # 默认索引路径解析（engine.rs）
 # ADR-0018（M4-WP02 bge-reranker/fastembed 推理批次，feature 门控默认关）
 fastembed = "=7.0.1" # ai-embed/ai-rerank feature（与 ADR-0017 同版本锚定）
 kamadak-exif = "0.6"

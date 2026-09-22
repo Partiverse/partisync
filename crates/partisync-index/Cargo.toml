@@ -18,6 +18,7 @@ tantivy = { workspace = true }
 usearch = { workspace = true }
 byteorder = { workspace = true }
 async-trait = { workspace = true }
+dirs = { workspace = true }
 # reranker 和 embed 模型走同一 fastembed 族（ADR-0018 批次）
 fastembed = { workspace = true, optional = true }
 

@@ -13,6 +13,7 @@ pub mod search;
 
 pub use search::{
     bm25::{Bm25Hit, Bm25Query, Bm25Result, IndexedDoc},
+    engine::{IndexEngine, IndexEngineConfig},
     hybrid::{HybridHit, HybridQuery, HybridResult, HybridSearch, HybridVectorKind, SearchFilters},
     vector::{VectorHit, VectorKind, VectorStore},
     writer::{IndexError, IndexWriter, RebuildReport},
