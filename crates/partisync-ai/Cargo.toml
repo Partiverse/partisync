@@ -28,8 +28,13 @@ symphonia = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { workspace = true } # SPEC M0-WP00 D2 基准基建
 # e2e（T06）：scan→入队→管线全链走真 indexer
 partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
+
+[[bench]]
+name = "wp01_bench"
+harness = false
 
 [lints]
 workspace = true
