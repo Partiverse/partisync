@@ -3,7 +3,25 @@ name = "partisync-gateway"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "对外网关：FUSE、S3 端点、WebDAV、FTPS、SFTP"
+description = "对外网关：FUSE、S3 端点、WebDAV、FTPS、SFTP、MCP Server"
 
 [lints]
 workspace = true
+
+[dependencies]
+partisync-index = { path = "../partisync-index" }
+partisync-graph = { path = "../partisync-graph" }
+partisync-ai = { path = "../partisync-ai" }
+partisync-core = { path = "../partisync-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+# windows: use server-side-http transport instead of stdio
+[target.'cfg(target_family = "windows")'.dependencies]
+rmcp = { workspace = true, features = ["server", "server-side-http"] }
+

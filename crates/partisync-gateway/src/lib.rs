@@ -1,4 +1,6 @@
-//! 对外网关：FUSE、S3 端点、WebDAV、FTPS、SFTP
+//! 对外网关：FUSE、S3 端点、WebDAV、FTPS、SFTP、MCP Server
 //!
-//! 骨架 crate（M-1 bootstrap，调研方案附录 A）。实现按里程碑推进，
 //! 行为契约见 docs/specs/ 对应工作包规格。
+//! MCP Server: RMCP 2026-07-28 stateless，工具面见 [`mcp`] 模块。
+
+pub mod mcp;

@@ -57,6 +57,8 @@ kamadak-exif = "0.6"
 ort = "=2.0.0-rc.13" # ai-ocr feature（rc 版本精确锁定，上游 2.0 正式后跟进）
 whisper-rs = "=0.16.0" # ai-transcribe feature（C++/cmake 构建链，开启时才编译）
 symphonia = { version = "0.5", default-features = false, features = ["pcm", "mp3", "flac", "ogg", "vorbis", "wav"] } # ai-transcribe：纯 Rust 音频解码（ADR-0017 批注；0.5 线 API 稳定口径）
+# ADR-0019（M4-WP03 MCP Server 依赖批次）：rmcp = 精确锁定 2026-07-28 spec
+rmcp = "=3.4.0"
 
 [workspace.lints.rust]
 # 安全政策（执行方案 §5.2）：默认全局禁止 unsafe；确需 unsafe 的 crate 必须在
