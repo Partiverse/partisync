@@ -418,12 +418,18 @@ impl ServerHandler for McpServerState {
         )
     }
 
-    fn list_tools(
+    async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListToolsResult, ErrorData>> + Send + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(all_tools())))
+    ) -> Result<ListToolsResult, ErrorData> {
+        // SEP-2549（2026-07-28 spec）：ttlMs/cacheScope 为必填字段，严格 client
+        //（ZCode 宿主 zod schema）会对省略值报 invalid_type/invalid_value——
+        // rmcp 对 None 做 skip_serializing_if，必须显式带上。
+        let result = ListToolsResult::with_all_items(all_tools())
+            .with_ttl_ms(300_000)
+            .with_cache_scope(rmcp::model::CacheScope::Private);
+        Ok(result)
     }
 
     async fn call_tool(
@@ -1082,12 +1088,35 @@ async fn apply_operation(
 /// `McpServerState` 实现 `ServerHandler`，经 blanket impl
 /// `impl<H: ServerHandler> Service<RoleServer> for H`（handler/server.rs:50）
 /// 满足 `Service<RoleServer>`，故直接传 state 给 `serve_server`。
+///
+/// `index_root`：检索引擎索引目录（与 CLI `search --index-root` 同约定）；
+/// `None` 用默认 `~/.partisync/index`。索引打开失败不致命——`asset_search`
+/// 退化为空结果，其余四工具不受影响。
 pub async fn run_mcp_server(
     graph_db_path: Option<PathBuf>,
+    index_root: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = McpServerState::new(graph_db_path)
         .await
         .map_err(|e| format!("failed to open graph.db: {e}"))?;
+
+    let root = index_root.unwrap_or_else(|| {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".partisync")
+            .join("index")
+    });
+    match partisync_index::search::engine::IndexEngine::open_or_create(
+        partisync_index::IndexEngineConfig {
+            index_root: root,
+            enable_reranker: false,
+            reranker_model_dir: None,
+        },
+    ) {
+        Ok(engine) => state.install_index_engine(engine).await,
+        Err(e) => eprintln!("partisync-mcp: index engine unavailable, asset_search disabled: {e}"),
+    }
+
     // RunningService drop 即 shutdown——必须 waiting 到客户端断开（stdio EOF）
     let service = rmcp::service::serve_server(state, stdio()).await?;
     service.waiting().await?;
