@@ -5902,6 +5902,8 @@ dependencies = [
  "partisync-ai",
  "partisync-core",
  "partisync-graph",
+ "serde",
+ "serde_json",
  "sqlx",
  "tantivy",
  "tempfile",

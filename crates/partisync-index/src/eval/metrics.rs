@@ -33,11 +33,7 @@ impl PerQueryMetrics {
     ///
     /// 仅 `relevance > 0` 的文档被视为相关；relevance = 1/2/3 贡献 nDCG 计算权重。
     #[must_use]
-    pub fn compute(
-        retrieved: &[String],
-        relevant: &HashMap<String, i32>,
-        k: usize,
-    ) -> Self {
+    pub fn compute(retrieved: &[String], relevant: &HashMap<String, i32>, k: usize) -> Self {
         let k = k.min(retrieved.len());
         let top_k = &retrieved[..k];
 
@@ -77,7 +73,8 @@ impl PerQueryMetrics {
             .sum();
 
         // IDCG：完美排序（relevance 降序）
-        let mut ideal_relevances: Vec<i32> = relevant.values().copied().filter(|&r| r > 0).collect();
+        let mut ideal_relevances: Vec<i32> =
+            relevant.values().copied().filter(|&r| r > 0).collect();
         ideal_relevances.sort_by(|a, b| b.cmp(a));
         ideal_relevances.truncate(k);
 

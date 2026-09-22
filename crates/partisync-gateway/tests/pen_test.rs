@@ -123,12 +123,7 @@ async fn pen_inject_sql_in_query() {
         "\"; INSERT INTO content (id, size) VALUES ('hax', 9999); --",
     ];
     for probe in probes {
-        let result = call_raw(
-            &client,
-            "asset_search",
-            json!({"query": probe, "limit": 5}),
-        )
-        .await;
+        let result = call_raw(&client, "asset_search", json!({"query": probe, "limit": 5})).await;
         assert!(
             result.is_ok() || protocol_err(result.as_ref().unwrap_err()),
             "SQL-injection-shaped query should not crash: {probe}"
@@ -157,7 +152,10 @@ async fn pen_inject_sql_in_content_id() {
         let _ = call_raw(&client, "asset_read", json!({"content_id": probe})).await;
     }
     let verify = call_raw(&client, "asset_read", json!({"content_id": "c-pen"})).await;
-    assert!(!tool_err(&verify), "content_id injection must not break asset_read");
+    assert!(
+        !tool_err(&verify),
+        "content_id injection must not break asset_read"
+    );
     client.cancel().await.ok();
 }
 
@@ -167,12 +165,7 @@ async fn pen_inject_huge_string() {
     let client = spawn_server(&db).await;
 
     let huge = "A".repeat(1024 * 1024);
-    let result = call_raw(
-        &client,
-        "asset_search",
-        json!({"query": huge, "limit": 5}),
-    )
-    .await;
+    let result = call_raw(&client, "asset_search", json!({"query": huge, "limit": 5})).await;
     assert!(
         result.is_ok() || protocol_err(result.as_ref().unwrap_err()),
         "1 MiB string probe must not crash"
@@ -191,12 +184,7 @@ async fn pen_inject_unicode_control() {
         "\u{FEFF}ZWNJ\u{200D}",
     ];
     for probe in probes {
-        let result = call_raw(
-            &client,
-            "asset_search",
-            json!({"query": probe, "limit": 5}),
-        )
-        .await;
+        let result = call_raw(&client, "asset_search", json!({"query": probe, "limit": 5})).await;
         assert!(result.is_ok() || protocol_err(result.as_ref().unwrap_err()));
     }
     client.cancel().await.ok();
@@ -208,12 +196,7 @@ async fn pen_inject_empty_string() {
     let client = spawn_server(&db).await;
 
     for probe in ["", " ", "\t\n", "   "] {
-        let result = call_raw(
-            &client,
-            "asset_search",
-            json!({"query": probe, "limit": 5}),
-        )
-        .await;
+        let result = call_raw(&client, "asset_search", json!({"query": probe, "limit": 5})).await;
         assert!(result.is_ok() || protocol_err(result.as_ref().unwrap_err()));
     }
     client.cancel().await.ok();
@@ -258,10 +241,7 @@ async fn pen_inject_huge_batch() {
     )
     .await;
     // 探针断言：服务端不 OOM / 不 panic（功能性 pass）
-    assert!(
-        result.is_ok() || result.is_err(),
-        "result must be defined"
-    );
+    assert!(result.is_ok() || result.is_err(), "result must be defined");
     // 行为发现：若接受 1000-op 批则登记为 P1 DoS 风险
     if let Ok(r) = &result {
         if r.is_error != Some(true) {
@@ -350,7 +330,10 @@ async fn pen_authz_dataset_export_arbitrary() {
             .and_then(|v| v.get("record_count"))
             .and_then(|v| v.as_u64())
         {
-            assert!(count <= 1, "cross-db export must not include other-db records");
+            assert!(
+                count <= 1,
+                "cross-db export must not include other-db records"
+            );
         }
     }
     let _ = std::fs::remove_dir_all(&out_dir);
@@ -487,10 +470,7 @@ async fn pen_dos_concurrent_requests() {
             ),
         )
         .await;
-        assert!(
-            result.is_ok(),
-            "request {i} did not return within 5s"
-        );
+        assert!(result.is_ok(), "request {i} did not return within 5s");
     }
     client.cancel().await.ok();
 }

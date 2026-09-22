@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use partisync_core::error::{PartisyError, Severity};
 
-use crate::search::bm25::{Bm25Index, Bm25Query, IndexedDoc};
 use super::metrics::{MetricReport, PerQueryMetrics};
+use crate::search::bm25::{Bm25Index, Bm25Query, IndexedDoc};
 
 /// 单条查询。
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -189,10 +189,11 @@ impl EvalRunner {
         let qrels = self.load_qrels()?;
 
         // 创建临时 BM25 索引
-        let bm25 = Bm25Index::open_or_create(bm25_index_path.as_ref()).map_err(|e| PartisyError {
-            severity: Severity::Fatal,
-            source: Some(format!("open bm25: {e}").into()),
-        })?;
+        let bm25 =
+            Bm25Index::open_or_create(bm25_index_path.as_ref()).map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("open bm25: {e}").into()),
+            })?;
         bm25.upsert_batch(docs).map_err(|e| PartisyError {
             severity: Severity::Fatal,
             source: Some(format!("upsert: {e}").into()),
@@ -283,13 +284,7 @@ mod tests {
         )
         .unwrap();
 
-        let runner = EvalRunner::new(
-            10,
-            corpus_dir,
-            tsv_path,
-            q_path,
-            qr_path,
-        );
+        let runner = EvalRunner::new(10, corpus_dir, tsv_path, q_path, qr_path);
         let index_dir = tmp.path().join("index");
         let report = runner.run_bm25_only(&index_dir).unwrap();
 

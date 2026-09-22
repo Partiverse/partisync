@@ -94,7 +94,11 @@ fn wp06_corpus_loads() {
     let text = std::fs::read_to_string(&corpus_tsv).unwrap();
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     // header + N docs
-    assert!(lines.len() >= 50, "expected ≥50 corpus rows, got {}", lines.len() - 1);
+    assert!(
+        lines.len() >= 50,
+        "expected ≥50 corpus rows, got {}",
+        lines.len() - 1
+    );
 }
 
 #[test]
