@@ -27,6 +27,8 @@ whisper-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# e2e（T06）：scan→入队→管线全链走真 indexer
+partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
 
 [lints]
 workspace = true

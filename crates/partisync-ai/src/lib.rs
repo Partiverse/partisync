@@ -14,7 +14,10 @@ pub mod pipeline;
 pub mod sidecar;
 pub mod stages;
 
-pub use jobs::{get_job, resume_latest_sidecar_job, run_sidecar_job, JobOutcome};
+pub use jobs::{
+    close_stale_sidecar_jobs, get_job, resume_latest_sidecar_job, run_pending_sidecars,
+    run_sidecar_job, sidecar_auto_enqueue, JobOutcome, LocalContentLoader, SidecarRunReport,
+};
 pub use models::{
     ModelError, ModelManager, ModelSpec, EMBED_MODEL_IMAGE, EMBED_MODEL_TEXT, MANIFEST,
 };

@@ -278,6 +278,32 @@ impl<'a> SidecarStore<'a> {
         Ok(items)
     }
 
+    /// 全库降级/失败明细（skipped/failed，新→旧，cap 供 CLI 展示）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn problems(&self, limit: u32) -> Result<Vec<SidecarItemRow>, PartisyError> {
+        let rows = sqlx::query(
+            "SELECT content_id, stage, status, detail, artifact, updated_ns \
+             FROM sidecar_items WHERE status IN (3, 4) ORDER BY updated_ns DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(self.store.pool_ref())
+        .await
+        .map_err(|e| err("查 sidecar 明细", e))?;
+        Ok(rows
+            .iter()
+            .map(|r| SidecarItemRow {
+                content_id: r.get("content_id"),
+                stage: r.get("stage"),
+                status: r.get("status"),
+                detail: r.get("detail"),
+                artifact: r.get("artifact"),
+                updated_ns: r.get("updated_ns"),
+            })
+            .collect())
+    }
+
     /// 全表状态计数。
     ///
     /// # Errors

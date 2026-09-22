@@ -52,6 +52,12 @@ pub trait ContentLoader: Send + Sync {
     /// # Errors
     /// 内容缺失/读失败 → Fatal。
     fn load(&self, content_id: &str) -> Result<Vec<u8>, PartisyError>;
+
+    /// mime 提示（content.mime 列为 NULL 时的兜底，如按扩展名猜测；
+    /// 真实 scan 现状 indexer 不写 mime 列——T06 实测确认）。默认 None。
+    fn mime(&self, _content_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// 内存 ContentLoader（测试/T06 前的桩）。
@@ -168,6 +174,13 @@ impl Pipeline {
         self.stages.iter().find(|s| s.stage() == id)
     }
 
+    /// 已注册 stage 标识（调度器过滤 pending 用——未注册 stage 的行
+    /// 保持 pending 且不驱动，防重复开作业活锁）。
+    #[must_use]
+    pub fn stage_ids(&self) -> Vec<&'static str> {
+        self.stages.iter().map(|s| s.stage()).collect()
+    }
+
     /// 跑单 content 全管线。行不存在 → 先入队（幂等）；任一 stage 降级
     /// 或失败不中断后续（SPEC 契约 §1）。
     ///
@@ -182,13 +195,21 @@ impl Pipeline {
         let items = SidecarStore::new(store);
         items.ensure_enqueued(content_id).await?;
 
-        let mime_row: Option<String> = sqlx::query_scalar("SELECT mime FROM content WHERE id = ?")
-            .bind(content_id)
-            .fetch_optional(store.pool_ref())
-            .await
-            .map_err(|e| err("读 content", e.to_string()))?;
-        let mime = mime_row.ok_or_else(|| err("读 content", format!("不存在: {content_id}")))?;
-        let mime_kind = MimeKind::parse(Some(&mime));
+        // content.mime 列可为 NULL（indexer 现状不写）——行存在性用
+        // Option<Option<String>> 区分，mime 缺失时回落 loader 提示。
+        let row: Option<Option<String>> =
+            sqlx::query_scalar("SELECT mime FROM content WHERE id = ?")
+                .bind(content_id)
+                .fetch_optional(store.pool_ref())
+                .await
+                .map_err(|e| err("读 content", e.to_string()))?;
+        let Some(mime_col) = row else {
+            return Err(err("读 content", format!("不存在: {content_id}")));
+        };
+        let mime_kind = match mime_col.or_else(|| loader.mime(content_id)) {
+            Some(ref m) => MimeKind::parse(Some(m)),
+            None => MimeKind::parse(None),
+        };
 
         // 内容字节整轮只加载一次；失败即作业级失败（CAS 缺块属系统性），
         // 不留 running 行（尚未认领，下次 run 直接待处理）。

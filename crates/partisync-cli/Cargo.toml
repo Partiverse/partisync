@@ -9,6 +9,7 @@ description = "PartiSync 命令行界面：init/index/ls/find/dedupe/serve/sync 
 partisync-core = { path = "../partisync-core", version = "0.1.0" }
 partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
 partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
+partisync-ai = { path = "../partisync-ai", version = "0.1.0" } # M4-WP01 sidecar 调度
 md-5 = { workspace = true } # S3 ETag
 partisync-provider = { path = "../partisync-provider", version = "0.1.0" }
 base64 = "0.22"

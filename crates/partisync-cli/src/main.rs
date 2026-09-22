@@ -34,13 +34,17 @@ async fn main() {
         Some("watch") => watch_cmd(&args[1..]).await,
         Some("resume") => resume_cmd(&args[1..]).await,
         Some("jobs") => jobs_cmd(&args[1..]).await,
+        Some("sidecar-run") => sidecar_run_cmd(&args[1..]).await,
+        Some("sidecar-status") => sidecar_status_cmd(&args[1..]).await,
         Some("index-remote") => index_remote_cmd(&args[1..]).await,
         Some("ls") => ls_cmd(&args[1..]).await,
         Some("find") => find_cmd(&args[1..]).await,
         Some("dedupe") => dedupe_cmd(&args[1..]).await,
         _ => {
             eprintln!(
-                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]",
+                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]
+  partisync sidecar-run <root> [--db <path>] [--sidecar-dir <dir>]   Sidecar 管线（缩略图/EXIF/嵌入）
+  partisync sidecar-status [--db <path>]",
                 env!("CARGO_PKG_VERSION")
             );
             2
@@ -627,4 +631,92 @@ pub(crate) fn fmt_bytes(n: i64) -> String {
     } else {
         format!("{v:.1} {}", UNITS[u])
     }
+}
+
+/// M4-WP01-T06：Sidecar 管线批量驱动——收口陈旧作业 → scan 投影自动入队
+/// → 逐 content 作业驱动（缩略图/EXIF/嵌入，嵌入模型缺失自动降级）。
+async fn sidecar_run_cmd(args: &[String]) -> i32 {
+    let Some(root) = args.first().filter(|a| !a.starts_with("--")) else {
+        eprintln!("用法: partisync sidecar-run <root> [--db <path>] [--sidecar-dir <dir>]");
+        return 2;
+    };
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let sidecar_dir =
+        flag_value(args, "--sidecar-dir").unwrap_or_else(|| "./partisync.sidecar".into());
+    let store = match open_db(&db).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let loader = match partisync_ai::LocalContentLoader::scan(root, &store).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: 预扫内容路径: {e}");
+            return 1;
+        }
+    };
+    let sink = std::sync::Arc::new(partisync_ai::FsBlobSink::new(&sidecar_dir));
+    let pipeline = partisync_ai::Pipeline::new(sink, partisync_ai::default_stages());
+    println!("sidecar-run: root={root} db={db} sidecar-dir={sidecar_dir}");
+    match partisync_ai::run_pending_sidecars(&store, &pipeline, &loader, None).await {
+        Ok(rep) => {
+            println!(
+                "  完成: 作业 {} · done {} · skipped {} · failed {}",
+                rep.jobs, rep.done, rep.skipped, rep.failed
+            );
+            print_sidecar_problems(&store).await
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            println!("  （进度已持久化：重跑 sidecar-run 从断点续走）");
+            1
+        }
+    }
+}
+
+/// 打印 skipped/failed 明细（原因可查），返回退出码。
+async fn print_sidecar_problems(store: &Store) -> i32 {
+    let Ok(rows) = partisync_ai::SidecarStore::new(store).problems(20).await else {
+        return 1;
+    };
+    if rows.is_empty() {
+        return 0;
+    }
+    println!("  降级/失败明细（至多 20 条）:");
+    for r in rows {
+        println!(
+            "    [{}] {} {} · {}",
+            r.status_name(),
+            r.stage,
+            r.content_id,
+            r.detail.unwrap_or_default()
+        );
+    }
+    0
+}
+
+/// M4-WP01-T06：Sidecar 全链状态——计数 + 非 done 明细。
+async fn sidecar_status_cmd(args: &[String]) -> i32 {
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let store = match open_db(&db).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let st = match partisync_ai::SidecarStore::new(&store).stats().await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    println!(
+        "sidecar: pending {} · running {} · done {} · skipped {} · failed {}",
+        st.pending, st.running, st.done, st.skipped, st.failed
+    );
+    print_sidecar_problems(&store).await
 }
