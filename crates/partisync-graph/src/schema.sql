@@ -195,3 +195,17 @@ CREATE TABLE IF NOT EXISTS sync_watermark (
     last_hlc TEXT NOT NULL,
     PRIMARY KEY (device, space_id)
 );
+
+-- v12（M4-WP01）：Sidecar 管线——per-content per-stage 状态行（SPEC M4-WP01 裁定 1/2）。
+-- 状态机 pending → running → done | skipped | failed；stage 幂等（重跑覆盖产物不重入队）。
+-- content 粒度去重：同 (content_id, stage) 恰一行（主键保证），N entry → 1 content 只算一次。
+CREATE TABLE IF NOT EXISTS sidecar_items (
+    content_id TEXT NOT NULL REFERENCES content(id),
+    stage      TEXT NOT NULL,               -- 'thumbnail' / 'exif' / 'ocr' / 'transcribe' / 'embed'
+    status     INTEGER NOT NULL DEFAULT 0,  -- 0=pending,1=running,2=done,3=skipped,4=failed
+    detail     TEXT,                        -- skipped/failed 原因；done 时产物摘要（尺寸/字段数/维度等）
+    artifact   TEXT,                        -- 产物引用（文件区路径/向量文件等）
+    updated_ns INTEGER NOT NULL,
+    PRIMARY KEY (content_id, stage)
+);
+CREATE INDEX IF NOT EXISTS idx_sidecar_status ON sidecar_items(status);

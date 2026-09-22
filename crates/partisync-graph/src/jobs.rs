@@ -172,6 +172,24 @@ pub async fn latest_resumable(store: &Store) -> Result<Option<JobRow>, PartisyEr
     .map_err(|e| db_err("查可恢复作业", e))
 }
 
+/// 取最新可恢复作业（按 kind 过滤；v2 M4-WP01：sidecar 作业恢复，
+/// 与 index 作业互不抢占）。
+///
+/// # Errors
+/// DB 错误 → Fatal。
+pub async fn latest_resumable_by_kind(
+    store: &Store,
+    kind: &str,
+) -> Result<Option<JobRow>, PartisyError> {
+    sqlx::query_as::<_, JobRow>(
+        "SELECT id, kind, status,          CASE status WHEN 0 THEN 'queued' WHEN 1 THEN 'running' WHEN 2 THEN 'interrupted' WHEN 3 THEN 'completed' ELSE 'failed' END AS status_name,          root, checkpoint, done_files, error FROM jobs          WHERE status IN (2, 1) AND kind = ? ORDER BY updated_ns DESC LIMIT 1",
+    )
+    .bind(kind)
+    .fetch_optional(store.pool_ref())
+    .await
+    .map_err(|e| db_err("查可恢复作业", e))
+}
+
 /// 列出全部作业（新→旧）。
 ///
 /// # Errors

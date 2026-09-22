@@ -5,5 +5,27 @@ edition.workspace = true
 license.workspace = true
 description = "AI 层：fastembed/whisper 推理、MCP server(rmcp)、数据集出口、C2PA"
 
+[features]
+default = []
+# ADR-0017：重推理栈 feature 门控（默认关，避免 workspace 全员背负构建链/体积）
+ai-ocr = ["dep:ort"]
+ai-embed = ["dep:fastembed"]
+ai-transcribe = ["dep:whisper-rs"]
+
+[dependencies]
+partisync-core = { path = "../partisync-core", version = "0.1.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde_json = { workspace = true }
+image = { workspace = true }
+kamadak-exif = { workspace = true }
+ort = { workspace = true, optional = true }
+fastembed = { workspace = true, optional = true }
+whisper-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

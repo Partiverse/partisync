@@ -171,7 +171,10 @@ pub struct FileInsert {
 
 impl Store {
     /// 供 journal/watch 等同 crate 模块直接执行 SQL 的池访问。
-    pub(crate) fn pool_ref(&self) -> &SqlitePool {
+    ///
+    /// v12（M4-WP01）放宽为 pub：ai 层 SidecarStore / sidecar 状态机
+    /// 在本 crate 之外执行 sidecar_items SQL（SPEC 文件清单既定）。
+    pub fn pool_ref(&self) -> &SqlitePool {
         &self.pool
     }
 

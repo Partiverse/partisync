@@ -19,6 +19,7 @@ allow = [
     "CDLA-Permissive-2.0", # ADR-0012：webpki-root-certs（rustls-platform-verifier 链）
     "Unlicense", # ADR-0016：async_io_stream/pharos/ws_stream_wasm（iroh-blobs wasm 链）
     "MPL-2.0", # ADR-0016：attohttpc（iroh-blobs 链，文件级 copyleft）
+    "NCSA", # ADR-0017：libfuzzer-sys（image→ravif→rav1e AVIF 路径；OSI/FSF 认可，BSD-3 同族）
 ]
 
 [bans]
