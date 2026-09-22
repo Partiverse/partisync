@@ -4774,6 +4774,7 @@ version = "0.1.0"
 name = "partisync-ai"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "fastembed",
  "image",
  "kamadak-exif",

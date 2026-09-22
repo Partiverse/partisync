@@ -18,6 +18,7 @@ partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
 tokio = { workspace = true }
 sqlx = { workspace = true }
 serde_json = { workspace = true }
+blake3 = { workspace = true } # ADR-0002：模型清单 blake3 钉版校验（models.rs）
 image = { workspace = true }
 kamadak-exif = { workspace = true }
 ort = { workspace = true, optional = true }

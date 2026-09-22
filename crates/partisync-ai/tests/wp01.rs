@@ -13,11 +13,38 @@ use partisync_ai::pipeline::{
 use partisync_ai::sidecar::{
     stage_ids, BlobSink, InMemoryBlobSink, ItemStatus, SidecarStore, STAGE_ORDER,
 };
-use partisync_ai::{default_stages, run_sidecar_job};
+use partisync_ai::{
+    default_stages, run_sidecar_job, FakeEmbedStage, ModelManager, ModelSpec, EMBED_MODEL_IMAGE,
+    EMBED_MODEL_TEXT, MANIFEST,
+};
 use partisync_graph::store::Store;
 
 async fn mem_store() -> Store {
     Store::open_in_memory().await.expect("store open")
+}
+
+/// 临时目录 ModelManager（确定性，不读机器 HOME）。
+fn temp_models() -> (tempfile::TempDir, ModelManager) {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = ModelManager::new(dir.path());
+    (dir, mgr)
+}
+
+/// 与 default_stages 同构的确定性 stage 集：嵌入 fake + 临时模型缓存。
+fn test_stages(mgr: ModelManager) -> Vec<Arc<dyn SidecarStage>> {
+    vec![
+        Arc::new(partisync_ai::ThumbnailStage::new()),
+        Arc::new(partisync_ai::ExifStage::new()),
+        Arc::new(partisync_ai::PlaceholderStage::new(
+            stage_ids::OCR,
+            "ocr 模型未进场（T05 交付）",
+        )),
+        Arc::new(partisync_ai::PlaceholderStage::new(
+            stage_ids::TRANSCRIBE,
+            "transcribe 模型未进场（T05 交付）",
+        )),
+        Arc::new(FakeEmbedStage::new(mgr)),
+    ]
 }
 
 /// 建一个 content 行（最小列；FK 由 sidecar_items 消费）。
@@ -236,10 +263,11 @@ async fn thumbnail_stage_contract() {
     let store = mem_store().await;
     seed_content(&store, "c1", "image/png").await;
     let loader = InMemoryContentLoader::new([("c1".into(), png_bytes(1024, 600))]);
+    let (_dir, mgr) = temp_models();
     let sink = Arc::new(InMemoryBlobSink::new());
-    let pipeline = Pipeline::new(sink.clone(), default_stages());
+    let pipeline = Pipeline::new(sink.clone(), test_stages(mgr));
     let s = pipeline.run_content(&store, &loader, "c1").await.unwrap();
-    // 缩略图 done；EXIF 无 EXIF 降级 skipped；OCR/转写/嵌入占位 skipped
+    // 缩略图 done；EXIF 无 EXIF 降级；OCR/转写占位；嵌入模型缺失降级
     assert_eq!((s.done, s.skipped, s.failed), (1, 4, 0));
 
     let thumb_bytes = sink.get("c1", stage_ids::THUMBNAIL).unwrap().unwrap();
@@ -306,8 +334,9 @@ async fn sidecar_job_completes_with_default_stages() {
     let store = mem_store().await;
     seed_content(&store, "c1", "image/png").await;
     let loader = InMemoryContentLoader::new([("c1".into(), png_bytes(640, 480))]);
+    let (_dir, mgr) = temp_models();
     let sink = Arc::new(InMemoryBlobSink::new());
-    let pipeline = Pipeline::new(sink, default_stages());
+    let pipeline = Pipeline::new(sink, test_stages(mgr));
     let out = run_sidecar_job(&store, &pipeline, &loader, "c1")
         .await
         .unwrap();
@@ -333,7 +362,8 @@ async fn resume_latest_sidecar_job_recovers() {
 
     let loader = InMemoryContentLoader::new([("c1".into(), png_bytes(200, 100))]);
     let sink = Arc::new(InMemoryBlobSink::new());
-    let pipeline = Pipeline::new(sink, default_stages());
+    let (_dir, mgr) = temp_models();
+    let pipeline = Pipeline::new(sink, test_stages(mgr));
     let out = partisync_ai::resume_latest_sidecar_job(&store, &pipeline, &loader)
         .await
         .unwrap()
@@ -377,4 +407,202 @@ fn item_status_codes() {
     assert_eq!(ItemStatus::Done as i64, 2);
     assert_eq!(ItemStatus::Skipped as i64, 3);
     assert_eq!(ItemStatus::Failed as i64, 4);
+}
+
+// ─── T04：嵌入 + 模型管理 ───────────────────────────────────────────
+
+/// default_stages 组成钉子：五 stage、id 唯一、embed 收尾（T04 后嵌入
+/// 不再是占位）。
+#[test]
+fn default_stages_composition() {
+    let stages = default_stages();
+    assert_eq!(stages.len(), 5);
+    let ids: Vec<&str> = stages.iter().map(|s| s.stage()).collect();
+    let mut uniq = ids.clone();
+    uniq.sort_unstable();
+    uniq.dedup();
+    assert_eq!(uniq.len(), 5, "stage id 唯一");
+    assert_eq!(*ids.last().unwrap(), stage_ids::EMBED, "嵌入收尾");
+    // 嵌入 stage 具备真实语义（Image/Text 适用），非占位
+    let embed = stages.last().unwrap();
+    assert!(embed.applicable(&MimeKind::Text));
+    assert!(embed.applicable(&MimeKind::Image));
+}
+
+/// 验收「模型缺失降级」（T04 嵌入口径）：无模型 → skipped 且原因以
+/// model-missing 开头，行级可查。
+#[tokio::test]
+async fn embed_model_missing_skips_with_reason() {
+    let store = mem_store().await;
+    seed_content(&store, "t1", "text/plain").await;
+    let (_dir, mgr) = temp_models();
+    let loader = InMemoryContentLoader::new([("t1".into(), "你好世界".as_bytes().to_vec())]);
+    let s = run(
+        &store,
+        vec![Arc::new(FakeEmbedStage::new(mgr))],
+        &loader,
+        "t1",
+    )
+    .await;
+    assert_eq!((s.skipped, s.failed), (1, 0));
+    let rows = SidecarStore::new(&store).items("t1").await.unwrap();
+    let embed = rows.iter().find(|r| r.stage == stage_ids::EMBED).unwrap();
+    assert_eq!(embed.status_name(), "skipped");
+    assert!(
+        embed
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("model-missing"),
+        "缺失原因可查：{:?}",
+        embed.detail
+    );
+}
+
+/// 验收「嵌入契约」：模型在场 → done；向量小端落盘（dim×4 字节）；
+/// 同输入字节级稳定（幂等重跑）。
+#[tokio::test]
+async fn embed_model_present_done_deterministic() {
+    let store = mem_store().await;
+    seed_content(&store, "t1", "text/plain").await;
+    let (_dir, mgr) = temp_models();
+    mgr.mark_present(EMBED_MODEL_TEXT).unwrap();
+    let loader = InMemoryContentLoader::new([("t1".into(), "你好世界".as_bytes().to_vec())]);
+    let sink = Arc::new(InMemoryBlobSink::new());
+    let pipeline = Pipeline::new(sink.clone(), vec![Arc::new(FakeEmbedStage::new(mgr))]);
+    let s = pipeline.run_content(&store, &loader, "t1").await.unwrap();
+    assert_eq!((s.done, s.skipped, s.failed), (1, 0, 0));
+
+    let blob = sink.get("t1", stage_ids::EMBED).unwrap().unwrap();
+    assert_eq!(
+        blob.len(),
+        partisync_ai::stages::FAKE_EMBED_DIM * 4,
+        "小端 f32"
+    );
+    let rows = SidecarStore::new(&store).items("t1").await.unwrap();
+    let embed = rows.iter().find(|r| r.stage == stage_ids::EMBED).unwrap();
+    assert_eq!(
+        embed.detail.as_deref(),
+        Some("dim=8 model=embed-text (fake)")
+    );
+    assert_eq!(
+        embed.artifact.as_deref(),
+        Some("mem:t1/embed.bin"),
+        "向量产物引用可追溯"
+    );
+
+    // 幂等重跑：复位 pending 重执行，字节级稳定
+    sqlx::query("UPDATE sidecar_items SET status = 0 WHERE content_id = 't1'")
+        .execute(store.pool_ref())
+        .await
+        .unwrap();
+    pipeline.run_content(&store, &loader, "t1").await.unwrap();
+    let blob2 = sink.get("t1", stage_ids::EMBED).unwrap().unwrap();
+    assert_eq!(blob, blob2, "同输入向量字节级稳定");
+}
+
+/// 模型路由：图像内容走 embed-image（仅文本模型在场时不满足）。
+#[tokio::test]
+async fn embed_routes_image_to_image_model() {
+    let store = mem_store().await;
+    seed_content(&store, "c1", "image/png").await;
+    let (_dir, mgr) = temp_models();
+    mgr.mark_present(EMBED_MODEL_TEXT).unwrap(); // 只给文本模型
+    let loader = InMemoryContentLoader::new([("c1".into(), png_bytes(32, 32))]);
+    let s = run(
+        &store,
+        vec![Arc::new(FakeEmbedStage::new(mgr))],
+        &loader,
+        "c1",
+    )
+    .await;
+    assert_eq!((s.skipped, s.done), (1, 0));
+    let rows = SidecarStore::new(&store).items("c1").await.unwrap();
+    let embed = rows.iter().find(|r| r.stage == stage_ids::EMBED).unwrap();
+    assert!(embed
+        .detail
+        .as_deref()
+        .unwrap_or_default()
+        .contains(EMBED_MODEL_IMAGE));
+}
+
+/// 音视频嵌入不适用（转写 T05 进场前）→ not-applicable，不执行。
+#[tokio::test]
+async fn embed_audio_video_not_applicable() {
+    let store = mem_store().await;
+    seed_content(&store, "v1", "video/mp4").await;
+    let (_dir, mgr) = temp_models();
+    let loader = InMemoryContentLoader::new([("v1".into(), b"mp4!".to_vec())]);
+    let s = run(
+        &store,
+        vec![Arc::new(FakeEmbedStage::new(mgr))],
+        &loader,
+        "v1",
+    )
+    .await;
+    assert_eq!(s.skipped, 1);
+    let rows = SidecarStore::new(&store).items("v1").await.unwrap();
+    let embed = rows.iter().find(|r| r.stage == stage_ids::EMBED).unwrap();
+    assert_eq!(embed.detail.as_deref(), Some("not-applicable"));
+}
+
+/// 清单钉版：条目完整、blake3 校验路径（Mismatch/None）语义。
+#[test]
+fn manifest_and_verify_semantics() {
+    // 清单完整性：名称/来源非空、版本非空
+    for spec in &MANIFEST {
+        assert!(!spec.name.is_empty());
+        assert!(!spec.version.is_empty());
+        assert!(!spec.source.is_empty());
+    }
+    let names: Vec<&str> = MANIFEST.iter().map(|s| s.name).collect();
+    assert!(names.contains(&EMBED_MODEL_TEXT));
+    assert!(names.contains(&EMBED_MODEL_IMAGE));
+
+    let (dir, mgr) = temp_models();
+    // 未知模型
+    assert!(matches!(
+        mgr.verify("nope"),
+        Err(partisync_ai::ModelError::Unknown(_))
+    ));
+    // 缺失
+    assert!(matches!(
+        mgr.verify(EMBED_MODEL_TEXT),
+        Err(partisync_ai::ModelError::Missing(_))
+    ));
+    // 在场 + blake3 None → 通过
+    mgr.mark_present(EMBED_MODEL_TEXT).unwrap();
+    assert!(mgr.verify(EMBED_MODEL_TEXT).is_ok());
+    // 钉住 blake3：不符 → VerifyFailed；相符 → 通过
+    let bad = ModelSpec {
+        name: EMBED_MODEL_TEXT,
+        version: "t",
+        source: "t",
+        blake3: Some(format!("{:0>64}", "ab").leak()),
+    };
+    assert!(matches!(
+        mgr.verify_model(&bad),
+        Err(partisync_ai::ModelError::VerifyFailed(_))
+    ));
+    std::fs::write(
+        dir.path().join(EMBED_MODEL_TEXT).join("model.bin"),
+        b"weights",
+    )
+    .unwrap();
+    let good_hash: &'static str = {
+        let mut h = blake3::Hasher::new();
+        h.update(b"weights");
+        let hex: String = h
+            .finalize()
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        String::leak(hex)
+    };
+    let good = ModelSpec {
+        blake3: Some(good_hash),
+        ..bad
+    };
+    assert!(mgr.verify_model(&good).is_ok(), "哈希相符通过");
 }

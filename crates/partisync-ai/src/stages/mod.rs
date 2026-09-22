@@ -1,6 +1,7 @@
-//! stage 集注册（T02：缩略图+EXIF 实装；OCR/转写/嵌入在 T04/T05 进场前
-//! 走占位降级——SPEC M4-WP01 裁定 5）。
+//! stage 集注册（T04：缩略图/EXIF/嵌入实装；OCR/转写 T05 进场前占位
+//! 降级——SPEC M4-WP01 裁定 5）。
 
+pub mod embed;
 pub mod exif;
 pub mod thumbnail;
 
@@ -9,6 +10,9 @@ use std::sync::Arc;
 use crate::pipeline::{MimeKind, SidecarStage, StageError, StageInput, StageOutput};
 use crate::sidecar::stage_ids;
 
+#[cfg(feature = "ai-embed")]
+pub use embed::EmbedStage;
+pub use embed::{default_embed_stage, FakeEmbedStage, FAKE_EMBED_DIM};
 pub use exif::ExifStage;
 pub use thumbnail::{ThumbnailStage, THUMB_JPEG_QUALITY, THUMB_MAX_DIM};
 
@@ -40,7 +44,9 @@ impl SidecarStage for PlaceholderStage {
     }
 }
 
-/// T02 默认 stage 集：缩略图+EXIF 实装，后三阶段占位降级。
+/// 默认 stage 集：缩略图+EXIF 实装；OCR/转写占位（T05）；嵌入走
+/// [`default_embed_stage`]（T04：feature 开=真实 fastembed，关=CI fake，
+/// 同一条模型缺失降级语义）。
 #[must_use]
 pub fn default_stages() -> Vec<Arc<dyn SidecarStage>> {
     vec![
@@ -54,9 +60,6 @@ pub fn default_stages() -> Vec<Arc<dyn SidecarStage>> {
             stage_ids::TRANSCRIBE,
             "transcribe 模型未进场（T05 交付）",
         )),
-        Arc::new(PlaceholderStage::new(
-            stage_ids::EMBED,
-            "embed 模型未进场（T04 交付）",
-        )),
+        default_embed_stage(),
     ]
 }
