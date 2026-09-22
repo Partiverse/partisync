@@ -5175,14 +5175,15 @@ name = "partisync-gateway"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dirs 5.0.1",
  "futures",
  "partisync-ai",
  "partisync-core",
- "partisync-graph",
  "partisync-index",
  "rmcp",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "uuid",
 ]
