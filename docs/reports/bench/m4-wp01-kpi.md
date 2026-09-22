@@ -108,3 +108,57 @@ release profile（criterion）· 基准: `crates/partisync-ai/benches/wp01_bench
 | P1 | 音视频容器解封装（现 applicable 仅 Audio） | @lead |
 | P2 | sidecar 产物与 WP02 检索的向量读回接线 | WP02 起草对账 |
 | P2 | PARTISYNC_MODEL_CACHE_DIR 部署文档化 | M4 收尾 |
+
+## 11. T08 整体验收（2026-09-22）
+
+### 11.1 门禁终验（T08 当日复测）
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo fmt --all --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅ 323 过 0 失败（ai 层 35：契约 31 + 去重测量 1 + e2e 3） |
+| `cargo deny check` 四段 | ✅（真实退出码；advisories 网络抖动重试通过） |
+| feature 编译矩阵 | ✅（T05 记录：默认/ai-ocr/ai-transcribe/ai-embed/三全开） |
+
+### 11.2 SPEC 验收逐项对账（最终态）
+
+| 验收项 | 状态 | 证据 |
+|---|---|---|
+| 崩溃恢复（kill × N → resume 等价） | ✅ | §4：15 轮随机 kill，终态与全量直算严格等价 |
+| content 去重（每阶段恰执行一次） | ✅ | wp01::content_dedup + §5（33.3% 节省） |
+| 阶段幂等（产物字节级稳定） | ✅ | wp01::stage_idempotent + t05::transcribe_present |
+| 各阶段行为契约（fake 模型 CI 离线） | ✅ | 五阶段契约测试（缩略图尺寸/EXIF 降级/OCR-CTC/转写/嵌入向量） |
+| 模型缺失降级（skipped + 原因可查） | ✅ | 单缺/半缺/全缺 + not-applicable 四口径 |
+| 调度接线（scan → 入队 → CLI 可查） | ✅ | t06 e2e + `partisync sidecar-run/status` |
+| 回归门禁 / deny / 覆盖率只升不降 | ✅ | §6 / §11.1 |
+
+SPEC M4-WP04（iroh 接线收尾）5 项已于 M3-WP04-T08 前账闭环，不在本表。
+
+### 11.3 追溯对账（铁律 2 纪律披露）
+
+| 任务卡 | 实际落点提交 | 偏差 |
+|---|---|---|
+| M4-WP01-T01 | `919f4ac` 草案 + `0239f56` G0 批准 | 无 |
+| M4-WP01-T02 | `78627c0`（ADR-0017 + schema v12 + 作业 v2 + **缩略图/EXIF**） | **吞并 T03**（提交标题已明示，见下行） |
+| M4-WP01-T03 | 无独立提交（缩略图/EXIF 随 T02 整体交付，stage3/5 拆分未执行） | **合并交付披露**：T02+T03 同 PR，原子性优先 |
+| M4-WP01-T04 | `8bbcd3a` | 无 |
+| M4-WP01-T05 | `a1eeb89` | 无 |
+| M4-WP01-T06 | `ec7c75d` | 无 |
+| M4-WP01-T07 | `f361d61` | 无 |
+| M4-WP01-T08 | 本节（本次提交） | 无 |
+
+### 11.4 已知边界与移交（不阻塞验收）
+
+- **真模型冒烟三件套**（§7，P0 移交）：三栈 Metal/CoreML 实测、MANIFEST
+  blake3 回填、OCR 张量布局口径校正——HF 不可达，独立手动步骤；
+- OCR 轴对齐简化框（无旋转框/多边形 unclip）、视频容器解封装不支持
+  （applicable 仅 Audio）——§10 P1；
+- E2EE 空间 sidecar 落盘形态裁定（SPEC 裁定 6）随 hub 侧 M4 后续 WP。
+
+### 11.5 结论
+
+SPEC M4-WP01 验收 7 项全 ✅；任务卡 T01–T08 全部闭合（T02/T03 合并
+交付披露）。WP01（Sidecar 管线）里程碑状态：**验收通过（含披露移交）**
+——五阶段实装、调度闭环、CLI 可用、基准与崩溃压力在册；真模型冒烟
+为独立手动移交项。
