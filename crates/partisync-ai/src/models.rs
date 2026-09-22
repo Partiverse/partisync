@@ -18,6 +18,12 @@ use partisync_core::error::{PartisyError, Severity};
 pub const EMBED_MODEL_TEXT: &str = "embed-text";
 /// 嵌入图像模型逻辑名。
 pub const EMBED_MODEL_IMAGE: &str = "embed-image";
+/// 转写模型逻辑名（whisper ggml，冒烟定版）。
+pub const TRANSCRIBE_MODEL: &str = "transcribe-whisper";
+/// OCR 检测模型逻辑名（PP-OCR mobile det，RapidOCR ONNX 口径）。
+pub const OCR_MODEL_DET: &str = "ocr-det";
+/// OCR 识别模型逻辑名（PP-OCR mobile rec）。
+pub const OCR_MODEL_REC: &str = "ocr-rec";
 
 /// 可用性标记文件名（位于 model_dir 内）。
 pub const PRESENT_MARKER: &str = "model.ok";
@@ -34,19 +40,38 @@ pub struct ModelSpec {
     pub blake3: Option<&'static str>,
 }
 
-/// 模型清单（v1：嵌入两模型；OCR/转写进场时 T05 追加）。
-pub const MANIFEST: [ModelSpec; 2] = [
+/// 模型清单（v2：嵌入两模型 + 转写 + OCR det/rec；blake3 待真模型
+/// 冒烟后填实——2026-09-22 会话 HF 不可达，冒烟移交登记 T05 报告）。
+pub const MANIFEST: [ModelSpec; 5] = [
     ModelSpec {
         name: EMBED_MODEL_TEXT,
         version: "bge-m3 (fastembed 7.0.1 EmbeddingModel::BGEM3)",
         source: "BAAI/bge-m3",
-        blake3: None, // TODO(M4-WP01-T05 冒烟): 实测后填实
+        blake3: None, // TODO(冒烟): 实测后填实
     },
     ModelSpec {
         name: EMBED_MODEL_IMAGE,
         version: "clip-vit-b32 (fastembed 7.0.1 ImageEmbeddingModel::ClipVitB32)",
         source: "Qdrant/clip_ViT_B_32",
-        blake3: None, // TODO(M4-WP01-T05 冒烟): 实测后填实
+        blake3: None, // TODO(冒烟): 实测后填实
+    },
+    ModelSpec {
+        name: TRANSCRIBE_MODEL,
+        version: "whisper ggml（base 多语候选，冒烟定版）",
+        source: "ggerganov/whisper.cpp（HF）",
+        blake3: None, // TODO(冒烟): 实测后填实
+    },
+    ModelSpec {
+        name: OCR_MODEL_DET,
+        version: "pp-ocrv4-mobile-det ONNX（RapidOCR 口径，冒烟定版）",
+        source: "SWHL/RapidOCR（HF）",
+        blake3: None, // TODO(冒烟): 实测后填实
+    },
+    ModelSpec {
+        name: OCR_MODEL_REC,
+        version: "pp-ocrv4-mobile-rec ONNX + dict.txt（冒烟定版）",
+        source: "SWHL/RapidOCR（HF）",
+        blake3: None, // TODO(冒烟): 实测后填实
     },
 ];
 

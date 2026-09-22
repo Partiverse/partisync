@@ -1,10 +1,10 @@
 //! AI 层：Sidecar 管线（M4-WP01）、fastembed/whisper 推理、MCP
 //! server(rmcp)、数据集出口、C2PA（后四项按里程碑推进）。
 //!
-//! 当前内容（至 M4-WP01-T04）：JobSystem v2 编排（[`jobs`]）、Stage
+//! 当前内容（至 M4-WP01-T05）：JobSystem v2 编排（[`jobs`]）、Stage
 //! trait 与管线执行器（[`pipeline`]）、per-content per-stage 状态机与
 //! 产物落盘（[`sidecar`]）、模型清单钉版/缓存/缺失降级（[`models`]）、
-//! 缩略图/EXIF/嵌入实装 + 占位降级（[`stages`]）。依赖隔离：
+//! 五阶段实装（缩略图/EXIF/OCR/转写/嵌入，[`stages`]）。依赖隔离：
 //! ort/fastembed/whisper 类型不穿透 trait 边界（ADR-0015 裁定 1 先例，
 //! ADR-0017 feature 门控）。
 
@@ -20,6 +20,7 @@ pub use jobs::{
 };
 pub use models::{
     ModelError, ModelManager, ModelSpec, EMBED_MODEL_IMAGE, EMBED_MODEL_TEXT, MANIFEST,
+    OCR_MODEL_DET, OCR_MODEL_REC, TRANSCRIBE_MODEL,
 };
 pub use pipeline::{
     ContentLoader, InMemoryContentLoader, MimeKind, Pipeline, PipelineSummary, SidecarStage,
@@ -31,7 +32,11 @@ pub use sidecar::{
 };
 #[cfg(feature = "ai-embed")]
 pub use stages::EmbedStage;
+#[cfg(feature = "ai-ocr")]
+pub use stages::OcrStage;
+#[cfg(feature = "ai-transcribe")]
+pub use stages::TranscribeStage;
 pub use stages::{
-    default_embed_stage, default_stages, ExifStage, FakeEmbedStage, PlaceholderStage,
-    ThumbnailStage,
+    default_embed_stage, default_ocr_stage, default_stages, default_transcribe_stage, ExifStage,
+    FakeEmbedStage, FakeOcrStage, FakeTranscribeStage, PlaceholderStage, ThumbnailStage,
 };

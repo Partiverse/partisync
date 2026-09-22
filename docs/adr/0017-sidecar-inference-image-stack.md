@@ -20,6 +20,7 @@ M4-WP01 Sidecar 管线需要五阶段能力（SPEC M4-WP01 裁定 3）：缩略�
 | ort | =2.0.0-rc.13 | ai-ocr feature | ONNX 推理底座（OCR） | 官方 onnxruntime 绑定；调研方案 §8「7.0/2.0rc」口径 |
 | fastembed | =7.0.1 | ai-embed feature | BGE-M3/CLIP 嵌入 | 调研方案 §8 既定选型（ort 底） |
 | whisper-rs | =0.16.0 | ai-transcribe feature | whisper.cpp 绑定（转写） | 调研方案 §5.12 既定选型 |
+| symphonia | 0.6 | ai-transcribe feature | 纯 Rust 音频解码（whisper 输入 16k mono f32 的前置） | 事实标准；T05 批注增补（2026-09-22） |
 
 1. **feature 门控（默认全关）**：`ai-ocr` / `ai-embed` / `ai-transcribe`
    三个 feature 分别承载 ort / fastembed / whisper-rs。默认构建不编译

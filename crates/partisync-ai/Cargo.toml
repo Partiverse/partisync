@@ -10,7 +10,7 @@ default = []
 # ADR-0017：重推理栈 feature 门控（默认关，避免 workspace 全员背负构建链/体积）
 ai-ocr = ["dep:ort"]
 ai-embed = ["dep:fastembed"]
-ai-transcribe = ["dep:whisper-rs"]
+ai-transcribe = ["dep:whisper-rs", "dep:symphonia"]
 
 [dependencies]
 partisync-core = { path = "../partisync-core", version = "0.1.0" }
@@ -24,6 +24,7 @@ kamadak-exif = { workspace = true }
 ort = { workspace = true, optional = true }
 fastembed = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
+symphonia = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
