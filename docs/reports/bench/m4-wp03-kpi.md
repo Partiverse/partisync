@@ -122,4 +122,13 @@ Apple Clang 16 编译 numkong SME 探针 TU 时 clang 前端直接崩溃（Abort
 
 ## 9. 开放项（状态见 §0 闭合表）
 
-唯一剩余：**P0 MCP e2e 集成测试**（真实 AI Agent 调用）——用户指令后置为独立待办。
+剩余项状态（2026-09-22 L2 验收续接）：
+
+| 项 | 结果 |
+|---|---|
+| **P0 MCP e2e L1（协议层）** | ✅ **闭合**（`ce515aa`）——`partisync-mcp` bin + rmcp client 真实 spawn 子进程：initialize → tools/list → 五工具全链 → 未知工具协议错误，测试 `mcp_stdio_full_chain` 绿。途中修复：`RunningService` drop 即 shutdown（bin 须 `waiting()`） |
+| **P0 MCP e2e L2（DoD 场景）** | ✅ **五步链路全绿**（真实库 INBOX 2914 文件/2797 content）：asset_read（元数据+sidecar 状态）→ asset_organize preview（无事务 ID 不落库）→ commit（`txn_e45b7471`）→ 回读 tags=`["e2e-verified"]` + DB 落库实证（entry_tag deleted=0）→ dataset_export JSONL 落盘（content_id 匹配）。**执行方式披露**：stdio JSON-RPC 直驱 partisync-mcp（协议真实）；ZCode 宿主自动连接未通（见下） |
+| P0 ZCode 宿主 MCP 连接 | ◐ 排查结论：workspace `.zcode/config.json` 未被 Desktop 宿主读取为 MCP 源（日志无 server 启动记录，`listWorkspaceMcpServerStatuses` 有调用但 partisync 未入 runtime 列表——pitfall「desktop-managed 列表覆盖文件」）；已改注册 **user scope** `~/.zcode/cli/config.json`（该文件已确认被宿主读取），待新会话在 Settings → MCP 验证 |
+| 遗留发现 | `LocalContentLoader` 对 DB 有记录但文件已删的 content（INBOX/temp 下 .tmp）整批 fatal 而非跳过——L2 建库时手动清理 1 条幽灵记录绕过；skip 语义修复留待后续任务 |
+
+**L2 DoD 结论**：归类→预览→提交→导出 manifest 完整链路在真实资产库上验收通过（含落盘产物实证）。
