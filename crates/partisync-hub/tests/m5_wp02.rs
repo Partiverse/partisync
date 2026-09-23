@@ -362,3 +362,101 @@ async fn t04_peer_down_serves_stale_view_then_rejoin_converges() {
     assert_eq!(h2.sync_once(1).await.unwrap(), (1, 0)); // 已一致：幂等 0 改写
     assert_eq!(view_snapshot(h2.view()).await, view_snapshot(&view1).await);
 }
+
+// ---------- T05：路由协商 RouteClaim（SPEC 裁定 5） ----------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_claim_fresh_space_accepted_both_sides() {
+    let mut h1 = bind_hub("t05-fresh-1", 1, vec![]).await;
+    let mut h2 = bind_hub("t05-fresh-2", 2, vec![]).await;
+    wire(&mut h1, &mut h2);
+    h1.spawn_serve();
+    h2.spawn_serve();
+
+    // hub2 认领无人持有的空间 → hub1 接受（提案必胜）→ 双侧视图落盘
+    let winner = h2.claim_space("s-new", "127.0.0.1:9002").await.unwrap();
+    assert_eq!((winner.hub_id, winner.epoch), (2, 1));
+    assert_eq!(
+        view_snapshot(h1.view()).await,
+        view_snapshot(h2.view()).await
+    );
+    assert!(h1
+        .view()
+        .route_async("s-new")
+        .await
+        .unwrap()
+        .is_some_and(|r| r.hub_id == 2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_concurrent_claim_deterministic_lower_hub_id_wins() {
+    let mut h1 = bind_hub("t05-race-1", 1, vec![]).await;
+    let mut h2 = bind_hub("t05-race-2", 2, vec![]).await;
+    wire(&mut h1, &mut h2);
+    h1.spawn_serve();
+    h2.spawn_serve();
+
+    // hub1 认领成功（e1）；hub2 作为应答方吸收该行——两侧视图一致
+    let w1 = h1.claim_space("s-race", "127.0.0.1:9001").await.unwrap();
+    assert_eq!((w1.hub_id, w1.epoch), (1, 1));
+    assert_eq!(
+        view_snapshot(h1.view()).await,
+        view_snapshot(h2.view()).await
+    );
+
+    // 真·并发（分区世界互不知晓）：hub2 基于陈旧视图的原始提案
+    // (s-race, hub2, e1) 打到 hub1 → 同 epoch tie-break 落败，裁决即时
+    // 改写为 hub1 行
+    let mut cli = FedClient::new(h1.local_addr().unwrap().to_string());
+    let (accepted, winner) = cli.route_claim(route("s-race", 2, 1)).await.unwrap();
+    assert!(!accepted, "同 epoch 提案：hub_id 小者胜");
+    assert!(winner.is_some_and(|w| (w.hub_id, w.epoch) == (1, 1)));
+
+    // 知情的更高 epoch 认领 = 归属转移（裁定 4）：hub2 以 e2 胜出并双侧落盘
+    let w2 = h2.claim_space("s-race", "127.0.0.1:9002").await.unwrap();
+    assert_eq!((w2.hub_id, w2.epoch), (2, 2));
+    assert_eq!(
+        view_snapshot(h1.view()).await,
+        view_snapshot(h2.view()).await
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_resolve_local_peer_hit_and_unknown() {
+    let mut h1 = bind_hub("t05-res-1", 1, vec![route("s1", 1, 1)]).await;
+    let mut h2 = bind_hub("t05-res-2", 2, vec![]).await;
+    wire(&mut h1, &mut h2);
+    h1.spawn_serve();
+
+    // 本地命中
+    assert!(h1
+        .resolve_space("s1")
+        .await
+        .unwrap()
+        .is_some_and(|r| r.hub_id == 1));
+    // 本地 miss → peer 查询命中（一跳，不代查）
+    assert!(h2
+        .resolve_space("s1")
+        .await
+        .unwrap()
+        .is_some_and(|r| r.hub_id == 1));
+    // 双侧皆无 → None
+    assert!(h2.resolve_space("not-anywhere").await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_peer_unreachable_resolve_miss_and_claim_is_local_proposal() {
+    let mut h1 = bind_hub("t05-dead-1", 1, vec![route("s1", 1, 1)]).await;
+    let mut h2 = bind_hub("t05-dead-2", 2, vec![]).await;
+    wire(&mut h1, &mut h2);
+    let jh1 = h1.spawn_serve();
+    drop(h1);
+    jh1.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // peer 不可达：resolve 静默跳过 → miss；claim 分区下单方提案落本地
+    assert!(h2.resolve_space("s1").await.unwrap().is_none());
+    let w = h2.claim_space("s-offline", "127.0.0.1:9002").await.unwrap();
+    assert_eq!((w.hub_id, w.epoch), (2, 1));
+    assert!(h2.view().route_async("s-offline").await.unwrap().is_some());
+}

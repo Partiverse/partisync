@@ -432,6 +432,90 @@ impl FedHandle {
         Ok(out)
     }
 
+    /// 空间路由解析（裁定 5/9）：本地视图 → 逐 peer 查询（hub_id 升序、
+    /// 首个命中返回；peer 不可达跳过——防环不代查，只查一跳）→ 全 miss
+    /// 为 `None`（是否 claim 由调用方显式决定）。
+    ///
+    /// # Errors
+    /// 本地 raft 读失败（peer 侧错误不传播）。
+    pub async fn resolve_space(&self, space_id: &str) -> Result<Option<RouteRow>, FedError> {
+        if let Some(hit) = self.view.route_async(space_id).await? {
+            return Ok(Some(hit));
+        }
+        let peer_addrs = self.peer_addrs();
+        for peer_addr in peer_addrs {
+            let mut cli = FedClient::new(peer_addr);
+            match cli.route_query(space_id).await {
+                Ok(hit @ Some(_)) => return Ok(hit),
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::debug!(error = %e, "resolve peer skipped");
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// 本地视图该空间最大已知 epoch（无行 = 0）——提案纪元基数（裁定 5）。
+    ///
+    /// # Errors
+    /// raft 读失败。
+    pub async fn local_epoch(&self, space_id: &str) -> Result<u64, FedError> {
+        Ok(self
+            .view
+            .route_async(space_id)
+            .await?
+            .map_or(0, |r| r.epoch))
+    }
+
+    /// 认领空间归属（裁定 5）：向 peer（hub_id 升序）顺序发起 RouteClaim，
+    /// 首个裁决即收敛——接受 = 提案胜出（本端与对方各自落盘）；拒绝 =
+    /// 对方胜者行即时改写本端。全部 peer 不可达 = 分区下单方提案（本地
+    /// 落盘；重连后由合并规则确定性收敛）。返回收敛后的该空间胜者行。
+    ///
+    /// # Errors
+    /// raft 落盘失败（peer 传输失败不传播）。
+    pub async fn claim_space(
+        &self,
+        space_id: &str,
+        addr: impl Into<String>,
+    ) -> Result<RouteRow, FedError> {
+        let proposal = RouteRow {
+            space_id: space_id.to_owned(),
+            hub_id: self.hub_id(),
+            addr: addr.into(),
+            epoch: self.local_epoch(space_id).await? + 1,
+        };
+        for peer_addr in self.peer_addrs() {
+            let mut cli = FedClient::new(peer_addr);
+            match cli.route_claim(proposal.clone()).await {
+                Ok((_, Some(winner))) => {
+                    // 裁决已出：胜者行吸收进本端视图（幂等），无论接受与否
+                    absorb_routes(&self.view, std::slice::from_ref(&winner)).await?;
+                    return Ok(winner);
+                }
+                Ok((_, None)) => continue, // 对端无裁决（反常）：尝试下一 peer
+                Err(e) => {
+                    tracing::debug!(error = %e, "claim peer skipped");
+                    continue;
+                }
+            }
+        }
+        self.view.set_route_async(proposal.clone()).await?;
+        Ok(proposal)
+    }
+
+    /// 对端地址快照（hub_id 升序；锁内拷贝，锁不跨 await）。
+    fn peer_addrs(&self) -> Vec<String> {
+        self.cfg
+            .lock()
+            .expect("fed cfg")
+            .peers
+            .values()
+            .cloned()
+            .collect()
+    }
+
     /// 周期反熵循环（永续；裁定 6）：每 [`FedConfig::hello_interval`] 对
     /// 全部 peer 重放握手，peer 不可达跳过（下一轮重试）。
     pub async fn run_anti_entropy(&self) {
@@ -494,9 +578,23 @@ async fn handle_request(
         FedRequest::RouteQuery { space_id } => Ok(FedResponse::RouteAnswer {
             route: view.route_async(&space_id).await?,
         }),
-        FedRequest::RouteClaim { .. } => {
-            // 协商语义随 T05 落地；此前显式拒绝（不做静默错误应答）
-            Err(FedError::Protocol("RouteClaim not served yet".into()))
+        FedRequest::RouteClaim { row } => {
+            // 定向单行合并（裁定 5）：提案胜出 → 接受并落本端 raft；
+            // 落败 → 回本端胜者行（提案方据此即时改写，不等周期握手）
+            let local = view.route_async(&row.space_id).await?;
+            match merge_route(local.as_ref(), &row) {
+                Some(winner) => {
+                    view.set_route_async(winner.clone()).await?;
+                    Ok(FedResponse::ClaimVerdict {
+                        accepted: true,
+                        winner: Some(winner),
+                    })
+                }
+                None => Ok(FedResponse::ClaimVerdict {
+                    accepted: false,
+                    winner: local,
+                }),
+            }
         }
     }
 }
