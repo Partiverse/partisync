@@ -49,6 +49,9 @@ fn default_limit() -> usize {
 fn default_true() -> bool {
     true
 }
+fn default_false() -> bool {
+    false
+}
 
 #[derive(Debug, Deserialize, Default)]
 pub struct SearchFilters {
@@ -151,7 +154,12 @@ pub struct PlannedOp {
 pub struct DatasetExportInput {
     pub content_ids: Option<Vec<String>>,
     pub filter: Option<ExportFilter>,
-    #[serde(default = "default_true")]
+    /// 是否在导出 manifest 中包含向量字段（BGE-M3 dense / CLIP image / SPLADE sparse）。
+    /// **默认 false**：向量是潜在的 PII / 指纹面（可逆推出原内容），须显式 opt-in 才导出。
+    /// 当前实现（`dataset_export`）实际未生成向量字段——但 schema 默认 true 易诱导调用方
+    /// 假设向量已导出，构成**隐式数据外泄承诺**。修复（M4-WP99-T07）：改默认 false + 显式 opt-in，
+    /// 并加测试覆盖「默认不返回任何 vector 字段」（详见 `tests/pen_test.rs` dataset_export 相关）。
+    #[serde(default = "default_false")]
     pub include_vectors: bool,
     #[serde(default = "default_format")]
     pub format: String,
@@ -387,7 +395,7 @@ fn all_tools() -> Vec<Tool> {
                 "properties": {
                     "content_ids": {"type": "array", "items": {"type": "string"}},
                     "filter": {"type": "object"},
-                    "include_vectors": {"type": "boolean", "default": true},
+                    "include_vectors": {"type": "boolean", "default": false},
                     "format": {"type": "string", "enum": ["jsonl"], "default": "jsonl"},
                     "shard_size": {"type": "number", "description": "Records per shard file; 0/absent = single file"},
                     "output_dir": {"type": "string", "description": "Export root directory"}

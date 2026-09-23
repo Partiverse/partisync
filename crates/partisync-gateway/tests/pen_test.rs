@@ -559,3 +559,88 @@ async fn pen_c2pa_extreme_detail_size() {
     assert!(result.is_ok(), "1 MiB detail must not crash");
     client.cancel().await.ok();
 }
+
+// ─── M4-WP99-T07：dataset_export include_vectors 默认 false 隐私面回归测试 ───
+//
+// 修复 T3.4.I「include_vectors 默认 true 导出向量」(SEC-AI-PENTEST-001 P0)：
+// - 默认调用不得在 manifest 写任何 vector / embedding / dense / sparse 字段
+// - 显式 opt-in 也得明确语义（当前实装是 no-op，schema 承诺=未来风险）
+// - 这一条回归每次 schema 默认值变更都必须跑
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pen_dataset_export_vectors_default_off() {
+    let db = prepare_db().await;
+    let client = spawn_server(&db).await;
+
+    let out_dir = std::env::temp_dir().join(format!("pen_vec_{}", uuid::Uuid::new_v4()));
+
+    // 不传 include_vectors（默认应为 false）
+    let result = call_raw(
+        &client,
+        "dataset_export",
+        json!({
+            "content_ids": ["c-pen"],
+            "output_dir": out_dir.to_string_lossy(),
+            "format": "jsonl"
+        }),
+    )
+    .await
+    .expect("default export should succeed");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "default include_vectors must succeed"
+    );
+
+    // 读 manifest 验证无任何 vector 字段
+    let structured = result.structured_content.expect("structured content");
+    let manifest_path = structured["manifest_path"]
+        .as_str()
+        .expect("manifest_path in result");
+    let content = std::fs::read_to_string(manifest_path).expect("read manifest");
+
+    assert!(
+        !content.contains("vector") && !content.contains("embedding"),
+        "manifest must NOT contain any vector/embedding field by default\nmanifest: {content}"
+    );
+    assert!(
+        !content.contains("dense") && !content.contains("sparse"),
+        "manifest must NOT contain dense/sparse by default\nmanifest: {content}"
+    );
+
+    let _ = std::fs::remove_dir_all(&out_dir);
+    client.cancel().await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pen_dataset_export_vectors_explicit_off() {
+    let db = prepare_db().await;
+    let client = spawn_server(&db).await;
+
+    let out_dir = std::env::temp_dir().join(format!("pen_vecex_{}", uuid::Uuid::new_v4()));
+
+    // 显式 include_vectors: false —— 同样不得写向量
+    let result = call_raw(
+        &client,
+        "dataset_export",
+        json!({
+            "content_ids": ["c-pen"],
+            "output_dir": out_dir.to_string_lossy(),
+            "format": "jsonl",
+            "include_vectors": false
+        }),
+    )
+    .await
+    .expect("explicit-false export should succeed");
+
+    let structured = result.structured_content.expect("structured content");
+    let manifest_path = structured["manifest_path"].as_str().expect("manifest_path");
+    let content = std::fs::read_to_string(manifest_path).expect("read manifest");
+    assert!(
+        !content.contains("vector") && !content.contains("embedding"),
+        "explicit include_vectors=false must NOT contain vectors\nmanifest: {content}"
+    );
+
+    let _ = std::fs::remove_dir_all(&out_dir);
+    client.cancel().await.ok();
+}
