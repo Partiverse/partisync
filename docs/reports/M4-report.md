@@ -88,7 +88,8 @@ ADR（全部已接受）：0015（iroh 设备通道 hub 侧）· 0016（iroh-blo
 | D1 | （承接 M2-D1）外部密码学审计补做 | M5，外部审计公司委托 |
 | D2 | **外部 MCP/网关渗透 vendor 委托执行**（RFC + 4 候选就绪） → **已修订**：LLM 多模型对抗报告交付（SEC-AI-PENTEST-M4-WP06-001） | **M5 开局 P1**（OSCP 持证人 0.5 天复核即满足 §7.1.10） |
 | D3 | cli clippy 2 处清偿（M4-WP99-T01，当前 clippy 门禁红之唯一来源） | **M5 开局 P0** → ✅ **已清偿**（`aefdee0`，2026-09-23） |
-| D4 | 渗透 3 项 P1 加固（M4-WP99-T02/03/04 预留：批次上限/跨库校验/c2pa 形态）+ **LLM 新增 P0 立即修复**（T3.4.I `include_vectors` 默认 false + opt-in） | M5 |
+| **D4'** | WP06 内部探针 3 项 P1 加固（批次上限 / 跨库校验 / c2pa 形态） | M4-WP99-T02/03/04 待立 |
+| D4 | 渗透 3 项 P1 加固（M4-WP99-T02/03/04 预留：批次上限/跨库校验/c2pa 形态）+ **LLM 新增 P0 立即修复**（T3.4.I `include_vectors` 默认 false + opt-in） | M5 | D4 部分 ✅ **已清偿**（M4-WP99-T07，`85cb297`，2026-09-23：schema 默认 true → false + 2 个回归测试 + CI 全绿） |
 | D5 | WP02 检索吞吐基准实测（建 bench 文件 + reranker 真模型冒烟 + SIMD 环境解决） | M5 |
 | D6 | WP01 三推理栈真模型冒烟（HF 可达后补录真实吞吐） | M5 |
 | D7 | 真实评估集（200 语料/40 查询、双人盲标、真实 INBOX 分层）+ hybrid 两档评测 | M5+（真实数据面后） |
@@ -144,7 +145,8 @@ ADR（全部已接受）：0015（iroh 设备通道 hub 侧）· 0016（iroh-blo
 4. 立项夜间/模糊套件；
 5. 补 MCP e2e 真实 agent 测试（D8）。
 6. **P0 立即修复**：T3.4.I `include_vectors` 默认 true 导出向量（SEC-AI-PENTEST-001 共识 3/3）——
-   改默认 `false` + 显式 opt-in（独立任务卡 M4-WP99-T07+）。
+   改默认 `false` + 显式 opt-in（独立任务卡 M4-WP99-T07+）→ ✅ **已清偿**（`85cb297`，
+   schema 默认 true → false + 2 个 pen_test 回归 + CI run #35858281465 全绿）。
 
 ## 放行签字（G3）
 
