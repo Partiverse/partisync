@@ -8,6 +8,7 @@
 pub mod acl;
 pub mod encode;
 pub mod entry_plane;
+pub mod federation;
 pub mod iroh_channel;
 pub mod iroh_keyspace;
 pub mod ksconv;
@@ -26,6 +27,7 @@ pub use encode::{
     decode_entry_row, encode_entry_row, EncodeError, EntryRow, FLAG_DELETED, KIND_DIR, KIND_FILE,
 };
 pub use entry_plane::{HashPlane, HubError};
+pub use federation::{absorb_routes, FedClient, FedError, FedRequest, FedResponse};
 pub use net::{
     read_frame, serve, write_frame, NetFactory, NetRequest, NetResponse, TcpNetwork, FRAME_VERSION,
     MAX_FRAME_BYTES,

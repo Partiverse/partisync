@@ -137,3 +137,119 @@ async fn t02_federation_view_narrow_face() {
     );
     assert_eq!(view.rows_async().await.unwrap().len(), 1);
 }
+
+// ---------- T03：联邦线协议与客户端（SPEC 契约 2） ----------
+
+use partisync_hub::federation::{absorb_routes, FedClient, FedError, FedRequest, FedResponse};
+use partisync_hub::net::{read_frame, write_frame};
+
+/// loopback 桩服务器：按 `reply` 构造应答（帧协议与真服务端一致）。
+async fn spawn_stub(
+    reply: impl Fn(FedRequest) -> FedResponse + Send + Sync + 'static,
+) -> std::net::SocketAddr {
+    use std::sync::Arc;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok(payload) = read_frame(&mut stream).await else {
+                        return;
+                    };
+                    let Ok(req) = serde_json::from_slice::<FedRequest>(&payload) else {
+                        return;
+                    };
+                    let body = match serde_json::to_vec(&reply(req)) {
+                        Ok(b) => b,
+                        Err(_) => return,
+                    };
+                    if write_frame(&mut stream, &body).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_client_roundtrip_all_variants() {
+    let addr = spawn_stub(|req| match req {
+        FedRequest::Hello { hub_id, addr } => FedResponse::HelloAck {
+            hub_id: hub_id + 100,
+            addr,
+            routes: vec![route(" echoed", 9, 1)],
+        },
+        FedRequest::RouteQuery { space_id } => FedResponse::RouteAnswer {
+            route: Some(route(&space_id, 2, 1)),
+        },
+        FedRequest::RouteClaim { row } => FedResponse::ClaimVerdict {
+            accepted: true,
+            winner: Some(row),
+        },
+    })
+    .await;
+
+    let mut cli = FedClient::new(addr.to_string());
+
+    let (peer_id, _, routes) = cli.hello(1, "127.0.0.1:9001").await.unwrap();
+    assert_eq!(peer_id, 101);
+    assert_eq!(routes.len(), 1);
+
+    let ans = cli.route_query("space-q").await.unwrap();
+    assert!(ans.is_some_and(|r| r.hub_id == 2));
+
+    let (accepted, winner) = cli.route_claim(route("space-c", 3, 1)).await.unwrap();
+    assert!(accepted);
+    assert!(winner.is_some_and(|w| w.epoch == 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_variant_mismatch_is_protocol_error() {
+    // 应答方回错变体（RouteQuery 收到 HelloAck）→ 协议错误、连接重置
+    let addr = spawn_stub(|_| FedResponse::HelloAck {
+        hub_id: 9,
+        addr: "127.0.0.1:9".into(),
+        routes: vec![],
+    })
+    .await;
+    let mut cli = FedClient::new(addr.to_string());
+    let err = cli.route_query("s").await.unwrap_err();
+    assert!(matches!(err, FedError::Protocol(_)), "got {err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_absorb_routes_merges_and_is_idempotent() {
+    let root_a = tmp_root("absorb-a");
+    let root_b = tmp_root("absorb-b");
+    let view_a = partisync_hub::registry::FederationView::new(Arc::new(
+        open_registry(&root_a).await.unwrap(),
+    ));
+    let view_b = partisync_hub::registry::FederationView::new(Arc::new(
+        open_registry(&root_b).await.unwrap(),
+    ));
+
+    view_a.set_route_async(route("s1", 1, 1)).await.unwrap();
+    view_a.set_route_async(route("s2", 1, 4)).await.unwrap();
+
+    // B 吸收 A 的视图：两行全收
+    let remote = view_a.rows_async().await.unwrap();
+    assert_eq!(absorb_routes(&view_b, &remote).await.unwrap(), 2);
+    assert_eq!(view_b.rows_async().await.unwrap().len(), 2);
+
+    // 幂等重放：0 改写
+    let remote = view_a.rows_async().await.unwrap();
+    assert_eq!(absorb_routes(&view_b, &remote).await.unwrap(), 0);
+
+    // 陈旧行（同空间更低 epoch）不落盘
+    let stale = route("s2", 9, 3);
+    assert_eq!(absorb_routes(&view_b, &[stale]).await.unwrap(), 0);
+    assert_eq!(view_b.route_async("s2").await.unwrap().unwrap().epoch, 4);
+}
