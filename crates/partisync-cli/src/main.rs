@@ -655,13 +655,12 @@ async fn search_cmd(args: &[String]) -> i32 {
         .unwrap_or(20)
         .min(100);
 
-    let store = match open_db(&db).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 1;
-        }
-    };
+    // open_db 仅用于早期故障检测（路径可访问 + schema 健全）；IndexEngine 不需要 store。
+    // 失败立即返回，避免后续打开索引时再叠加错误。
+    if let Err(e) = open_db(&db).await {
+        eprintln!("error: {e}");
+        return 1;
+    }
 
     let config = partisync_index::IndexEngineConfig {
         index_root,
@@ -709,9 +708,13 @@ async fn search_cmd(args: &[String]) -> i32 {
                 }
             }
         }
-        "hybrid" | _ => {
-            // hybrid 模式需要查询向量，这里用 fake 向量演示
-            // 真实场景：query_embedding 模型生成向量后传入
+        _ => {
+            // 任何非 bm25 模式（hybrid 或未知）均回退到 BM25：
+            // - hybrid 需查询向量嵌入，当前 CLI 无 embedding 模型故降级
+            // - 未知模式保持向后兼容（不立即报错）但给出提示
+            if mode != "hybrid" {
+                eprintln!("warning: 未知模式 '{mode}'，回退到 BM25");
+            }
             eprintln!("note: 混合检索需 embedding 模型生成查询向量，当前仅支持 --mode bm25");
             eprintln!("提示: 用 --mode bm25 做纯全文检索");
             // 回退到 BM25
