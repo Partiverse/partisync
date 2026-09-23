@@ -27,7 +27,7 @@ use tokio::runtime::Runtime;
 use crate::encode::EntryRow;
 use crate::entry_plane::HubError;
 use crate::raft_store::{HubTypeConfig, RaftSnapshotBuilderStore, RaftStateMachineStore};
-use crate::registry::RegistryService;
+use crate::registry::{RegistryError, RegistryService};
 use crate::replica::{NodeConfig, Replica, ReplicaError};
 use crate::{put_entry_impl, remove_entry_impl, rename_entry_impl};
 use crate::{HashPlane, Hub, TreePlane};
@@ -466,6 +466,23 @@ pub struct HubServiceConfig {
     pub heartbeat_interval_ms: u64,
 }
 
+/// 空间路由决策（SPEC M5-WP02 T06/契约 4）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteDecision {
+    /// 本 hub 即持有方：操作就地继续。
+    Local,
+    /// 非 本 hub 空间：重定向到持有 hub。
+    Redirect {
+        /// 持有 hub id。
+        hub_id: u64,
+        /// 持有 hub 可达地址（路由行 `addr`）。
+        addr: String,
+    },
+    /// 联邦视图未知——升级为 Redirect/Local 由联邦层 `resolve_space` /
+    /// `claim_space` 完成（service 层纯本地视图，不持网络）。
+    Unknown,
+}
+
 impl HubService {
     /// 打开（默认阈值 4M 行；选举/心跳默认 300-600/50ms）。
     ///
@@ -520,6 +537,42 @@ impl HubService {
     #[must_use]
     pub fn registry_leader_hint(&self) -> Option<u64> {
         self.replica.current_leader()
+    }
+
+    /// 空间路由门（SPEC M5-WP02 T06/契约 4）：读本地 raft 视图（线性一致）
+    /// 三分类——本 hub 持有 → [`RouteDecision::Local`]；他 hub 持有 →
+    /// [`RouteDecision::Redirect`]；未知 → [`RouteDecision::Unknown`]。
+    ///
+    /// # Errors
+    /// raft 读失败。
+    pub fn route_for(
+        &self,
+        space_id: &str,
+        self_hub_id: u64,
+    ) -> Result<RouteDecision, ReplicaError> {
+        self.rt
+            .block_on(self.route_for_async(space_id, self_hub_id))
+    }
+
+    /// [`Self::route_for`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 读失败。
+    pub async fn route_for_async(
+        &self,
+        space_id: &str,
+        self_hub_id: u64,
+    ) -> Result<RouteDecision, ReplicaError> {
+        match self.registry.route_async(space_id).await {
+            Ok(Some(row)) if row.hub_id == self_hub_id => Ok(RouteDecision::Local),
+            Ok(Some(row)) => Ok(RouteDecision::Redirect {
+                hub_id: row.hub_id,
+                addr: row.addr,
+            }),
+            Ok(None) => Ok(RouteDecision::Unknown),
+            Err(RegistryError::Raft(re)) => Err(*re),
+            Err(other) => Err(ReplicaError::Io(std::io::Error::other(other.to_string()))),
+        }
     }
 
     /// 写入 entry（raft 线性一致：commit+apply 后应答）。

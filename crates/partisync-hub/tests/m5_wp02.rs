@@ -460,3 +460,44 @@ async fn t05_peer_unreachable_resolve_miss_and_claim_is_local_proposal() {
     assert_eq!((w.hub_id, w.epoch), (2, 1));
     assert!(h2.view().route_async("s-offline").await.unwrap().is_some());
 }
+
+// ---------- T06：设备面 redirect 门（SPEC 契约 4） ----------
+
+use partisync_hub::service::{HubService, RouteDecision};
+
+#[test]
+fn t06_route_for_three_branches() {
+    let root = tmp_root("t06-gate");
+    let svc = HubService::open(&root).unwrap();
+
+    // 未知空间（视图无行）
+    assert_eq!(svc.route_for("no-such", 1).unwrap(), RouteDecision::Unknown);
+
+    // 本 hub 持有
+    svc.registry()
+        .set_route(RouteRow {
+            space_id: "mine".into(),
+            hub_id: 1,
+            addr: "127.0.0.1:9001".into(),
+            epoch: 1,
+        })
+        .unwrap();
+    assert_eq!(svc.route_for("mine", 1).unwrap(), RouteDecision::Local);
+
+    // 他 hub 持有 → 携带持有方地址重定向
+    svc.registry()
+        .set_route(RouteRow {
+            space_id: "theirs".into(),
+            hub_id: 2,
+            addr: "10.0.0.2:9002".into(),
+            epoch: 3,
+        })
+        .unwrap();
+    assert_eq!(
+        svc.route_for("theirs", 1).unwrap(),
+        RouteDecision::Redirect {
+            hub_id: 2,
+            addr: "10.0.0.2:9002".into()
+        }
+    );
+}
