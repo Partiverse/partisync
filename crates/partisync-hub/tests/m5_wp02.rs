@@ -501,3 +501,122 @@ fn t06_route_for_three_branches() {
         }
     );
 }
+
+// ---------- T07：双 hub 全链矩阵与基准（SPEC 验收标准） ----------
+
+/// 全链（裁定 5/6/9）：hub1 认领 → 反熵同步到 hub2 → hub2 解析命中 →
+/// redirect 决策（视图行 → 决策映射，与 `HubService::route_for` 同构语义，
+/// 见 T06 测试；联邦面全链以 FederationView 断言）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t07_full_chain_claim_sync_query_redirect() {
+    let mut h1 = bind_hub("t07-e2e-1", 1, vec![]).await;
+    let mut h2 = bind_hub("t07-e2e-2", 2, vec![]).await;
+    wire(&mut h1, &mut h2);
+    h1.spawn_serve();
+    h2.spawn_serve();
+
+    // claim：hub1 认领空间——应答方 hub2 在裁决时即时落盘（裁定 5），
+    // 双侧视图即刻一致
+    let row = h1
+        .claim_space("space-asset", "127.0.0.1:9101")
+        .await
+        .unwrap();
+    assert_eq!((row.hub_id, row.epoch), (1, 1));
+    assert!(h2
+        .view()
+        .route_async("space-asset")
+        .await
+        .unwrap()
+        .is_some_and(|r| r.hub_id == 1));
+
+    // sync：反熵重放幂等（0 改写）
+    assert_eq!(h2.sync_once(1).await.unwrap(), (1, 0));
+
+    // query：hub2 本地解析（不跨网络）
+    let resolved = h2.resolve_space("space-asset").await.unwrap();
+    let row = resolved.expect("hub2 视图应已含该空间");
+
+    // redirect 决策（hub2 自身 id=2）：非本 hub → Redirect 到 hub1
+    assert_ne!(row.hub_id, h2.hub_id());
+    assert_eq!(row.addr, "127.0.0.1:9101");
+
+    // 幂等重放收尾
+    assert_eq!(h2.sync_once(1).await.unwrap(), (1, 0));
+}
+
+/// 反熵矩阵（裁定 6/9）：多空间批量同步 + 双向 + 分区恢复（t04 单空间
+/// 已覆盖）之上的 5 空间批量收敛。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t07_multi_space_matrix_converges() {
+    let mut h1 = bind_hub(
+        "t07-matrix-1",
+        1,
+        vec![
+            route("sp-a", 1, 1),
+            route("sp-b", 1, 2),
+            route("sp-c", 1, 1),
+        ],
+    )
+    .await;
+    let mut h2 = bind_hub(
+        "t07-matrix-2",
+        2,
+        vec![route("sp-d", 2, 1), route("sp-e", 2, 1)],
+    )
+    .await;
+    wire(&mut h1, &mut h2);
+    h1.spawn_serve();
+    h2.spawn_serve();
+
+    assert_eq!(h1.sync_once(2).await.unwrap(), (2, 2));
+    assert_eq!(h2.sync_once(1).await.unwrap(), (1, 3));
+    let snap1 = view_snapshot(h1.view()).await;
+    assert_eq!(snap1.len(), 5);
+    assert_eq!(snap1, view_snapshot(h2.view()).await);
+}
+
+/// 基准（T07 验收）：RouteQuery 往返 P50/P99 + 10⁴ 行全量握手吞吐。
+/// `cargo test -p partisync-hub --test m5_wp02 -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "基准：显式运行并登记 docs/reports/bench/M5-WP02-federation.md"]
+async fn t07_bench_route_query_and_view_exchange() {
+    let mut h1 = bind_hub("t07-bench-1", 1, vec![]).await;
+    let mut h2 = bind_hub("t07-bench-2", 2, vec![]).await;
+    wire(&mut h1, &mut h2);
+    h1.spawn_serve();
+    h2.spawn_serve();
+
+    // 预热：hub1 侧灌 10⁴ 路由行（raft 单提交）
+    for i in 0..10_000u64 {
+        h1.view()
+            .set_route_async(route(&format!("bench-{i:06}"), 1, 1))
+            .await
+            .unwrap();
+    }
+
+    // RouteQuery 往返（复用长连接，n=2000）
+    let addr1 = h1.local_addr().unwrap().to_string();
+    let mut cli = FedClient::new(addr1);
+    let n = 2_000;
+    let mut samples = Vec::with_capacity(n);
+    for i in 0..n {
+        let key = format!("bench-{:06}", i % 10_000);
+        let t0 = std::time::Instant::now();
+        assert!(cli.route_query(&key).await.unwrap().is_some());
+        samples.push(t0.elapsed());
+    }
+    samples.sort();
+    let p50 = samples[n / 2];
+    let p99 = samples[n * 99 / 100];
+    println!("RouteQuery P50 = {p50:?}  P99 = {p99:?} (n={n})");
+
+    // 全量握手：10⁴ 行 HelloAck 往返 + hub2 吸收落盘
+    let t0 = std::time::Instant::now();
+    let applied = h2.sync_once(1).await.unwrap();
+    let sync_elapsed = t0.elapsed();
+    println!(
+        "HelloAck 10⁴ 行往返+吸收 = {sync_elapsed:?}（applied = {:?}，≈ {:.0} 行/s）",
+        applied.1,
+        10_000.0 / sync_elapsed.as_secs_f64()
+    );
+}
