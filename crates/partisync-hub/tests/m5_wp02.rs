@@ -253,3 +253,112 @@ async fn t03_absorb_routes_merges_and_is_idempotent() {
     assert_eq!(absorb_routes(&view_b, &[stale]).await.unwrap(), 0);
     assert_eq!(view_b.route_async("s2").await.unwrap().unwrap().epoch, 4);
 }
+
+// ---------- T04：联邦服务端与反熵视图同步（SPEC 裁定 6） ----------
+
+use partisync_hub::federation::{FedConfig, FedHandle};
+use partisync_hub::registry::FederationView;
+
+/// 绑定一个带种子视图的 hub（`127.0.0.1:0`，advertise 由测试回填）。
+async fn bind_hub(tag: &str, hub_id: u64, seed: Vec<RouteRow>) -> FedHandle {
+    let root = tmp_root(tag);
+    let view = FederationView::new(Arc::new(open_registry(&root).await.unwrap()));
+    for r in seed {
+        view.set_route_async(r).await.unwrap();
+    }
+    FedHandle::bind(FedConfig::new(hub_id, "127.0.0.1:0"), view)
+        .await
+        .unwrap()
+}
+
+fn wire(a: &mut FedHandle, b: &mut FedHandle) {
+    let (addr_a, addr_b) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+    a.set_advertised_addr(addr_a.to_string());
+    b.set_advertised_addr(addr_b.to_string());
+    a.set_peer_addr(b.hub_id(), addr_b.to_string());
+    b.set_peer_addr(a.hub_id(), addr_a.to_string());
+}
+
+async fn view_snapshot(view: &FederationView) -> Vec<(String, u64, u64)> {
+    let mut rows: Vec<(String, u64, u64)> = view
+        .rows_async()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.space_id, r.hub_id, r.epoch))
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_two_hub_bidirectional_convergence_and_idempotence() {
+    let mut h1 = bind_hub("t04-conv-1", 1, vec![route("s1", 1, 1)]).await;
+    let mut h2 = bind_hub("t04-conv-2", 2, vec![route("s2", 2, 1)]).await;
+    wire(&mut h1, &mut h2);
+    h1.spawn_serve();
+    h2.spawn_serve();
+
+    // 双向各一轮：A 吸收 B，B 吸收 A
+    assert_eq!(h1.sync_once(2).await.unwrap(), (2, 1));
+    assert_eq!(h2.sync_once(1).await.unwrap(), (1, 1));
+    let snap1 = view_snapshot(h1.view()).await;
+    let snap2 = view_snapshot(h2.view()).await;
+    assert_eq!(snap1, snap2);
+    assert_eq!(snap1.len(), 2);
+
+    // 幂等重放：0 改写、视图不再变更
+    assert_eq!(h1.sync_once(2).await.unwrap(), (2, 0));
+    assert_eq!(h2.sync_once(1).await.unwrap(), (1, 0));
+    assert_eq!(view_snapshot(h1.view()).await, snap1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_server_serves_hello_and_route_query() {
+    let h1 = bind_hub("t04-serve", 1, vec![route("s1", 1, 1)]).await;
+    let addr = h1.local_addr().unwrap().to_string();
+    let view = h1.view().clone();
+    h1.spawn_serve();
+
+    let mut cli = FedClient::new(addr);
+    let (peer_id, _, routes) = cli.hello(9, "127.0.0.1:9").await.unwrap();
+    assert_eq!(peer_id, 1);
+    assert_eq!(routes.len(), view.rows_async().await.unwrap().len());
+
+    assert!(cli.route_query("s1").await.unwrap().is_some());
+    assert!(cli.route_query("not-created").await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_peer_down_serves_stale_view_then_rejoin_converges() {
+    let mut h1 = bind_hub("t04-part-1", 1, vec![route("s1", 1, 1)]).await;
+    let mut h2 = bind_hub("t04-part-2", 2, vec![]).await;
+    wire(&mut h1, &mut h2);
+    let view1 = h1.view().clone();
+    let jh1 = h1.spawn_serve();
+
+    // 分区前：h2 吸收 s1
+    assert_eq!(h2.sync_once(1).await.unwrap(), (1, 1));
+
+    // 分区：hub 1 监听关闭（abort 任务 + 丢弃句柄）→ 同步报 IO 错误，
+    // h2 陈旧视图照常应答（裁定 9）
+    drop(h1);
+    jh1.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(matches!(h2.sync_once(1).await, Err(FedError::Io(_))));
+    assert!(h2
+        .view()
+        .route_async("s1")
+        .await
+        .unwrap()
+        .is_some_and(|r| r.hub_id == 1));
+
+    // 重连：hub 1 同一注册表库以新端口重开 → 修正对端地址后一轮收敛
+    let h1b = FedHandle::bind(FedConfig::new(1, "127.0.0.1:0"), view1.clone())
+        .await
+        .unwrap();
+    h2.set_peer_addr(1, h1b.local_addr().unwrap().to_string());
+    h1b.spawn_serve();
+    assert_eq!(h2.sync_once(1).await.unwrap(), (1, 0)); // 已一致：幂等 0 改写
+    assert_eq!(view_snapshot(h2.view()).await, view_snapshot(&view1).await);
+}

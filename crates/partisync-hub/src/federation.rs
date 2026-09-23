@@ -13,17 +13,21 @@
 //! 安全姿态：联邦口 v0.1 无认证，与 raft RPC 口一致（局域网/专线假设，
 //! SPEC 裁定 3）；mTLS/iroh 传输归后续卡。
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::net::{read_frame, write_frame};
-use crate::registry::{merge_route, RouteRow};
+use crate::registry::{merge_route, FederationView, RouteRow};
 
 /// 单次联邦往返硬超时（客户端侧；loopback 实测 P99 ≪ 1ms，SPEC T07 登记）。
 pub const DEFAULT_FED_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 反熵握手默认周期（裁定 6；10⁴ 行 ≈ 1MB/握手，5s 周期无压力）。
+pub const DEFAULT_HELLO_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 联邦协议错误集（传输错误不重试——重连/重试策略归调用方）。
 #[derive(Debug)]
@@ -275,4 +279,224 @@ pub async fn absorb_routes(
         }
     }
     Ok(applied)
+}
+
+/// 联邦配置（裁定 8：身份/地址/对端表静态注入，v0.1 无动态成员）。
+#[derive(Debug, Clone)]
+pub struct FedConfig {
+    /// 本 hub id（路由行 `hub_id` 与 tie-break 依据）。
+    pub hub_id: u64,
+    /// 本 hub 联邦口对外地址（HelloAck 与路由行 `addr` 承载）。
+    pub addr: String,
+    /// 对端表（hub_id → 联邦口地址；反熵与查询按 hub_id 升序遍历）。
+    pub peers: BTreeMap<u64, String>,
+    /// 反熵握手周期（默认 [`DEFAULT_HELLO_INTERVAL`]）。
+    pub hello_interval: Duration,
+}
+
+impl FedConfig {
+    /// 最小配置（无对端、默认周期）。
+    #[must_use]
+    pub fn new(hub_id: u64, addr: impl Into<String>) -> Self {
+        Self {
+            hub_id,
+            addr: addr.into(),
+            peers: BTreeMap::new(),
+            hello_interval: DEFAULT_HELLO_INTERVAL,
+        }
+    }
+}
+
+/// 联邦服务端句柄：监听 + 本地视图读面 + 反熵驱动。
+///
+/// 可克隆（`Arc<TcpListener>`/`Arc<Mutex<FedConfig>>`）——同一 hub 的服务
+/// 循环与反熵发起可并存（`spawn_serve` 后仍可 [`Self::sync_once`]）。视图
+/// 写路径唯一：[`absorb_routes`]（合并胜出行经 raft 落盘，裁定 2/4）。
+#[derive(Clone)]
+pub struct FedHandle {
+    cfg: std::sync::Arc<std::sync::Mutex<FedConfig>>,
+    view: FederationView,
+    listener: std::sync::Arc<TcpListener>,
+}
+
+impl FedHandle {
+    /// 绑定联邦口（`cfg.addr`；测试注入 `:0` 后用 [`Self::set_advertised_addr`]
+    /// 回填真实对外地址）。
+    ///
+    /// # Errors
+    /// 绑定失败。
+    pub async fn bind(cfg: FedConfig, view: FederationView) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(&cfg.addr).await?;
+        Ok(Self {
+            cfg: std::sync::Arc::new(std::sync::Mutex::new(cfg)),
+            view,
+            listener: std::sync::Arc::new(listener),
+        })
+    }
+
+    /// 本 hub id。
+    #[must_use]
+    pub fn hub_id(&self) -> u64 {
+        self.cfg.lock().expect("fed cfg").hub_id
+    }
+
+    /// 本地视图读面。
+    #[must_use]
+    pub fn view(&self) -> &FederationView {
+        &self.view
+    }
+
+    /// 监听真实地址（`cfg.addr` 可能是 `:0` 占位）。
+    ///
+    /// # Errors
+    /// 地址不可得。
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// 回填对外 advertise 地址（bind 后、被对端同步前）。
+    pub fn set_advertised_addr(&mut self, addr: impl Into<String>) {
+        self.cfg.lock().expect("fed cfg").addr = addr.into();
+    }
+
+    /// 修正对端地址（对端重开新端口/配置热更新；静态成员语义不变）。
+    pub fn set_peer_addr(&mut self, peer_id: u64, addr: impl Into<String>) {
+        self.cfg
+            .lock()
+            .expect("fed cfg")
+            .peers
+            .insert(peer_id, addr.into());
+    }
+
+    /// 启动 accept 循环任务（后台永续）。`abort` 返回的 JoinHandle 且丢弃
+    /// 本句柄全部克隆后，监听随之关闭。
+    pub fn spawn_serve(&self) -> tokio::task::JoinHandle<std::io::Result<()>> {
+        let h = self.clone();
+        tokio::spawn(async move { h.run().await })
+    }
+
+    /// accept 循环（永续）。
+    ///
+    /// # Errors
+    /// accept 失败（连接级错误由单连接任务消化）。
+    pub async fn run(&self) -> std::io::Result<()> {
+        loop {
+            let (stream, _) = self.listener.accept().await?;
+            let (cfg, view) = {
+                let cfg = self.cfg.lock().expect("fed cfg").clone();
+                (cfg, self.view.clone())
+            };
+            tokio::spawn(async move {
+                let _ = serve_conn(stream, &cfg, &view).await;
+            });
+        }
+    }
+
+    /// 反熵单轮（裁定 6 发起侧）：向 peer 握手并吸收其全量视图。
+    /// 返回 `(peer_id, 吸收改写行数)`。
+    ///
+    /// # Errors
+    /// 传输失败（对端不可达/超时）或 raft 落盘失败。
+    pub async fn sync_once(&self, peer_id: u64) -> Result<(u64, usize), FedError> {
+        let (self_id, self_addr, peer_addr) = {
+            let cfg = self.cfg.lock().expect("fed cfg");
+            (
+                cfg.hub_id,
+                cfg.addr.clone(),
+                cfg.peers.get(&peer_id).cloned(),
+            )
+        };
+        let Some(peer_addr) = peer_addr else {
+            return Err(FedError::Protocol(format!("unknown peer {peer_id}")));
+        };
+        let mut cli = FedClient::new(peer_addr);
+        let (_, _, routes) = cli.hello(self_id, &self_addr).await?;
+        let applied = absorb_routes(&self.view, &routes).await?;
+        Ok((peer_id, applied))
+    }
+
+    /// 对全部 peer 各跑一轮（hub_id 升序；任一失败即整体短路——测试口径；
+    /// 周期循环用 [`Self::run_anti_entropy`] 的容错版）。
+    ///
+    /// # Errors
+    /// 首个失败 peer 的错误。
+    pub async fn sync_all(&self) -> Result<Vec<(u64, usize)>, FedError> {
+        let peer_ids: Vec<u64> = {
+            let cfg = self.cfg.lock().expect("fed cfg");
+            cfg.peers.keys().copied().collect()
+        };
+        let mut out = Vec::with_capacity(peer_ids.len());
+        for peer_id in peer_ids {
+            out.push(self.sync_once(peer_id).await?);
+        }
+        Ok(out)
+    }
+
+    /// 周期反熵循环（永续；裁定 6）：每 [`FedConfig::hello_interval`] 对
+    /// 全部 peer 重放握手，peer 不可达跳过（下一轮重试）。
+    pub async fn run_anti_entropy(&self) {
+        loop {
+            let (interval, peer_ids) = {
+                let cfg = self.cfg.lock().expect("fed cfg");
+                (
+                    cfg.hello_interval,
+                    cfg.peers.keys().copied().collect::<Vec<_>>(),
+                )
+            };
+            tokio::time::sleep(interval).await;
+            for peer_id in peer_ids {
+                if let Err(e) = self.sync_once(peer_id).await {
+                    tracing::debug!(peer = peer_id, error = %e, "anti-entropy sync skipped");
+                }
+            }
+        }
+    }
+}
+
+/// 单连接服务循环：读帧 → 分发 → 写应答；任何错误断开（客户端重连自愈）。
+async fn serve_conn(
+    mut stream: TcpStream,
+    cfg: &FedConfig,
+    view: &FederationView,
+) -> std::io::Result<()> {
+    loop {
+        let payload = read_frame(&mut stream).await?;
+        let req: FedRequest = serde_json::from_slice(&payload)
+            .map_err(|e| std::io::Error::other(format!("request decode: {e}")))?;
+        let resp = handle_request(cfg, view, req)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let body = serde_json::to_vec(&resp)
+            .map_err(|e| std::io::Error::other(format!("response encode: {e}")))?;
+        write_frame(&mut stream, &body).await?;
+    }
+}
+
+/// 请求分发（Hello/RouteQuery 语义见契约 2；RouteClaim 协商语义随 T05）。
+async fn handle_request(
+    cfg: &FedConfig,
+    view: &FederationView,
+    req: FedRequest,
+) -> Result<FedResponse, FedError> {
+    match req {
+        FedRequest::Hello {
+            hub_id: _peer,
+            addr: _addr,
+        } => {
+            // 发起方身份 v0.1 仅日志级（对端视图由发起方吸收本端应答取得）
+            let routes = view.rows_async().await?;
+            Ok(FedResponse::HelloAck {
+                hub_id: cfg.hub_id,
+                addr: cfg.addr.clone(),
+                routes,
+            })
+        }
+        FedRequest::RouteQuery { space_id } => Ok(FedResponse::RouteAnswer {
+            route: view.route_async(&space_id).await?,
+        }),
+        FedRequest::RouteClaim { .. } => {
+            // 协商语义随 T05 落地；此前显式拒绝（不做静默错误应答）
+            Err(FedError::Protocol("RouteClaim not served yet".into()))
+        }
+    }
 }
