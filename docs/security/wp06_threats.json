@@ -1,0 +1,330 @@
+{
+  "metadata": {
+    "source": "docs/security/threat-model-mcp-gateway.md §3",
+    "extracted_at": "2026-09-23",
+    "extractor": "ZCode (MiniMax-M3)",
+    "method": "手工从 STRIDE × 6 工具 矩阵逐行转录，每行为一条评估单元"
+  },
+  "threats": [
+    {
+      "id": "T3.1.S",
+      "tool": "asset_search",
+      "stride": "S",
+      "category": "Spoofing",
+      "threat": "伪造 client 身份；stdio 父子信任假设",
+      "attack_path": "无 — RMCP 无鉴权层（设计）",
+      "current_mitigation": "stdio 进程父子信任已足够",
+      "residual": "低"
+    },
+    {
+      "id": "T3.1.T",
+      "tool": "asset_search",
+      "stride": "T",
+      "category": "Tampering",
+      "threat": "Unicode 控制字符 / 嵌套正则触发 tantivy 异常",
+      "attack_path": "注入 query 字段触发 tantivy QueryParser 异常",
+      "current_mitigation": "tantivy 自身异常隔离；BM25 走 safe QueryParser",
+      "residual": "中"
+    },
+    {
+      "id": "T3.1.I",
+      "tool": "asset_search",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "大 limit 返回触发栈外 OOM；错误消息含 SQL 细节",
+      "attack_path": "limit=1_000_000_000 + 多次并发调用；恶意 query 触发 panic 路径",
+      "current_mitigation": "limit.clamp(1, 100) + internal_error 不透 SQL",
+      "residual": "中"
+    },
+    {
+      "id": "T3.1.D",
+      "tool": "asset_search",
+      "stride": "D",
+      "category": "Denial of Service",
+      "threat": "limit=100 + 100 万条目 + 多次调用 → BM25 全表扫描",
+      "attack_path": "高频调用 asset_search 触发 tantivy TopDocs 全表扫描",
+      "current_mitigation": "tantivy TopDocs limit 100 已限",
+      "residual": "中"
+    },
+    {
+      "id": "T3.1.E",
+      "tool": "asset_search",
+      "stride": "E",
+      "category": "Elevation of Privilege",
+      "threat": "提权（无 — 查询只读）",
+      "attack_path": "无",
+      "current_mitigation": "无",
+      "residual": "低"
+    },
+    {
+      "id": "T3.2.S",
+      "tool": "asset_read",
+      "stride": "S",
+      "category": "Spoofing",
+      "threat": "伪造 content_id 跨库访问",
+      "attack_path": "content_id 不属于本 DB 时返回 tool_err（设计）",
+      "current_mitigation": "已实现",
+      "residual": "低"
+    },
+    {
+      "id": "T3.2.T",
+      "tool": "asset_read",
+      "stride": "T",
+      "category": "Tampering",
+      "threat": "SQL 注入 content_id 字段",
+      "attack_path": "sqlx 0.9 参数化绑定（已实现）",
+      "current_mitigation": "sqlx 参数化已落地",
+      "residual": "低"
+    },
+    {
+      "id": "T3.2.R",
+      "tool": "asset_read",
+      "stride": "R",
+      "category": "Repudiation",
+      "threat": "工具调用日志未落",
+      "attack_path": "MCP 工具调用无审计 trail",
+      "current_mitigation": "无",
+      "residual": "中"
+    },
+    {
+      "id": "T3.2.I",
+      "tool": "asset_read",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "超长 detail 字段（OCR 100KB+）触发 JSON 体积爆炸",
+      "attack_path": "返回 OCR 文本超大",
+      "current_mitigation": "limit=1 调用固定上限",
+      "residual": "低"
+    },
+    {
+      "id": "T3.2.D",
+      "tool": "asset_read",
+      "stride": "D",
+      "category": "Denial of Service",
+      "threat": "DB 慢查询",
+      "attack_path": "构造全表扫描型 content_id",
+      "current_mitigation": "sqlx 已参数化",
+      "residual": "低"
+    },
+    {
+      "id": "T3.2.E",
+      "tool": "asset_read",
+      "stride": "E",
+      "category": "Elevation of Privilege",
+      "threat": "提权（无 — 只读）",
+      "attack_path": "无",
+      "current_mitigation": "无",
+      "residual": "低"
+    },
+    {
+      "id": "T3.3.T",
+      "tool": "asset_organize",
+      "stride": "T",
+      "category": "Tampering",
+      "threat": "路径穿越 / 注入 operations.value 含恶意 tag 名",
+      "attack_path": "operations.value = '../../etc' 或 'tag;rm -rf'",
+      "current_mitigation": "标签表无文件路径；tag 长度未限",
+      "residual": "中"
+    },
+    {
+      "id": "T3.3.R",
+      "tool": "asset_organize",
+      "stride": "R",
+      "category": "Repudiation",
+      "threat": "软删除不可追溯",
+      "attack_path": "delete 操作无审计",
+      "current_mitigation": "无",
+      "residual": "中"
+    },
+    {
+      "id": "T3.3.I",
+      "tool": "asset_organize",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "错误信息含 DB schema",
+      "attack_path": "ErrorData::invalid_params 透 schema",
+      "current_mitigation": "未实测",
+      "residual": "中"
+    },
+    {
+      "id": "T3.3.D",
+      "tool": "asset_organize",
+      "stride": "D",
+      "category": "Denial of Service",
+      "threat": "operations 数组超长（1 万条）",
+      "attack_path": "单事务批写阻塞其他请求",
+      "current_mitigation": "set_tag 单事务重写（WP03 T04 验收）",
+      "residual": "中"
+    },
+    {
+      "id": "T3.3.E",
+      "tool": "asset_organize",
+      "stride": "E",
+      "category": "Elevation of Privilege",
+      "threat": "跨库操作（无 — 当前无多租户）",
+      "attack_path": "无",
+      "current_mitigation": "无",
+      "residual": "低（M5 涉及）"
+    },
+    {
+      "id": "T3.4.T",
+      "tool": "dataset_export",
+      "stride": "T",
+      "category": "Tampering",
+      "threat": "路径穿越 output_dir",
+      "attack_path": "output_dir = '/tmp/../../etc/passwd'",
+      "current_mitigation": "未实测",
+      "residual": "高"
+    },
+    {
+      "id": "T3.4.I",
+      "tool": "dataset_export",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "include_vectors 默认 true 导出向量",
+      "attack_path": "默认 true 是设计",
+      "current_mitigation": "默认值需审视",
+      "residual": "中"
+    },
+    {
+      "id": "T3.4.D",
+      "tool": "dataset_export",
+      "stride": "D",
+      "category": "Denial of Service",
+      "threat": "shard_size=0 + 1M records 内存爆炸",
+      "attack_path": "流写已实现（WP03 T04 验收）",
+      "current_mitigation": "JSONL 流写",
+      "residual": "低"
+    },
+    {
+      "id": "T3.4.E",
+      "tool": "dataset_export",
+      "stride": "E",
+      "category": "Elevation of Privilege",
+      "threat": "跨库导出",
+      "attack_path": "content_ids 不属于本库",
+      "current_mitigation": "DB JOIN 自然过滤",
+      "residual": "低"
+    },
+    {
+      "id": "T3.5.I",
+      "tool": "job_status",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "checkpoint 路径含敏感目录",
+      "attack_path": "job_id 含 SQL 注入试探",
+      "current_mitigation": "sqlx 参数化",
+      "residual": "低"
+    },
+    {
+      "id": "T3.5.D",
+      "tool": "job_status",
+      "stride": "D",
+      "category": "Denial of Service",
+      "threat": "列出全部 jobs 触发大结果集",
+      "attack_path": "job_id='' 列出 recent",
+      "current_mitigation": "已实现 LIMIT",
+      "residual": "低"
+    },
+    {
+      "id": "T3.6.T",
+      "tool": "CLI",
+      "stride": "T",
+      "category": "Tampering",
+      "threat": "CLI 参数注入",
+      "attack_path": "argv 解析",
+      "current_mitigation": "clap 等标准化解析",
+      "residual": "低（未来迁移）"
+    },
+    {
+      "id": "T3.6.I",
+      "tool": "CLI",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "partisync search 返回完整 highlight",
+      "attack_path": "无敏感信息",
+      "current_mitigation": "无",
+      "residual": "低"
+    },
+    {
+      "id": "T3.6.D",
+      "tool": "CLI",
+      "stride": "D",
+      "category": "Denial of Service",
+      "threat": "partisync sidecar-run 全树递归无大小上限",
+      "attack_path": "用户控制 root",
+      "current_mitigation": "无",
+      "residual": "中"
+    },
+    {
+      "id": "T-NEW.1",
+      "tool": "MCP_PROTOCOL",
+      "stride": "T",
+      "category": "Tampering",
+      "threat": "MCP initialize 阶段协议篡改（无鉴权）",
+      "attack_path": "拦截 initialize request 注入 capabilities",
+      "current_mitigation": "无",
+      "residual": "中"
+    },
+    {
+      "id": "T-NEW.2",
+      "tool": "MCP_PROTOCOL",
+      "stride": "R",
+      "category": "Repudiation",
+      "threat": "tools/call 调用无会话级 trail（5 工具全缺）",
+      "attack_path": "无审计层",
+      "current_mitigation": "无",
+      "residual": "中"
+    },
+    {
+      "id": "T-NEW.3",
+      "tool": "asset_search",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "高亮片段含敏感词（OCR 文本透出 PII）",
+      "attack_path": "高亮返回 200 字 OCR 片段",
+      "current_mitigation": "snippet 截断无 PII 过滤",
+      "residual": "中"
+    },
+    {
+      "id": "T-NEW.4",
+      "tool": "asset_organize",
+      "stride": "T",
+      "category": "Tampering",
+      "threat": "tag 写入路径未字符集白名单（emoji / 控制字符入库）",
+      "attack_path": "tag.value = '<script>alert(1)</script>'",
+      "current_mitigation": "无",
+      "residual": "中"
+    },
+    {
+      "id": "T-NEW.5",
+      "tool": "asset_organize",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "delete 操作后 tag 仍可逆查（entry_tag.deleted=0 历史）",
+      "attack_path": "DELETE 后查表",
+      "current_mitigation": "deleted=0 软过滤",
+      "residual": "中"
+    },
+    {
+      "id": "T-NEW.6",
+      "tool": "dataset_export",
+      "stride": "I",
+      "category": "Information Disclosure",
+      "threat": "输出 manifest 路径可枚举含用户信息",
+      "attack_path": "/tmp/partisync_export/{user-hash}/",
+      "current_mitigation": "UUID 路径",
+      "residual": "低"
+    },
+    {
+      "id": "T-NEW.7",
+      "tool": "all_tools",
+      "stride": "D",
+      "category": "Denial of Service",
+      "threat": "tools/list 重复请求触发 schema 重建",
+      "attack_path": "高频 tools/list 调用",
+      "current_mitigation": "rmcp 缓存",
+      "residual": "低"
+    }
+  ]
+}
