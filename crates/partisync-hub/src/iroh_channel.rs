@@ -317,9 +317,9 @@ pub enum UploadAckStatus {
     Retrying = 3,
 }
 
-const UPLOAD_ACK_VERSION: u8 = 0x01;
-const UPLOAD_ACK_TYPE: u8 = 0x02;
-const UPLOAD_ACK_FRAME_LEN: usize = 1 + 1 + 32 + 1; // version + type + hash + status = 35B
+pub const UPLOAD_ACK_VERSION: u8 = 0x01;
+pub const UPLOAD_ACK_TYPE: u8 = 0x02;
+pub const UPLOAD_ACK_FRAME_LEN: usize = 1 + 1 + 32 + 1; // version + type + hash + status = 35B
 
 /// 序列化单个 UploadAck 帧到字节缓冲。
 fn encode_upload_ack(hash: &Hash, status: UploadAckStatus) -> [u8; UPLOAD_ACK_FRAME_LEN] {
