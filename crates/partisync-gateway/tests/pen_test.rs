@@ -644,3 +644,62 @@ async fn pen_dataset_export_vectors_explicit_off() {
     let _ = std::fs::remove_dir_all(&out_dir);
     client.cancel().await.ok();
 }
+
+// ─── M4-WP99-T02：asset_organize 批大小上限回归（DoS 加固） ───
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pen_organize_batch_limit_rejects_huge() {
+    let db = prepare_db().await;
+    let client = spawn_server(&db).await;
+
+    // 1000 ops 必拒（MAX_ORGANIZE_OPS = 100）—— invalid_params 走 ServiceError
+    let mut ops = Vec::new();
+    for i in 0..1000 {
+        ops.push(json!({
+            "content_id": format!("c-{}", i),
+            "action": "add_tag",
+            "value": "x"
+        }));
+    }
+    let result = call_raw(
+        &client,
+        "asset_organize",
+        json!({"operations": ops, "preview_only": true}),
+    )
+    .await;
+
+    // 接受两种拒绝方式：(a) ServiceError 协议层 invalid_params
+    //                  (b) Ok + is_error=true 工具层 error
+    let rejected = match &result {
+        Err(_) => true,
+        Ok(r) => r.is_error == Some(true),
+    };
+    assert!(
+        rejected,
+        "1000-op batch must be rejected (M4-WP99-T02); got: {result:?}"
+    );
+
+    // 同时验证边界值 100 ops 仍可接受（preview_only 不写库）
+    let mut ops_ok = Vec::new();
+    for i in 0..100 {
+        ops_ok.push(json!({
+            "content_id": format!("c-{}", i),
+            "action": "add_tag",
+            "value": "y"
+        }));
+    }
+    let result_ok = call_raw(
+        &client,
+        "asset_organize",
+        json!({"operations": ops_ok, "preview_only": true}),
+    )
+    .await
+    .expect("100-op boundary call must succeed");
+    assert_ne!(
+        result_ok.is_error,
+        Some(true),
+        "100-op batch (边界值) 必须通过"
+    );
+
+    client.cancel().await.ok();
+}

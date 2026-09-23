@@ -53,6 +53,12 @@ fn default_false() -> bool {
     false
 }
 
+/// asset_organize 单事务批大小上限（M4-WP99-T02，DoS 加固）。
+///
+/// 100 ops × ~50µs/op ≈ 5ms 提交延迟预算；超过则拒收（`invalid_params`）。
+/// 仍需更大批量的 caller 应改用循环分批。
+const MAX_ORGANIZE_OPS: usize = 100;
+
 #[derive(Debug, Deserialize, Default)]
 pub struct SearchFilters {
     pub content_ids: Option<Vec<String>>,
@@ -671,11 +677,25 @@ impl McpServerState {
     ///
     /// preview_only=true：返回操作计划，不写库。
     /// preview_only=false：单事务执行（任一操作失败整体回滚——set_tag 原子性）。
+    ///
+    /// **批大小上限 [`MAX_ORGANIZE_OPS`]**（M4-WP99-T02）：单事务 >100 ops 拒收，
+    /// 防止长事务阻塞 DB + 大内存压力。错误码 = `invalid_params`。
     async fn asset_organize(&self, args: &JsonValue) -> Result<CallToolResult, ErrorData> {
         let input: AssetOrganizeInput = match serde_json::from_value(args.clone()) {
             Ok(v) => v,
             Err(e) => return Err(ErrorData::invalid_params(e.to_string(), None)),
         };
+
+        if input.operations.len() > MAX_ORGANIZE_OPS {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "operations batch too large: {} > {} (DoS protection)",
+                    input.operations.len(),
+                    MAX_ORGANIZE_OPS
+                ),
+                None,
+            ));
+        }
 
         let planned: Vec<PlannedOp> = input
             .operations
