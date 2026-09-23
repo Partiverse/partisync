@@ -110,7 +110,12 @@ pub struct SidecarStages {
     pub ocr: String,
     pub transcribe: String,
     pub embed: String,
-    pub c2pa: String, // M4-WP05：管线第六 stage（state=valid/invalid/absent/…）
+    /// M4-WP05：管线第六 stage。
+    /// M4-WP99-T04 API 一致性加固：c2pa 字段对 absent 序列化 `null`（与"stage 缺席"语义一致）；
+    /// 其他 stage 维持 `String`（默认 not_started，因为 WP01 管线确保它们总是存在至少一行）。
+    /// 原因：absent stage 应当字段缺失或 null，「"not_started" 字符串」会诱导调用方误判为
+    /// 已入队但未开始（实际根本没入队）。
+    pub c2pa: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -612,6 +617,24 @@ impl McpServerState {
                 .unwrap_or("not_started")
                 .to_string()
         };
+        // M4-WP99-T04：c2pa absent → null（不是 "not_started"）。
+        // 语义区分：其他 5 个 stage 由 WP01 管线确保总是存在至少一行（默认
+        // not_started 也合理——管线启动会入队）；c2pa（M4-WP05 引入）走独立触发，
+        // 调用方需明确区分「管线跑了但 c2pa 还没轮到」vs「完全没启用 c2pa」。
+        let optional_stage_status = |s: &str| -> Option<String> {
+            stages
+                .iter()
+                .find(|r| r.stage == s)
+                .map(|r| match r.status {
+                    0 => "pending",
+                    1 => "running",
+                    2 => "done",
+                    3 => "skipped",
+                    4 => "failed",
+                    _ => "unknown",
+                })
+                .map(|s| s.to_string())
+        };
 
         let sidecar_stages = SidecarStages {
             thumbnail: stage_status("thumbnail"),
@@ -619,7 +642,8 @@ impl McpServerState {
             ocr: stage_status("ocr"),
             transcribe: stage_status("transcribe"),
             embed: stage_status("embed"),
-            c2pa: stage_status("c2pa"),
+            // M4-WP99-T04：absent c2pa → null（不是 "not_started" 字符串）
+            c2pa: optional_stage_status("c2pa"),
         };
 
         let tags: Vec<String> = if entry_path.is_empty() {

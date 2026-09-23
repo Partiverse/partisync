@@ -780,3 +780,88 @@ async fn pen_organize_cross_db_content_id_rejected() {
 
     client.cancel().await.ok();
 }
+
+// ─── M4-WP99-T04：c2pa absent 字段形态一致性（API 加固） ───
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pen_c2pa_absent_is_null_not_string() {
+    let db = prepare_db().await;
+    let client = spawn_server(&db).await;
+
+    // 默认 prepare_db() 不插入 c2pa stage → absent
+    let result = call_raw(&client, "asset_read", json!({"content_id": "c-pen"}))
+        .await
+        .expect("protocol call ok");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "asset_read must succeed when c2pa is absent"
+    );
+
+    let stages = result
+        .structured_content
+        .as_ref()
+        .and_then(|v| v.get("sidecar_stages"))
+        .expect("sidecar_stages in output");
+
+    // 修复后：c2pa 字段必须存在（key 在），且值 = null
+    // （区别于其他 stage：缺省 "not_started"）
+    assert!(
+        stages.get("c2pa").is_some(),
+        "c2pa field must be PRESENT (key in JSON), even when absent"
+    );
+    assert!(
+        stages.get("c2pa").unwrap().is_null(),
+        "c2pa absent value must be null (was 'not_started' before M4-WP99-T04): got {:?}",
+        stages.get("c2pa")
+    );
+
+    // 其他 stage 字段也应保留（不应因 c2pa 改造被牵连）
+    for stage in ["thumbnail", "exif", "ocr", "transcribe", "embed"] {
+        assert!(
+            stages.get(stage).is_some(),
+            "{stage} field must remain present (no regression)"
+        );
+    }
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pen_c2pa_present_state_serialized() {
+    // c2pa stage 已插入（state=Invalid）—— 应序列化为 "failed" 或对应状态字符串
+    let db = prepare_db().await;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&db))
+        .await
+        .expect("reopen db");
+    sqlx::query(
+        "INSERT OR REPLACE INTO sidecar_items (content_id, stage, status, detail, updated_ns) \
+         VALUES ('c-pen','c2pa',2,'{\"state\":\"valid\",\"label\":\"x\"}', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let client = spawn_server(&db).await;
+    let result = call_raw(&client, "asset_read", json!({"content_id": "c-pen"}))
+        .await
+        .expect("protocol call ok");
+
+    let stages = result
+        .structured_content
+        .as_ref()
+        .and_then(|v| v.get("sidecar_stages"))
+        .expect("sidecar_stages");
+
+    let c2pa = stages.get("c2pa").expect("c2pa field");
+    assert!(
+        !c2pa.is_null(),
+        "c2pa must serialize to a string when present"
+    );
+    assert_eq!(c2pa, "done", "status=2 → 'done'");
+
+    client.cancel().await.ok();
+}
