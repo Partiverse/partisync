@@ -473,3 +473,90 @@ async fn upload_ack_retry_success() {
     let hex = partisync_cas::content_hash(&payload);
     assert_eq!(cas.get(&hex).await.expect("cas get"), payload.to_vec());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_ack_latency_and_throughput_benchmark() {
+    let cas = ChunkStore::open_in_memory(&tempdir("bench"))
+        .await
+        .expect("cas open");
+
+    let hub_ep = bind().await;
+    let hub_addr = loopback(&hub_ep);
+    let hub_task = tokio::spawn({
+        let cas = cas.clone();
+        async move {
+            let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+            t("hub handle_incoming", handle_incoming(incoming, cas)).await
+        }
+    });
+
+    let dev_ep = bind().await;
+    let dev_store: iroh_blobs::api::Store = MemStore::default().into();
+    let conn = t("dev connect", dev_ep.connect(hub_addr, ALPN))
+        .await
+        .expect("device connect");
+    let mut acker = UploadAcker::spawn(conn.clone());
+
+    const COUNT: usize = 20;
+    const CHUNK_SIZE: usize = 16 * 1024; // 16 KB per chunk
+    let mut rtts_us = Vec::with_capacity(COUNT);
+    let total_start = std::time::Instant::now();
+
+    for i in 0..COUNT {
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        buf[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+        let payload = Bytes::from(buf);
+        let hash = dev_store
+            .blobs()
+            .add_bytes(payload)
+            .with_tag()
+            .await
+            .expect("add_bytes")
+            .hash;
+
+        let step_start = std::time::Instant::now();
+        dev_store
+            .remote()
+            .execute_push(conn.clone(), GetRequest::blob(hash).into())
+            .complete()
+            .await
+            .expect("push");
+
+        let status = acker
+            .expect_ack(hash, Duration::from_secs(10))
+            .await
+            .expect("expect_ack");
+        let elapsed_us = step_start.elapsed().as_micros() as u64;
+        rtts_us.push(elapsed_us);
+        assert_eq!(
+            status,
+            partisync_hub::iroh_channel::UploadAckStatus::Accepted
+        );
+    }
+
+    let total_elapsed = total_start.elapsed();
+    acker.close();
+    let summary = t("hub join", hub_task)
+        .await
+        .expect("hub task join")
+        .expect("handle_incoming ok");
+    assert_eq!(summary.chunks_received, COUNT as u64);
+
+    rtts_us.sort_unstable();
+    let p50_us = rtts_us[COUNT / 2];
+    let p99_us = rtts_us[(COUNT * 99) / 100];
+    let max_us = *rtts_us.last().unwrap();
+    println!(
+        "BENCH_RESULT: count={COUNT}, chunk_bytes={CHUNK_SIZE}, total_ms={:.2}, p50_ms={:.2}, p99_ms={:.2}, max_ms={:.2}",
+        total_elapsed.as_secs_f64() * 1000.0,
+        p50_us as f64 / 1000.0,
+        p99_us as f64 / 1000.0,
+        max_us as f64 / 1000.0
+    );
+    // DoD 断言：loopback 下单次 push+ack P99 < 50ms
+    assert!(
+        p99_us < 50_000,
+        "loopback UploadAck P99 should be < 50ms, got {}us",
+        p99_us
+    );
+}

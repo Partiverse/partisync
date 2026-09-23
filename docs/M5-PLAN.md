@@ -9,7 +9,7 @@
 
 | 工作包 | 主题 | 负责人/模式 | 核心目标 | 状态 |
 |---|---|---|---|---|
-| **WP01** | 设备侧 UploadAck 协议与可靠传输 | AI 自动执行 | 解决 iroh push fire-and-forget，保证 Hub CAS 落库前不丢数据 | **执行中 (3/6)** |
+| **WP01** | 设备侧 UploadAck 协议与可靠传输 | AI 自动执行 | 解决 iroh push fire-and-forget，保证 Hub CAS 落库前不丢数据 | **已完成 (6/6) ✅** |
 | **WP02** | 联邦路由协议 (Multi-Hub Federation) | 规范先行 + AI | 基于 space/content_id 前缀的多 Hub 路由协商与 Raft 视图同步 | 待排期 |
 | **WP03** | 分布式扫描调度器 | AI 自动执行 | 前缀分片并行 LIST、动态负载均衡与扫描断点恢复 | 待排期 |
 | **WP04** | 云事件流摄取引擎 | AI 自动执行 | SQS / Webhook / Kafka 增量事件流适配器与去重流水线 | 待排期 |
