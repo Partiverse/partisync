@@ -371,7 +371,11 @@ async fn send_upload_acks(
             if let Err(e) = send_stream.finish() {
                 warn!(?e, "UploadAck stream finish 失败");
             } else {
-                info!(acks = ack_items.len(), bytes = payload_len, "UploadAck 已发往设备");
+                info!(
+                    acks = ack_items.len(),
+                    bytes = payload_len,
+                    "UploadAck 已发往设备"
+                );
             }
         }
         Err(e) => {

@@ -22,7 +22,9 @@ use iroh::endpoint::Connection;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use crate::iroh_channel::{UPLOAD_ACK_FRAME_LEN, UPLOAD_ACK_TYPE, UPLOAD_ACK_VERSION, UploadAckStatus};
+use crate::iroh_channel::{
+    UploadAckStatus, UPLOAD_ACK_FRAME_LEN, UPLOAD_ACK_TYPE, UPLOAD_ACK_VERSION,
+};
 
 /// UploadAck 接收错误。
 #[derive(Debug)]
@@ -199,9 +201,9 @@ impl UploadAcker {
         for attempt in 0..=policy.max_retries {
             push_fn().await?;
             match self.expect_ack(hash, policy.ack_timeout).await {
-                Ok(
-                    status @ (UploadAckStatus::Accepted | UploadAckStatus::Duplicate),
-                ) => return Ok(status),
+                Ok(status @ (UploadAckStatus::Accepted | UploadAckStatus::Duplicate)) => {
+                    return Ok(status)
+                }
                 Ok(UploadAckStatus::Rejected) => return Err(AckError::Rejected { hash }),
                 Ok(UploadAckStatus::Retrying) | Err(AckError::Timeout { .. }) => {
                     if attempt < policy.max_retries {
@@ -237,9 +239,7 @@ fn decode_ack_frame(buf: &[u8]) -> Result<DecodedAck, &'static str> {
     if buf[1] != UPLOAD_ACK_TYPE {
         return Err("类型不匹配");
     }
-    let hash_bytes: [u8; 32] = buf[2..34]
-        .try_into()
-        .map_err(|_| "hash 字段错")?;
+    let hash_bytes: [u8; 32] = buf[2..34].try_into().map_err(|_| "hash 字段错")?;
     let hash = iroh_blobs::Hash::from_bytes(hash_bytes);
     let status = match buf[34] {
         0 => UploadAckStatus::Accepted,

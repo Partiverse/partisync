@@ -10,7 +10,6 @@ pub mod encode;
 pub mod entry_plane;
 pub mod iroh_channel;
 pub mod iroh_keyspace;
-pub mod upload_acker;
 pub mod ksconv;
 pub mod net;
 pub mod raft_store;
@@ -21,6 +20,7 @@ pub mod service;
 pub mod shard;
 pub mod split;
 pub mod tree_plane;
+pub mod upload_acker;
 
 pub use encode::{
     decode_entry_row, encode_entry_row, EncodeError, EntryRow, FLAG_DELETED, KIND_DIR, KIND_FILE,

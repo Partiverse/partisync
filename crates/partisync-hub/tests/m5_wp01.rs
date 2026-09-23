@@ -46,10 +46,7 @@ fn loopback(ep: &iroh::Endpoint) -> EndpointAddr {
 }
 
 fn tempdir(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "hub-m5-wp01-{tag}-{}",
-        partisync_core::Ulid::now()
-    ))
+    std::env::temp_dir().join(format!("hub-m5-wp01-{tag}-{}", partisync_core::Ulid::now()))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -65,7 +62,9 @@ async fn upload_ack_basic() {
     let hub_task = tokio::spawn({
         let cas = cas.clone();
         async move {
-            let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+            let incoming = t("hub accept", hub_ep.accept())
+                .await
+                .expect("hub incoming");
             t("hub handle_incoming", handle_incoming(incoming, cas)).await
         }
     });
@@ -103,7 +102,10 @@ async fn upload_ack_basic() {
     )
     .await
     .expect("expect_ack ok");
-    assert_eq!(status, partisync_hub::iroh_channel::UploadAckStatus::Accepted);
+    assert_eq!(
+        status,
+        partisync_hub::iroh_channel::UploadAckStatus::Accepted
+    );
 
     // 关闭 conn → hub 端 while 循环退出 → hub_task 完成
     acker.close();
@@ -134,7 +136,9 @@ async fn upload_ack_multiple() {
     let hub_task = tokio::spawn({
         let cas = cas.clone();
         async move {
-            let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+            let incoming = t("hub accept", hub_ep.accept())
+                .await
+                .expect("hub incoming");
             t("hub handle_incoming", handle_incoming(incoming, cas)).await
         }
     });
@@ -235,7 +239,9 @@ async fn upload_ack_duplicate() {
     let hub_task = tokio::spawn({
         let cas = cas.clone();
         async move {
-            let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+            let incoming = t("hub accept", hub_ep.accept())
+                .await
+                .expect("hub incoming");
             t("hub handle_incoming", handle_incoming(incoming, cas)).await
         }
     });
@@ -329,8 +335,14 @@ async fn upload_ack_rejected() {
     let hub_ep = bind().await;
     let hub_addr = loopback(&hub_ep);
     let hub_task = tokio::spawn(async move {
-        let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
-        t("hub handle_incoming", handle_incoming(incoming, FailingSink)).await
+        let incoming = t("hub accept", hub_ep.accept())
+            .await
+            .expect("hub incoming");
+        t(
+            "hub handle_incoming",
+            handle_incoming(incoming, FailingSink),
+        )
+        .await
     });
 
     let dev_ep = bind().await;
@@ -414,7 +426,9 @@ async fn upload_ack_retry_success() {
     let hub_ep = bind().await;
     let hub_addr = loopback(&hub_ep);
     let hub_task = tokio::spawn(async move {
-        let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+        let incoming = t("hub accept", hub_ep.accept())
+            .await
+            .expect("hub incoming");
         t("hub handle_incoming", handle_incoming(incoming, flaky)).await
     });
 
@@ -485,7 +499,9 @@ async fn upload_ack_latency_and_throughput_benchmark() {
     let hub_task = tokio::spawn({
         let cas = cas.clone();
         async move {
-            let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+            let incoming = t("hub accept", hub_ep.accept())
+                .await
+                .expect("hub incoming");
             t("hub handle_incoming", handle_incoming(incoming, cas)).await
         }
     });
