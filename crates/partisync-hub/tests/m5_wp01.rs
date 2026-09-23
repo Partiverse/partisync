@@ -377,3 +377,99 @@ async fn upload_ack_rejected() {
         .expect("handle_incoming ok");
     assert_eq!(summary.chunks_received, 0);
 }
+
+#[derive(Clone, Debug)]
+struct FlakySink<S> {
+    inner: S,
+    failures_remaining: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl<S: partisync_transfer::iroh_blobs::ChunkSink> partisync_transfer::iroh_blobs::ChunkSink
+    for FlakySink<S>
+{
+    async fn put_chunk(&self, chunk: &[u8]) -> Result<(), partisync_core::error::PartisyError> {
+        use std::sync::atomic::Ordering;
+        let prev = self.failures_remaining.load(Ordering::SeqCst);
+        if prev > 0 {
+            self.failures_remaining.fetch_sub(1, Ordering::SeqCst);
+            return Err(partisync_core::error::PartisyError {
+                severity: partisync_core::error::Severity::Retryable,
+                source: Some("transient hub storage busy".into()),
+            });
+        }
+        self.inner.put_chunk(chunk).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_ack_retry_success() {
+    let cas = ChunkStore::open_in_memory(&tempdir("retry"))
+        .await
+        .expect("cas open");
+    let flaky = FlakySink {
+        inner: cas.clone(),
+        failures_remaining: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(2)),
+    };
+
+    let hub_ep = bind().await;
+    let hub_addr = loopback(&hub_ep);
+    let hub_task = tokio::spawn(async move {
+        let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+        t("hub handle_incoming", handle_incoming(incoming, flaky)).await
+    });
+
+    let dev_ep = bind().await;
+    let dev_store: iroh_blobs::api::Store = MemStore::default().into();
+    let conn = t("dev connect", dev_ep.connect(hub_addr, ALPN))
+        .await
+        .expect("device connect");
+    let mut acker = UploadAcker::spawn(conn.clone());
+
+    let payload = Bytes::from_static(b"upload_ack_retry_success payload");
+    let hash = t(
+        "dev add_bytes",
+        dev_store.blobs().add_bytes(payload.clone()).with_tag(),
+    )
+    .await
+    .expect("add_bytes")
+    .hash;
+
+    let policy = partisync_hub::upload_acker::UploadRetryPolicy {
+        initial_backoff: Duration::from_millis(20),
+        max_retries: 4,
+        ack_timeout: Duration::from_secs(10),
+    };
+
+    let status = t(
+        "dev push_with_retry",
+        acker.push_with_retry(hash, policy, || {
+            let dev_store = dev_store.clone();
+            let conn = conn.clone();
+            async move {
+                dev_store
+                    .remote()
+                    .execute_push(conn, GetRequest::blob(hash).into())
+                    .complete()
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| AckError::ConnectionClosed)
+            }
+        }),
+    )
+    .await
+    .expect("push_with_retry succeeded after 2 transient Retrying frames");
+
+    assert_eq!(
+        status,
+        partisync_hub::iroh_channel::UploadAckStatus::Accepted
+    );
+
+    acker.close();
+    let summary = t("hub join", hub_task)
+        .await
+        .expect("hub task join")
+        .expect("handle_incoming ok");
+    assert_eq!(summary.chunks_received, 1);
+    let hex = partisync_cas::content_hash(&payload);
+    assert_eq!(cas.get(&hex).await.expect("cas get"), payload.to_vec());
+}

@@ -33,6 +33,13 @@ pub enum AckError {
         hash: iroh_blobs::Hash,
         timeout: Duration,
     },
+    Rejected {
+        hash: iroh_blobs::Hash,
+    },
+    ExhaustedRetries {
+        hash: iroh_blobs::Hash,
+        attempts: u32,
+    },
 }
 
 impl fmt::Display for AckError {
@@ -43,11 +50,49 @@ impl fmt::Display for AckError {
             Self::Timeout { hash, timeout } => {
                 write!(f, "等待 ack 超时（hash={hash:?}, timeout={timeout:?}）")
             }
+            Self::Rejected { hash } => {
+                write!(f, "hub 拒绝接收该块（hash={hash:?}）")
+            }
+            Self::ExhaustedRetries { hash, attempts } => {
+                write!(
+                    f,
+                    "超出重试上限仍未收到成功 ack（hash={hash:?}, attempts={attempts}）"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for AckError {}
+
+/// 指数退避重试策略（M5-WP01-T05）。
+///
+/// 无外部依赖实现，支持可配置初始退避时间、最大重试次数及单次等待超时。
+#[derive(Debug, Clone, Copy)]
+pub struct UploadRetryPolicy {
+    pub initial_backoff: Duration,
+    pub max_retries: u32,
+    pub ack_timeout: Duration,
+}
+
+impl Default for UploadRetryPolicy {
+    fn default() -> Self {
+        Self {
+            initial_backoff: Duration::from_millis(100),
+            max_retries: 5,
+            ack_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl UploadRetryPolicy {
+    /// 计算第 `attempt` 次（从 0 开始）失败后的退避时长：`initial_backoff * 2^attempt`。
+    #[must_use]
+    pub fn backoff_for(&self, attempt: u32) -> Duration {
+        let shift = attempt.min(16);
+        self.initial_backoff.saturating_mul(1u32 << shift)
+    }
+}
 
 /// 单帧 UploadAck 帧解码结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +179,44 @@ impl UploadAcker {
         }
     }
 
+    /// 带指数退避重试的可靠上传确认循环（M5-WP01-T05）。
+    ///
+    /// 调用方提供 `push_fn` 闭包执行单次 push 操作：
+    /// - 若收到 `Accepted` 或 `Duplicate`：立即返回 `Ok(status)`；
+    /// - 若收到 `Rejected`：不可重试，立即返回 `Err(AckError::Rejected)`；
+    /// - 若收到 `Retrying` 或 `expect_ack` 超时：按 `policy.backoff_for(attempt)` 退避后重新调用 `push_fn`；
+    /// - 超过 `policy.max_retries` 仍未成功：返回 `Err(AckError::ExhaustedRetries)`。
+    pub async fn push_with_retry<F, Fut>(
+        &mut self,
+        hash: iroh_blobs::Hash,
+        policy: UploadRetryPolicy,
+        mut push_fn: F,
+    ) -> Result<UploadAckStatus, AckError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), AckError>>,
+    {
+        for attempt in 0..=policy.max_retries {
+            push_fn().await?;
+            match self.expect_ack(hash, policy.ack_timeout).await {
+                Ok(
+                    status @ (UploadAckStatus::Accepted | UploadAckStatus::Duplicate),
+                ) => return Ok(status),
+                Ok(UploadAckStatus::Rejected) => return Err(AckError::Rejected { hash }),
+                Ok(UploadAckStatus::Retrying) | Err(AckError::Timeout { .. }) => {
+                    if attempt < policy.max_retries {
+                        tokio::time::sleep(policy.backoff_for(attempt)).await;
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(AckError::ExhaustedRetries {
+            hash,
+            attempts: policy.max_retries + 1,
+        })
+    }
+
     /// 关闭接收器（abort 后台 task + 关闭连接）。
     pub fn close(mut self) {
         if let Some(t) = self.task.take() {
@@ -214,5 +297,18 @@ mod tests {
         buf[1] = UPLOAD_ACK_TYPE;
         buf[34] = 99;
         assert!(decode_ack_frame(&buf).is_err());
+    }
+
+    #[test]
+    fn retry_policy_exponential_backoff() {
+        let policy = UploadRetryPolicy {
+            initial_backoff: Duration::from_millis(100),
+            max_retries: 4,
+            ack_timeout: Duration::from_secs(5),
+        };
+        assert_eq!(policy.backoff_for(0), Duration::from_millis(100));
+        assert_eq!(policy.backoff_for(1), Duration::from_millis(200));
+        assert_eq!(policy.backoff_for(2), Duration::from_millis(400));
+        assert_eq!(policy.backoff_for(3), Duration::from_millis(800));
     }
 }

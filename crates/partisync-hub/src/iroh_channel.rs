@@ -278,6 +278,7 @@ async fn sync_new_blobs<S: ChunkSink>(
                 source: Some(format!("export blob {hash}: {e}").into()),
             })?;
         if Hash::from(blake3::hash(&data)) != hash {
+            seen.remove(&hash);
             warn!(%hash, size = data.len(), "blob blake3 校验失败，回发 Rejected");
             ack_items.push((hash, UploadAckStatus::Rejected));
             continue;
@@ -292,6 +293,7 @@ async fn sync_new_blobs<S: ChunkSink>(
                 debug!(%hash, size = data.len(), "blob synced to CAS");
             }
             Err(e) => {
+                seen.remove(&hash);
                 let status = match e.severity {
                     Severity::Retryable => UploadAckStatus::Retrying,
                     _ => UploadAckStatus::Rejected,
