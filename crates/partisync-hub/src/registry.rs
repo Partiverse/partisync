@@ -33,6 +33,8 @@ use crate::replica::{NodeConfig, Replica, ReplicaError};
 
 /// 空间注册表 keyspace（组 0 业务节）。
 pub const KS_SPACE: &str = "r-space";
+/// 联邦路由 keyspace（组 0 业务节，SPEC M5-WP02 裁定 2；键 = space_id）。
+pub const KS_ROUTE: &str = "r-route";
 /// 注册表组 id（pid=0；数据分区组自 1 起）。
 pub const REGISTRY_GROUP: u64 = 0;
 
@@ -128,6 +130,56 @@ pub struct SpaceRow {
     pub created_at_ns: i64,
 }
 
+/// 联邦路由行（SPEC M5-WP02 契约 1）：`space_id → 持有 hub`。
+///
+/// 无删除语义（空间不可删，路由只增/转移——转移 = 更高 epoch 换
+/// `hub_id`），反熵同步因此无需墓碑（裁定 4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteRow {
+    /// 路由键 = 空间 id。
+    pub space_id: String,
+    /// 持有（home）hub id。
+    pub hub_id: u64,
+    /// home hub 联邦口地址（设备/对端可达，如 `127.0.0.1:9100`）。
+    pub addr: String,
+    /// 提案纪元：每空间每新提案 +1；并发提案同 epoch 由 tie-break 定序。
+    pub epoch: u64,
+}
+
+impl RouteRow {
+    /// 提案胜出行（空间归属转移时使用）：epoch = 当前纪元 + 1。
+    #[must_use]
+    pub fn with_epoch_bumped(&self) -> Self {
+        Self {
+            space_id: self.space_id.clone(),
+            hub_id: self.hub_id,
+            addr: self.addr.clone(),
+            epoch: self.epoch + 1,
+        }
+    }
+}
+
+/// 合并规则（SPEC M5-WP02 裁定 4/5，全协议唯一）：逐 space 胜者 =
+/// epoch 更大；同 epoch → hub_id 更小。返回 `Some(winner)` 当且仅当
+/// 胜者与本地行不同（相等 = 幂等 no-op）；本地胜/无本地且 incoming 缺席
+/// 不可能（`incoming` 必传）。
+///
+/// 确定性保证：任两 hub 对同一输入得出同一视图——反熵收敛的充要条件。
+#[must_use]
+pub fn merge_route(local: Option<&RouteRow>, incoming: &RouteRow) -> Option<RouteRow> {
+    match local {
+        Some(l) if incoming.epoch < l.epoch => None,
+        Some(l) if incoming.epoch == l.epoch => {
+            if incoming.hub_id < l.hub_id {
+                Some(incoming.clone())
+            } else {
+                None // incoming 落败或完全相等（hub_id 相同 ⇒ 同一行）
+            }
+        }
+        _ => Some(incoming.clone()),
+    }
+}
+
 /// 注册表命令（serde_json 信封进 raft 日志）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RegistryCmd {
@@ -163,6 +215,12 @@ pub enum RegistryCmd {
         space_id: String,
         /// 目标设备。
         target: DeviceId,
+    },
+    /// 联邦路由 upsert（SPEC M5-WP02 裁定 2/5；来源 = 本 hub 协商/合并
+    /// 胜出行，SM 侧无权限语义——联邦口信任边界与 raft 口一致）。
+    SetRoute {
+        /// 胜出的路由行（整体 upsert，按 space_id 键覆盖）。
+        row: RouteRow,
     },
 }
 
@@ -223,10 +281,11 @@ fn flag_to_error(flag: u8) -> Result<(), RegistryError> {
     }
 }
 
-/// 注册表状态机 = 通用节 + `r-space` 业务节。
+/// 注册表状态机 = 通用节 + `r-space` 业务节 + `r-route` 联邦路由节。
 pub struct RegistryStateMachine {
     inner: RaftStateMachineStore,
     spaces: fjall::Keyspace,
+    routes: fjall::Keyspace,
 }
 
 /// 业务拒绝/成功 → 应答字节。
@@ -364,6 +423,14 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for RegistryStateMachine
                             responses[i] = crate::HubResponse(vec![FLAG_FORBIDDEN]);
                         }
                     }
+                    RegistryCmd::SetRoute { row } => {
+                        let json = serde_json::to_vec(&row)
+                            .map_err(|e| business_error(format!("route encode: {e}")))?;
+                        self.routes
+                            .insert(row.space_id.as_bytes(), json)
+                            .map_err(business_error)?;
+                        responses[i] = crate::HubResponse(vec![FLAG_OK]);
+                    }
                 };
             }
         }
@@ -432,9 +499,13 @@ impl RegistryService {
         let spaces = db
             .keyspace(KS_SPACE, fjall::KeyspaceCreateOptions::default)
             .map_err(|e| RegistryError::Io(e.to_string()))?;
+        let routes = db
+            .keyspace(KS_ROUTE, fjall::KeyspaceCreateOptions::default)
+            .map_err(|e| RegistryError::Io(e.to_string()))?;
         let sm = RegistryStateMachine {
             inner: sm_generic,
             spaces,
+            routes,
         };
         let node = NodeConfig {
             node_id: 1,
@@ -631,6 +702,59 @@ impl RegistryService {
         }
     }
 
+    /// upsert 联邦路由行（SPEC M5-WP02 裁定 2；调用方须已按
+    /// [`merge_route`] 判定胜出——服务面不做合并，只落 raft）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub fn set_route(&self, row: RouteRow) -> Result<(), RegistryError> {
+        self.handle.block_on(self.set_route_async(row))
+    }
+
+    /// [`Self::set_route`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn set_route_async(&self, row: RouteRow) -> Result<(), RegistryError> {
+        let flag = self.submit_async(RegistryCmd::SetRoute { row }).await?;
+        flag_to_error(flag)
+    }
+
+    /// 读单条路由行（线性一致确认后直读 `r-route`，同 [`Self::space`] 通道）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub fn route(&self, space_id: &str) -> Result<Option<RouteRow>, RegistryError> {
+        self.handle.block_on(self.route_async(space_id))
+    }
+
+    /// [`Self::route`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn route_async(&self, space_id: &str) -> Result<Option<RouteRow>, RegistryError> {
+        self.replica.ensure_linearizable().await?;
+        self.read_route(space_id)
+    }
+
+    /// 全量路由视图（线性一致确认后直读；反熵握手 [`crate::federation`]
+    /// 与 [`FederationView`] 消费）。
+    ///
+    /// # Errors
+    /// raft 或 keyspace 迭代/解码错误。
+    pub fn routes(&self) -> Result<Vec<RouteRow>, RegistryError> {
+        self.handle.block_on(self.routes_async())
+    }
+
+    /// [`Self::routes`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 或 keyspace 迭代/解码错误。
+    pub async fn routes_async(&self) -> Result<Vec<RouteRow>, RegistryError> {
+        self.replica.ensure_linearizable().await?;
+        self.scan_routes()
+    }
+
     /// 停止注册表 raft core（演练/测试用）。
     pub fn crash(&self) {
         self.handle.block_on(self.replica.crash());
@@ -648,6 +772,34 @@ impl RegistryService {
             .and_then(|g| serde_json::from_slice(&g).ok()))
     }
 
+    fn read_route(&self, space_id: &str) -> Result<Option<RouteRow>, RegistryError> {
+        let db = self.replica.database();
+        let routes = db
+            .keyspace(KS_ROUTE, fjall::KeyspaceCreateOptions::default)
+            .map_err(|e| RegistryError::Io(e.to_string()))?;
+        Ok(routes
+            .get(space_id.as_bytes())
+            .map_err(|e| RegistryError::Io(e.to_string()))?
+            .and_then(|g| serde_json::from_slice(&g).ok()))
+    }
+
+    fn scan_routes(&self) -> Result<Vec<RouteRow>, RegistryError> {
+        let db = self.replica.database();
+        let routes = db
+            .keyspace(KS_ROUTE, fjall::KeyspaceCreateOptions::default)
+            .map_err(|e| RegistryError::Io(e.to_string()))?;
+        let mut rows = Vec::new();
+        for guard in routes.iter() {
+            let (_, raw) = guard
+                .into_inner()
+                .map_err(|e| RegistryError::Io(e.to_string()))?;
+            let row: RouteRow = serde_json::from_slice(&raw)
+                .map_err(|e| RegistryError::Io(format!("route decode: {e}")))?;
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+
     #[allow(dead_code)] // bins 仅用异步形态；同步形态供测试/非 runtime 线程
     fn submit(&self, cmd: RegistryCmd) -> Result<u8, RegistryError> {
         // 同步形态（测试/非 runtime 线程用）；demo 走 submit_async
@@ -661,5 +813,48 @@ impl RegistryService {
         let h = self.replica.submit(payload).await?;
         let (_, resp) = h.ack_with_response().await?;
         Ok(resp.first().copied().unwrap_or(FLAG_MISSING))
+    }
+}
+
+/// 联邦路由只读面（SPEC M5-WP02 契约 1）：`Arc<RegistryService>` 的窄接口
+/// 视图——联邦服务端/客户端持此面应答查询与全量交换，写路径（协商胜出/
+/// 合并落盘）经 [`Self::set_route_async`] 显式走 raft。
+///
+/// 全异步形态：联邦服务循环运行于 tokio task 内，同步 `block_on` 通道
+/// （[`RegistryService`] 直用）在异步上下文会 panic——窄接口刻意不转发。
+#[derive(Clone)]
+pub struct FederationView {
+    registry: std::sync::Arc<RegistryService>,
+}
+
+impl FederationView {
+    /// 包装修注表服务。
+    #[must_use]
+    pub fn new(registry: std::sync::Arc<RegistryService>) -> Self {
+        Self { registry }
+    }
+
+    /// 读单条路由行（线性一致）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn route_async(&self, space_id: &str) -> Result<Option<RouteRow>, RegistryError> {
+        self.registry.route_async(space_id).await
+    }
+
+    /// 全量路由视图（线性一致）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn rows_async(&self) -> Result<Vec<RouteRow>, RegistryError> {
+        self.registry.routes_async().await
+    }
+
+    /// upsert 路由行（合并/协商胜出后的唯一落盘通道）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn set_route_async(&self, row: RouteRow) -> Result<(), RegistryError> {
+        self.registry.set_route_async(row).await
     }
 }
