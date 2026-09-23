@@ -703,3 +703,80 @@ async fn pen_organize_batch_limit_rejects_huge() {
 
     client.cancel().await.ok();
 }
+
+// ─── M4-WP99-T03：asset_organize 跨库 content_id 校验回归（AuthZ 加固） ───
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pen_organize_cross_db_content_id_rejected() {
+    let db = prepare_db().await;
+    let client = spawn_server(&db).await;
+
+    // 1. add_tag on unknown content_id —— 拒收
+    let result = call_raw(
+        &client,
+        "asset_organize",
+        json!({
+            "operations": [{
+                "content_id": "c-does-not-exist-anywhere",
+                "action": "add_tag",
+                "value": "hax"
+            }],
+            "preview_only": false
+        }),
+    )
+    .await;
+    // 协议层 invalid_params（add_tag 触发）或工具层 is_error 都接受
+    let rejected = match &result {
+        Err(_) => true,
+        Ok(r) => r.is_error == Some(true),
+    };
+    assert!(
+        rejected,
+        "add_tag on unknown content_id must be rejected (M4-WP99-T03): {result:?}"
+    );
+
+    // 2. delete on unknown content_id —— 拒收（修复前 silent UPDATE 0 rows 假成功）
+    let result = call_raw(
+        &client,
+        "asset_organize",
+        json!({
+            "operations": [{
+                "content_id": "c-does-not-exist-anywhere",
+                "action": "delete"
+            }],
+            "preview_only": false
+        }),
+    )
+    .await;
+    let rejected = match &result {
+        Err(_) => true,
+        Ok(r) => r.is_error == Some(true),
+    };
+    assert!(
+        rejected,
+        "delete on unknown content_id must be rejected (was silently 0-row before): {result:?}"
+    );
+
+    // 3. 已知 content_id c-pen 仍可操作（回归 sanity）
+    let result = call_raw(
+        &client,
+        "asset_organize",
+        json!({
+            "operations": [{
+                "content_id": "c-pen",
+                "action": "add_tag",
+                "value": "valid"
+            }],
+            "preview_only": false
+        }),
+    )
+    .await
+    .expect("known content_id should succeed");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "known content_id c-pen must succeed"
+    );
+
+    client.cancel().await.ok();
+}

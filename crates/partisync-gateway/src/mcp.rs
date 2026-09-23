@@ -1012,6 +1012,29 @@ async fn apply_operation(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     op: &OrganizeOperation,
 ) -> Result<(), ErrorData> {
+    // 通用前置校验（M4-WP99-T03 AuthZ 加固）：所有写操作必须先确认 content_id 存在
+    // （先 SELECT content 表 + entry 表关联），否则静默 UPDATE 会产生 0 rows affected
+    // 假成功（写假数据 / 越权 / 探测 content_id 命名空间）。
+    // 加固：content_id 必须真实存在（关联 content + entry 都有行）→ 不存在拒收。
+    let entry_path: Option<String> = sqlx::query_scalar(
+        "SELECT e.path FROM entry e \
+                              JOIN content c ON c.id = e.content_id \
+                              WHERE e.content_id = ? LIMIT 1",
+    )
+    .bind(&op.content_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| ErrorData::internal_error(format!("entry/content probe: {e}"), None))?;
+    let Some(path) = entry_path else {
+        return Err(ErrorData::invalid_params(
+            format!(
+                "content_id '{}' not found in this library (cross-DB / unknown)",
+                op.content_id
+            ),
+            None,
+        ));
+    };
+
     match op.action.as_str() {
         "add_tag" | "set_tag" | "remove_tag" => {
             let tag_name = op.value.as_deref().unwrap_or("").trim().to_string();
@@ -1021,19 +1044,7 @@ async fn apply_operation(
                     None,
                 ));
             }
-
-            let entry_path: Option<String> =
-                sqlx::query_scalar("SELECT path FROM entry WHERE content_id = ? LIMIT 1")
-                    .bind(&op.content_id)
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|e| ErrorData::internal_error(format!("entry path: {e}"), None))?;
-            let Some(path) = entry_path else {
-                return Err(ErrorData::invalid_params(
-                    format!("no entry for content_id '{}'", op.content_id),
-                    None,
-                ));
-            };
+            // 上面预检已验过 entry/content；此处直接用 path
 
             if op.action == "set_tag" {
                 sqlx::query(
