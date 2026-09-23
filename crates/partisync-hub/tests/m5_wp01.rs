@@ -223,3 +223,157 @@ async fn upload_ack_timeout_when_no_ack() {
         other => panic!("expected Timeout or ConnectionClosed, got {other:?}"),
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_ack_duplicate() {
+    let cas = ChunkStore::open_in_memory(&tempdir("dup"))
+        .await
+        .expect("cas open");
+
+    let hub_ep = bind().await;
+    let hub_addr = loopback(&hub_ep);
+    let hub_task = tokio::spawn({
+        let cas = cas.clone();
+        async move {
+            let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+            t("hub handle_incoming", handle_incoming(incoming, cas)).await
+        }
+    });
+
+    let dev_ep = bind().await;
+    let dev_store: iroh_blobs::api::Store = MemStore::default().into();
+    let conn = t("dev connect", dev_ep.connect(hub_addr, ALPN))
+        .await
+        .expect("device connect");
+    let mut acker = UploadAcker::spawn(conn.clone());
+
+    let payload = Bytes::from_static(b"upload_ack_duplicate idempotent payload");
+    let hash = t(
+        "dev add_bytes",
+        dev_store.blobs().add_bytes(payload.clone()).with_tag(),
+    )
+    .await
+    .expect("add_bytes")
+    .hash;
+
+    // 第一次 push -> Accepted
+    t("dev push 1", async {
+        dev_store
+            .remote()
+            .execute_push(conn.clone(), GetRequest::blob(hash).into())
+            .complete()
+            .await
+    })
+    .await
+    .expect("push 1");
+
+    let status1 = t(
+        "dev expect_ack 1",
+        acker.expect_ack(hash, Duration::from_secs(15)),
+    )
+    .await
+    .expect("expect_ack 1 ok");
+    assert_eq!(
+        status1,
+        partisync_hub::iroh_channel::UploadAckStatus::Accepted
+    );
+
+    // 第二次在同一连接重复 push -> Duplicate
+    t("dev push 2", async {
+        dev_store
+            .remote()
+            .execute_push(conn.clone(), GetRequest::blob(hash).into())
+            .complete()
+            .await
+    })
+    .await
+    .expect("push 2");
+
+    let status2 = t(
+        "dev expect_ack 2",
+        acker.expect_ack(hash, Duration::from_secs(15)),
+    )
+    .await
+    .expect("expect_ack 2 ok");
+    assert_eq!(
+        status2,
+        partisync_hub::iroh_channel::UploadAckStatus::Duplicate
+    );
+
+    acker.close();
+    let summary = t("hub join", hub_task)
+        .await
+        .expect("hub task join")
+        .expect("handle_incoming ok");
+    // 只有首次写入计入 chunks_received，Duplicate 跳过
+    assert_eq!(summary.chunks_received, 1);
+    let stats = cas.stats().await.expect("cas stats");
+    assert_eq!(stats.chunks, 1);
+    assert_eq!(stats.refs, 1);
+}
+
+#[derive(Clone, Debug)]
+struct FailingSink;
+
+impl partisync_transfer::iroh_blobs::ChunkSink for FailingSink {
+    async fn put_chunk(&self, _chunk: &[u8]) -> Result<(), partisync_core::error::PartisyError> {
+        Err(partisync_core::error::PartisyError {
+            severity: partisync_core::error::Severity::Fatal,
+            source: Some("disk quota exceeded".into()),
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_ack_rejected() {
+    let hub_ep = bind().await;
+    let hub_addr = loopback(&hub_ep);
+    let hub_task = tokio::spawn(async move {
+        let incoming = t("hub accept", hub_ep.accept()).await.expect("hub incoming");
+        t("hub handle_incoming", handle_incoming(incoming, FailingSink)).await
+    });
+
+    let dev_ep = bind().await;
+    let dev_store: iroh_blobs::api::Store = MemStore::default().into();
+    let conn = t("dev connect", dev_ep.connect(hub_addr, ALPN))
+        .await
+        .expect("device connect");
+    let mut acker = UploadAcker::spawn(conn.clone());
+
+    let payload = Bytes::from_static(b"upload_ack_rejected payload");
+    let hash = t(
+        "dev add_bytes",
+        dev_store.blobs().add_bytes(payload.clone()).with_tag(),
+    )
+    .await
+    .expect("add_bytes")
+    .hash;
+
+    t("dev push", async {
+        dev_store
+            .remote()
+            .execute_push(conn.clone(), GetRequest::blob(hash).into())
+            .complete()
+            .await
+    })
+    .await
+    .expect("push");
+
+    let status = t(
+        "dev expect_ack",
+        acker.expect_ack(hash, Duration::from_secs(15)),
+    )
+    .await
+    .expect("expect_ack ok");
+    assert_eq!(
+        status,
+        partisync_hub::iroh_channel::UploadAckStatus::Rejected
+    );
+
+    acker.close();
+    let summary = t("hub join", hub_task)
+        .await
+        .expect("hub task join")
+        .expect("handle_incoming ok");
+    assert_eq!(summary.chunks_received, 0);
+}

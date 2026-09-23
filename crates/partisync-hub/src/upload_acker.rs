@@ -83,10 +83,7 @@ impl UploadAcker {
                 let mut buf = vec![0u8; 4096];
                 loop {
                     match recv.read(&mut buf).await {
-                        Ok(Some(_n)) => {
-                            // iroh RecvStream::read 返回 Some(n) 或 None（EOF）
-                            // 此处我们按完整帧处理 —— 取 buf[..n]
-                            let n = buf.len(); // placeholder; real n 用 _n 但这里我们用切片
+                        Ok(Some(n)) => {
                             let mut i = 0;
                             while i + UPLOAD_ACK_FRAME_LEN <= n {
                                 match decode_ack_frame(&buf[i..i + UPLOAD_ACK_FRAME_LEN]) {

@@ -217,9 +217,9 @@ pub async fn handle_incoming<S: ChunkSink + Clone + Send + 'static>(
             severity: Severity::Fatal,
             source: Some(format!("wait idle: {e}").into()),
         })?;
-        let (part, new_hashes) = sync_new_blobs(&store, &sink, &mut seen).await?;
+        let (part, ack_items) = sync_new_blobs(&store, &sink, &mut seen).await?;
         add_summary(&mut summary, part);
-        send_upload_acks(&connection, &new_hashes).await;
+        send_upload_acks(&connection, &ack_items).await;
     }
 
     // 连接关闭后的兜底同步（流水线化尾部流）
@@ -227,10 +227,10 @@ pub async fn handle_incoming<S: ChunkSink + Clone + Send + 'static>(
         severity: Severity::Fatal,
         source: Some(format!("wait idle: {e}").into()),
     })?;
-    let (part, new_hashes) = sync_new_blobs(&store, &sink, &mut seen).await?;
+    let (part, ack_items) = sync_new_blobs(&store, &sink, &mut seen).await?;
     add_summary(&mut summary, part);
     // 此处连接大概率已关，send_upload_acks 会 warn 但不致命
-    send_upload_acks(&connection, &new_hashes).await;
+    send_upload_acks(&connection, &ack_items).await;
 
     info!(
         chunks = summary.chunks_received,
@@ -240,20 +240,20 @@ pub async fn handle_incoming<S: ChunkSink + Clone + Send + 'static>(
     Ok(summary)
 }
 
-/// 把 MemStore 中尚未同步过的 blob 校验后写入 CAS，返回本轮同步摘要 + 新同步 hash 列表。
+/// 把 MemStore 中尚未同步过的 blob 校验后写入 CAS，返回本轮同步摘要 + 待回发 ack 帧项列表。
 ///
-/// **M5-WP01 UploadAck**：返回 `Vec<Hash>` 让 [`handle_incoming`] 在同一连接上
-/// 写 ack 帧。device 侧 [`super::upload_acker`] 消费这些帧。
+/// **M5-WP01 UploadAck（T01 & T04）**：返回 `Vec<(Hash, UploadAckStatus)>` 让 [`handle_incoming`] 在同一连接上
+/// 写对应状态的 ack 帧（Accepted / Duplicate / Rejected）。device 侧 [`super::upload_acker`] 消费这些帧。
 async fn sync_new_blobs<S: ChunkSink>(
     store: &iroh_blobs::api::Store,
     sink: &S,
     seen: &mut std::collections::HashSet<Hash>,
-) -> Result<(UploadSummary, Vec<Hash>), PartisyError> {
+) -> Result<(UploadSummary, Vec<(Hash, UploadAckStatus)>), PartisyError> {
     let mut summary = UploadSummary {
         chunks_received: 0,
         bytes_received: 0,
     };
-    let mut new_hashes = Vec::new();
+    let mut ack_items = Vec::new();
     let hashes = store
         .blobs()
         .list()
@@ -265,6 +265,8 @@ async fn sync_new_blobs<S: ChunkSink>(
         })?;
     for hash in hashes {
         if !seen.insert(hash) {
+            // 同一连接内重复推送同一块：按幂等语义返回 Duplicate 状态，不重复写 CAS
+            ack_items.push((hash, UploadAckStatus::Duplicate));
             continue;
         }
         let data = store
@@ -276,18 +278,30 @@ async fn sync_new_blobs<S: ChunkSink>(
                 source: Some(format!("export blob {hash}: {e}").into()),
             })?;
         if Hash::from(blake3::hash(&data)) != hash {
-            warn!(%hash, size = data.len(), "blob blake3 校验失败，跳过同步");
+            warn!(%hash, size = data.len(), "blob blake3 校验失败，回发 Rejected");
+            ack_items.push((hash, UploadAckStatus::Rejected));
             continue;
         }
-        sink.put_chunk(&data).await?;
-        summary.bytes_received = summary
-            .bytes_received
-            .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
-        summary.chunks_received += 1;
-        new_hashes.push(hash);
-        debug!(%hash, size = data.len(), "blob synced to CAS");
+        match sink.put_chunk(&data).await {
+            Ok(()) => {
+                summary.bytes_received = summary
+                    .bytes_received
+                    .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+                summary.chunks_received += 1;
+                ack_items.push((hash, UploadAckStatus::Accepted));
+                debug!(%hash, size = data.len(), "blob synced to CAS");
+            }
+            Err(e) => {
+                let status = match e.severity {
+                    Severity::Retryable => UploadAckStatus::Retrying,
+                    _ => UploadAckStatus::Rejected,
+                };
+                warn!(%hash, ?e, ?status, "CAS 落库失败，回发对应状态帧");
+                ack_items.push((hash, status));
+            }
+        }
     }
-    Ok((summary, new_hashes))
+    Ok((summary, ack_items))
 }
 
 fn add_summary(total: &mut UploadSummary, part: UploadSummary) {
@@ -331,18 +345,21 @@ fn encode_upload_ack(hash: &Hash, status: UploadAckStatus) -> [u8; UPLOAD_ACK_FR
     buf
 }
 
-/// 在同一 QUIC 连接上向设备写 UploadAck 帧序列（每个 hash 一帧）。
+/// 在同一 QUIC 连接上向设备写 UploadAck 帧序列（每个项一帧）。
 ///
 /// **不阻塞** iroh-blobs 流处理：失败仅 warn（device 端靠 30s 超时重传兜底）。
-async fn send_upload_acks(connection: &iroh::endpoint::Connection, hashes: &[Hash]) {
-    if hashes.is_empty() {
+async fn send_upload_acks(
+    connection: &iroh::endpoint::Connection,
+    ack_items: &[(Hash, UploadAckStatus)],
+) {
+    if ack_items.is_empty() {
         return;
     }
-    let payload_len = hashes.len() * UPLOAD_ACK_FRAME_LEN;
+    let payload_len = ack_items.len() * UPLOAD_ACK_FRAME_LEN;
     match connection.open_uni().await {
         Ok(mut send_stream) => {
-            for hash in hashes {
-                let frame = encode_upload_ack(hash, UploadAckStatus::Accepted);
+            for (hash, status) in ack_items {
+                let frame = encode_upload_ack(hash, *status);
                 if let Err(e) = send_stream.write_all(&frame).await {
                     warn!(?e, "UploadAck 写帧失败（device 端会重传）");
                     return;
@@ -352,7 +369,7 @@ async fn send_upload_acks(connection: &iroh::endpoint::Connection, hashes: &[Has
             if let Err(e) = send_stream.finish() {
                 warn!(?e, "UploadAck stream finish 失败");
             } else {
-                info!(acks = hashes.len(), bytes = payload_len, "UploadAck 已发往设备");
+                info!(acks = ack_items.len(), bytes = payload_len, "UploadAck 已发往设备");
             }
         }
         Err(e) => {
