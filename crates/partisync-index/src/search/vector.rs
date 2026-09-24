@@ -139,6 +139,72 @@ impl VectorStore {
         Self::upsert_on(&mut index, content_id, kind, vector)
     }
 
+    /// 预分配容量（bulk-load 前调用；避免 2× 扩容路径反复重排）。
+    ///
+    /// # Errors
+    /// usearch reserve 错误 → Fatal。
+    pub fn reserve(&self, kind: VectorKind, capacity: u64) -> Result<(), PartisyError> {
+        let index = self.lock_for_write(kind)?;
+        index.reserve(capacity as usize).map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("usearch reserve: {e}").into()),
+        })
+    }
+
+    /// 新键快速写入（bulk-load 口径）：跳过 contains/remove 成员检查——
+    /// usearch `contains`/`remove` 均随规模超线性（实测 10⁴ 规模
+    /// ~30ms/次，10⁶ 写入不可用，M5-WP05-T02 基准发现）。键新鲜性由
+    /// 调用方保证（索引管道 = fresh content_id 主路径）；同 key 重写
+    /// 走 [`Self::upsert`]（幂等覆盖语义）。
+    ///
+    /// # Errors
+    /// 维度不匹配 / usearch 错误 → Fatal。
+    pub fn add_new(
+        &self,
+        content_id: &str,
+        kind: VectorKind,
+        vector: &[f32],
+    ) -> Result<(), PartisyError> {
+        let mut index = self.lock_for_write(kind)?;
+        Self::add_new_on(&mut index, content_id, kind, vector)
+    }
+
+    fn add_new_on(
+        index: &mut usearch::Index,
+        content_id: &str,
+        kind: VectorKind,
+        vector: &[f32],
+    ) -> Result<(), PartisyError> {
+        let (expected_dims, _) = kind.dims_and_metric();
+        if vector.len() != expected_dims {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!(
+                        "vector dimension mismatch for {kind:?}: expected {expected_dims}, got {}",
+                        vector.len()
+                    )
+                    .into(),
+                ),
+            });
+        }
+        let key = content_key(content_id);
+        // usearch 2.26 要求容量先行（"Reserve capacity ahead of insertions!"）
+        if index.size() >= index.capacity() {
+            index
+                .reserve(std::cmp::max(index.capacity() * 2, 1024))
+                .map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("usearch reserve: {e}").into()),
+                })?;
+        }
+        index.add(key, vector).map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("usearch add: {e}").into()),
+        })?;
+        Ok(())
+    }
+
     fn upsert_on(
         index: &mut usearch::Index,
         content_id: &str,
