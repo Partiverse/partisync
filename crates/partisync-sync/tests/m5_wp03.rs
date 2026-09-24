@@ -288,7 +288,7 @@ fn wide_tree(delay_ms: u64) -> (FakeSource, BTreeSet<String>) {
     expect.insert("root-a.txt".into());
     expect.insert("root-b.txt".into());
 
-    for i in 0..48u32 {
+    for i in 0..192u32 {
         let dir = format!("d{i:02}");
         let files: Vec<ListedNode> = (0..3)
             .map(|k| FakeSource::file(&format!("{dir}/f{k}.txt"), k))
@@ -299,7 +299,7 @@ fn wide_tree(delay_ms: u64) -> (FakeSource, BTreeSet<String>) {
         root.push(FakeSource::dir(&dir));
         src.put(&dir, files);
     }
-    for j in 0..10u32 {
+    for j in 0..40u32 {
         let dir = format!("top/sub{j}");
         let files: Vec<ListedNode> = (0..2)
             .map(|k| FakeSource::file(&format!("{dir}/g{k}.txt"), k))
@@ -340,7 +340,7 @@ async fn t03_parallel_speedup_and_set_equality() {
     .unwrap();
     let serial = t0.elapsed();
     assert_eq!(sink.seen(), expect);
-    assert_eq!(stats_serial.shards_done, 1 + 48 + 1 + 10); // 根+48 叶+top+10 子
+    assert_eq!(stats_serial.shards_done, 1 + 192 + 1 + 40); // 根+192 叶+top+40 子
     assert_eq!(stats_serial.entries, expect.len() as u64);
 
     // 并行（concurrency=4）：集合一致 + 加速比 ≥ 2.5×
@@ -372,9 +372,9 @@ async fn t03_source_fail_isolation_and_retry() {
     let _fp = FailpointGuard::new();
     // 持续失败：failed 计 1、不阻塞其余（条目数差该目录 3 文件）
     let (mut src, mut expect) = wide_tree(0);
-    src.fail_always = vec!["d05".into()];
+    src.fail_always = vec!["d100".into()];
     for k in 0..3 {
-        expect.remove(&format!("d05/f{k}.txt"));
+        expect.remove(&format!("d100/f{k}.txt"));
     }
     let sink = Arc::new(CollectSink::default());
     let stats = ScanScheduler::with_opts(
@@ -551,14 +551,14 @@ async fn t04_crash_resume_skips_done_and_converges() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(st2.done.len(), 60);
+    assert_eq!(st2.done.len(), 234);
     assert!(st2.failed.is_empty());
     assert_eq!(stats.entries, expect.len() as u64);
     // AbortSink 注入让根分片 fail-fast（记 failed 而非 done）——恢复时
     // 根分片作为 failed 重入队，正常扫一次；其他 done 分片不重扫。
     assert_eq!(src2.calls_of(""), 1, "根分片以 failed 入队重扫");
     assert_eq!(src2.calls_of("d00"), 1, "待扫分片 1 次");
-    assert!(src2.calls_of("d05") >= 1, "其他分片也被扫到");
+    assert!(src2.calls_of("d100") >= 1, "其他分片也被扫到");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -567,11 +567,11 @@ async fn t04_failed_shard_requeued_on_resume() {
     let _fp = FailpointGuard::new();
     let journal_path = tmp_root("t04-requeue").join("scan.json");
 
-    // 第一轮：d05 持续失败 → failed 入账本
+    // 第一轮：d100 持续失败 → failed 入账本
     let (src, expect) = wide_tree(0);
     let src = {
         let mut s = src;
-        s.fail_always = vec!["d05".into()];
+        s.fail_always = vec!["d100".into()];
         s
     };
     let sink = Arc::new(CollectSink::default());
@@ -592,7 +592,7 @@ async fn t04_failed_shard_requeued_on_resume() {
     .await
     .unwrap();
     assert_eq!(stats.shards_failed, 1);
-    assert!(!sink.seen().contains("d05/f0.txt"));
+    assert!(!sink.seen().contains("d100/f0.txt"));
 
     // 第二轮：源恢复（不再失败）→ failed 重入队补扫成功，账本清 failed
     let stats2 = ScanScheduler::with_opts(
@@ -614,7 +614,7 @@ async fn t04_failed_shard_requeued_on_resume() {
         .unwrap()
         .unwrap();
     assert!(st.failed.is_empty());
-    assert_eq!(st.done.len(), 60);
+    assert_eq!(st.done.len(), 234);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
