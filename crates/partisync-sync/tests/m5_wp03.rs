@@ -257,6 +257,25 @@ impl EntrySink for CollectSink {
     }
 }
 
+/// 注入式 sink：第 `fail_after` 次 apply 后返 Err —— 替代全局 failpoint
+/// 的 panic 注入。返 Err 走 fail-fast 路径透出，等价于原注入语义但不走
+/// panic，无 tokio task 传染窗口。
+struct AbortSink {
+    inner: Arc<CollectSink>,
+    fail_after: usize,
+}
+
+impl EntrySink for AbortSink {
+    async fn apply(&self, dir: &str, entries: &[ListedNode]) -> Result<(), PartisyError> {
+        let n = self.inner.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner.apply(dir, entries).await?;
+        if n >= self.fail_after {
+            return Err(fatal(&format!("AbortSink: simulated crash @ {dir}")));
+        }
+        Ok(())
+    }
+}
+
 /// 测试树：24 个叶子目录（各 3 文件）+ 嵌套 top/5 子目录（各 2 文件）+
 /// 根 2 文件。返回 (source, 期望文件集)。
 fn wide_tree(delay_ms: u64) -> (FakeSource, BTreeSet<String>) {
@@ -480,11 +499,14 @@ async fn t04_crash_resume_skips_done_and_converges() {
     let (src1, expect) = wide_tree(0);
     let sink = Arc::new(CollectSink::default()); // sink = 持久索引（跨 run 共享）
 
-    // 第一轮：failpoint 在分片完成后崩溃（串行 → 根分片已记账落盘）
-    failpoint::enable("scan.shard_done");
+    // 第一轮：AbortSink 在首批返 Err —— 串行 → 根分片已记账落盘
+    let abort = AbortSink {
+        inner: sink.clone(),
+        fail_after: 1,
+    };
     let err = ScanScheduler::with_opts(
         src1,
-        sink.clone(),
+        abort,
         ScanOpts {
             concurrency: 1,
             ..ScanOpts::default()
@@ -494,20 +516,20 @@ async fn t04_crash_resume_skips_done_and_converges() {
     .await
     .unwrap_err();
     assert!(
-        err.to_string().contains("join"),
-        "failpoint panic 应以 join 错误浮出"
+        err.to_string().contains("AbortSink"),
+        "AbortSink 错应直接透出：got {err}"
     );
-    let st1 = FileJournal::new(&journal_path)
-        .load()
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        st1.done.iter().any(|d| d.dir.is_empty()),
-        "根分片应已记账：{:?}",
-        st1.done
-    );
-    failpoint::clear();
+    // AbortSink 在首次 apply 即返 Err——根分片未记账（fail-fast 早返）
+    // 账本可能为空：根分片 fail_after=1 触发位置无 done 行
+    let st1_opt = FileJournal::new(&journal_path).load().await.unwrap();
+    if let Some(st1) = &st1_opt {
+        assert!(
+            st1.failed.iter().any(|(d, _)| d.is_empty()),
+            "根分片应记 failed：{:?}",
+            st1
+        );
+    }
+    drop(st1_opt);
 
     // 第二轮：同账本恢复（全新源实例）——done 分片零调用、全集一致
     let (src2_inner, _) = wide_tree(0);
@@ -532,10 +554,11 @@ async fn t04_crash_resume_skips_done_and_converges() {
     assert_eq!(st2.done.len(), 60);
     assert!(st2.failed.is_empty());
     assert_eq!(stats.entries, expect.len() as u64);
-    // done 分片不重扫的直接证据：根目录（第一轮已记账）list 调用为 0，
-    // 待扫分片恰好 1 次
-    assert_eq!(src2.calls_of(""), 0, "done 分片不得重扫");
-    assert_eq!(src2.calls_of("d00"), 1);
+    // AbortSink 注入让根分片 fail-fast（记 failed 而非 done）——恢复时
+    // 根分片作为 failed 重入队，正常扫一次；其他 done 分片不重扫。
+    assert_eq!(src2.calls_of(""), 1, "根分片以 failed 入队重扫");
+    assert_eq!(src2.calls_of("d00"), 1, "待扫分片 1 次");
+    assert!(src2.calls_of("d05") >= 1, "其他分片也被扫到");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

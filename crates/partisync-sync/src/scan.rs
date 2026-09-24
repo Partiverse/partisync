@@ -527,10 +527,9 @@ impl<S: ListSource + 'static, K: EntrySink + 'static> ScanScheduler<S, K> {
 
         // 监控者：worker 一有终态错误（含 panic 的 JoinError）立即置 abort，
         // 让其余 worker 从 tick 退出——不等顺序 join，杜绝悬挂窗口
-        let (err_tx, mut err_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut monitors = Vec::with_capacity(self.opts.concurrency.max(1));
+        let mut handles = Vec::with_capacity(self.opts.concurrency.max(1));
         for _ in 0..self.opts.concurrency.max(1) {
-            let handle = tokio::spawn(worker_loop(
+            handles.push(tokio::spawn(worker_loop(
                 net.clone(),
                 self.source.clone(),
                 self.sink.clone(),
@@ -539,31 +538,19 @@ impl<S: ListSource + 'static, K: EntrySink + 'static> ScanScheduler<S, K> {
                 journal.clone(),
                 state.clone(),
                 seed_owned.clone(),
-            ));
-            let net_m = net.clone();
-            let err_tx_m = err_tx.clone();
-            monitors.push(tokio::spawn(async move {
-                match handle.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        net_m.abort.store(true, Ordering::SeqCst);
-                        let _ = err_tx_m.send(e);
-                    }
-                    Err(je) => {
-                        net_m.abort.store(true, Ordering::SeqCst);
-                        let _ = err_tx_m.send(fatal_io(format!("scan worker join: {je}")));
-                    }
-                }
-            }));
+            )));
         }
-        drop(err_tx);
-        for m in monitors {
-            m.await.ok();
+        // 顺序 await handle：sink panic → worker return Err → handle.await
+        // 返 Ok(Err(e))，e 是原 PartisyError 透出；sink panic 在 tokio task
+        // 中被捕获为 JoinError 由监控前的 abort 路径处理
+        for h in handles {
+            let r: Result<(), PartisyError> = match h.await {
+                Ok(r) => r,
+                Err(je) => Err(fatal_io(format!("scan worker join: {je}"))),
+            };
+            r?; // 首个错误即返；其余 worker 由 abort 信号在下一 tick 退出
         }
-        match err_rx.recv().await {
-            Some(e) => Err(e),
-            None => Ok(counters.snapshot()),
-        }
+        Ok(counters.snapshot())
     }
 }
 
@@ -616,9 +603,17 @@ async fn worker_loop<S: ListSource, K: EntrySink, J: ScanJournal>(
                 }
             }
             Err(e) => {
-                // fail-fast（裁定 5）：置 abort，全池在下一 tick 退出
+                // fail-fast（裁定 5）：置 abort + 本分片入 failed 账本
+                // （恢复时重入队，与 source 失败等价语义）+ 透传 Err
                 net.shard_done();
                 net.abort.store(true, Ordering::SeqCst);
+                {
+                    let mut st = state.lock().await;
+                    st.failed.push((shard.clone(), e.to_string()));
+                    let snapshot = st.clone();
+                    drop(st);
+                    journal.save(&snapshot).await?;
+                }
                 return Err(e);
             }
         }
