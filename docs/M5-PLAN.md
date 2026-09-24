@@ -12,7 +12,7 @@
 | **WP01** | 设备侧 UploadAck 协议与可靠传输 | AI 自动执行 | 解决 iroh push fire-and-forget，保证 Hub CAS 落库前不丢数据 | **已完成 (6/6) ✅** |
 | **WP02** | 联邦路由协议 (Multi-Hub Federation) | 规范先行 + AI | 基于 space 前缀的多 Hub 路由协商与 Raft 视图同步 | **已完成 (7/7) ✅** |
 | **WP03** | 分布式扫描调度器 | AI 自动执行 | 前缀分片并行 LIST、动态负载均衡与扫描断点恢复 | **已完成 (6/6) ✅** |
-| **WP04** | 云事件流摄取引擎 | AI 自动执行 | SQS / Webhook / Kafka 增量事件流适配器与去重流水线 | 待排期 |
+| **WP04** | 云事件流摄取引擎 | AI 自动执行 | SQS / Webhook / Kafka 增量事件流适配器与去重流水线 | **进行中 (1/5)** |
 | **WP05** | 真实规模性能基准 (10⁶ - 10¹² 仿真) | AI 压测评估 | 替代合成评估，真实多模态/图谱元数据规模化时延与内存评估 | 待排期 |
 | **WP06** | 夜间混沌测试套件 (Chaos Suite) | AI 自动执行 | 覆盖网络分区、断网重连、宕机恢复、并发竞争混沌测试 | 待排期 |
 
@@ -174,6 +174,39 @@ WP03 总体目标：扫描调度内核——目录前缀即分片、worker 池�
 - **约束文件清单**: `crates/partisync-sync/tests/m5_wp03.rs`、`docs/reports/bench/M5-WP03-scan-scheduler.md`、`docs/M5-PLAN.md`
 - **DoD**: 验收标准（规格 §验收）全项勾验；全仓回归绿；报告含巨型扁平
   目录与 range 分片后续卡触发条件评估。
+
+---
+
+## 2.875 WP04 自动化任务卡分解 (Execution Contract)
+
+WP04 总体目标：云事件流摄取——统一 EventSource 抽象、Webhook/SQS/Kafka
+适配、journal 协调（折合 `EventKind::Created/Modified/Removed` + 断点续传
++ 空间路由闸）（规格见 [specs/M5-WP04.md](specs/M5-WP04.md)，已批准）。
+
+#### [Task] M5-WP04-T01: 规格与任务卡落档
+- **目标**: `docs/specs/M5-WP04.md`（裁定 1-8 + 契约 + 验收标准）+ 本看板任务卡。
+- **约束文件清单**: `docs/specs/M5-WP04.md`、`docs/M5-PLAN.md`
+- **DoD**: 规格含可执行验收标准；EventSource/EventJournal/适配器职责裁定明确。
+
+#### [Task] M5-WP04-T02: EventSource 抽象 + WebhookAdapter（axum）+ SQS/Kafka stub
+- **目标**: `EventRecord`/`EventSource`/`EventError`（sync/event.rs）+ Webhook 适配（axum POST + HMAC）+ SQS/Kafka stub impl（满足验收 1/2/3/5/7）；SDK 接线归后续 ADR。
+- **约束文件清单**: `crates/partisync-sync/src/event.rs`、`crates/partisync-sync/src/lib.rs`、`crates/partisync-sync/tests/m5_wp04.rs`
+- **DoD**: 折叠映射单元测试 + 同 cursor 重投递去重幂等测试全绿。
+
+#### [Task] M5-WP04-T03: EventJournal + 断点续传 + 空间路由闸
+- **目标**: `EventJournal`/`EventJournalState`（FileJournal 复用）+ 断点续传矩阵（failpoint 注入中断）+ 空间路由闸（非本 hub 持有不落 journal）。
+- **约束文件清单**: `crates/partisync-sync/src/event.rs`、`crates/partisync-sync/tests/m5_wp04.rs`
+- **DoD**: drain mock source 在 poll N 批次后中断→新 drain 续传；失败 source 计数一致；空间路由闸语义测试全绿。
+
+#### [Task] M5-WP04-T04: CLI event-drain 子命令
+- **目标**: `partisync event-drain --source <webhook|mock> ... [--journal <path>] [--cursor <token>]`——常驻拉取 + Ctrl-C 桥接 + 同 journal 二轮续跑幂等。
+- **约束文件清单**: `crates/partisync-cli/src/main.rs`、`crates/partisync-sync/tests/m5_wp04.rs`
+- **DoD**: fs mock + axum 集成；同 journal 二轮新增 0。
+
+#### [Task] M5-WP04-T05: 基准与收官
+- **目标**: 1k 事件/poll 吞吐 + webhook receiver 并发 POST 落盘时延；验收报告 + 看板收官。
+- **约束文件清单**: `crates/partisync-sync/tests/m5_wp04.rs`、`docs/reports/bench/M5-WP04-event-drain.md`、`docs/M5-PLAN.md`
+- **DoD**: 验收标准全项勾验；全仓回归绿。
 
 ---
 
