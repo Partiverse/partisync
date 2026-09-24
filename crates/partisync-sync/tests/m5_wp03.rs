@@ -660,3 +660,72 @@ async fn t04_resume_fully_done_journal_returns_immediately() {
     assert_eq!(stats.entries, expect.len() as u64, "累计统计保持");
     assert_eq!(sink.seen(), expect);
 }
+
+// ---------- T06：基准（SPEC 验收：加速曲线 + 吞吐实测） ----------
+
+/// 基准：延迟模型的 worker 扩展曲线 + 真实 fs 吞吐（1 vs 4 worker）。
+/// `cargo test -p partisync-sync --test m5_wp03 t06_bench -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "基准：显式运行并登记 docs/reports/bench/M5-WP03-scan-scheduler.md"]
+async fn t06_bench_worker_scaling_and_fs_throughput() {
+    let _serial = SERIAL.lock().await;
+
+    // A) 延迟模型：60 分片 × 20ms 模拟 LIST RTT
+    println!("== A) 延迟模型（60 分片 × 20ms） ==");
+    for conc in [1usize, 2, 4, 8] {
+        let (src, _) = wide_tree(20);
+        let sink = Arc::new(CollectSink::default());
+        let t0 = Instant::now();
+        let stats = ScanScheduler::with_opts(
+            src,
+            sink,
+            ScanOpts {
+                concurrency: conc,
+                ..ScanOpts::default()
+            },
+        )
+        .run("")
+        .await
+        .unwrap();
+        println!(
+            "  workers={conc}: {:?}  (shards={}, entries={})",
+            t0.elapsed(),
+            stats.shards_done,
+            stats.entries
+        );
+    }
+
+    // B) 真实 fs：60 目录 × 100 文件（无人工延迟）
+    println!("== B) 真实 fs（60 目录 × 100 文件 = 6000 项） ==");
+    let root = tmp_root("t06-fs-bench");
+    for d in 0..60u32 {
+        let dir = root.join(format!("d{d:02}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in 0..100u32 {
+            std::fs::write(dir.join(format!("f{f:03}.txt")), b"x").unwrap();
+        }
+    }
+    for conc in [1usize, 4] {
+        let provider = fs_provider(&root);
+        let sink = Arc::new(CollectSink::default());
+        let t0 = Instant::now();
+        let stats = ScanScheduler::with_opts(
+            provider,
+            sink,
+            ScanOpts {
+                concurrency: conc,
+                ..ScanOpts::default()
+            },
+        )
+        .run("")
+        .await
+        .unwrap();
+        let el = t0.elapsed();
+        println!(
+            "  workers={conc}: {:?}  entries={}  吞吐 ≈ {:.0} 项/s",
+            el,
+            stats.entries,
+            stats.entries as f64 / el.as_secs_f64()
+        );
+    }
+}
