@@ -9,6 +9,7 @@
 pub mod capture;
 pub mod chaos;
 pub mod crypto;
+pub mod event;
 pub mod failpoint;
 pub mod pairing;
 pub mod reconcile;

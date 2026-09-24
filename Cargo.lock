@@ -5931,6 +5931,7 @@ name = "partisync-sync"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "axum",
  "bip39",
  "blake3",
  "chacha20poly1305",
