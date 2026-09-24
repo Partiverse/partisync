@@ -159,8 +159,13 @@ impl VectorStore {
             });
         }
         let key = content_key(content_id);
-        // 幂等覆盖：已有同 key 先摘除（不存在时 remove 返回 Ok(0)）
-        let _ = index.remove(key);
+        // 幂等覆盖：仅已存在时先摘除。usearch HNSW remove 代价随规模
+        // 超线性（实测 10⁴ 规模 ~30ms/次，10⁶ 写入不可用——M5-WP05 T02
+        // 基准发现）；fresh key 直接 add（多数写入场景），覆盖路径保留
+        // remove 语义。
+        if index.contains(key) {
+            let _ = index.remove(key);
+        }
         // usearch 2.26 要求容量先行（"Reserve capacity ahead of insertions!"）：
         // 满则按 2×（至少 1024）扩容
         if index.size() >= index.capacity() {

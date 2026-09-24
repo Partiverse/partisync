@@ -36,3 +36,7 @@ serde_json = { workspace = true } # wp06_eval.rs 报告 JSON 序列化
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "wp05" # SPEC M5-WP05 T02：10⁶ 检索吞吐三表（WP05_FULL=1 显式跑）
+harness = false
