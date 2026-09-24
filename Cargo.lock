@@ -5937,6 +5937,7 @@ dependencies = [
  "getrandom 0.4.3",
  "partisync-core",
  "partisync-graph",
+ "partisync-provider",
  "proptest",
  "serde_json",
  "tokio",

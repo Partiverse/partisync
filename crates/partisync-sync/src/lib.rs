@@ -12,4 +12,5 @@ pub mod crypto;
 pub mod failpoint;
 pub mod pairing;
 pub mod reconcile;
+pub mod scan;
 pub mod session;

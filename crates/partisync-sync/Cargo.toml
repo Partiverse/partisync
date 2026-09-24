@@ -8,6 +8,7 @@ description = "同步引擎：域分离 oplog、收敛性（P6）、Merkle 对�
 [dependencies]
 partisync-core = { path = "../partisync-core", version = "0.1.0" }
 partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+partisync-provider = { path = "../partisync-provider", version = "0.1.0" } # M5-WP03-T02 scan 调度器 ListSource 实现（能力层→领域层向下依赖，方向合规）
 serde_json = { workspace = true }
 blake3 = { workspace = true } # M2-WP03 reconcile.rs 桶哈希（与 graph merkle.rs 同源）
 tokio = { workspace = true } # M2-WP09 chaos.rs tokio::time::sleep（路由表控制延迟模拟）
