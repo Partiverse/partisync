@@ -13,7 +13,7 @@
 | **WP02** | 联邦路由协议 (Multi-Hub Federation) | 规范先行 + AI | 基于 space 前缀的多 Hub 路由协商与 Raft 视图同步 | **已完成 (7/7) ✅** |
 | **WP03** | 分布式扫描调度器 | AI 自动执行 | 前缀分片并行 LIST、动态负载均衡与扫描断点恢复 | **已完成 (6/6) ✅** |
 | **WP04** | 云事件流摄取引擎 | AI 自动执行 | SQS / Webhook / Kafka 增量事件流适配器与去重流水线 | **已完成 (5/5) ✅** |
-| **WP05** | 真实规模性能基准 (10⁶ - 10¹² 仿真) | AI 压测评估 | 替代合成评估，真实多模态/图谱元数据规模化时延与内存评估 | 待排期 |
+| **WP05** | 真实规模性能基准 (10⁶ - 10¹² 仿真) | AI 压测评估 | 替代合成评估，真实多模态/图谱元数据规模化时延与内存评估 | **进行中 (1/3)** |
 | **WP06** | 夜间混沌测试套件 (Chaos Suite) | AI 自动执行 | 覆盖网络分区、断网重连、宕机恢复、并发竞争混沌测试 | 待排期 |
 
 ---
@@ -212,6 +212,32 @@ WP04 总体目标：云事件流摄取——统一 EventSource 抽象、Webhook/
 #### [Task] M5-WP04-T05: 基准与收官
 - **目标**: 1k 事件/poll 吞吐 + webhook receiver 并发 POST 落盘时延；验收报告 + 看板收官。
 - **约束文件清单**: `crates/partisync-sync/tests/m5_wp04.rs`、`docs/reports/bench/M5-WP04-event-drain.md`、`docs/M5-PLAN.md`
+- **DoD**: 验收标准全项勾验；全仓回归绿。
+
+---
+
+## 2.9 WP05 自动化任务卡分解 (Execution Contract)
+
+WP05 总体目标：D5 清偿——10⁶ 文档 BM25/向量/hybrid 检索吞吐实测
+（P99 <100ms 验收线）+ 10⁶ 元数据仿真（对照 M3-WP01 底稿）+ 外推表；
+D6/D7 gated 诚实划出（规格见 [specs/M5-WP05.md](specs/M5-WP05.md)，已批准）。
+
+#### [Task] M5-WP05-T01: 规格与任务卡落档
+- **目标**: `docs/specs/M5-WP05.md`（裁定 1-6 + 验收线）+ 本看板任务卡。
+- **约束文件清单**: `docs/specs/M5-WP05.md`、`docs/M5-PLAN.md`
+- **DoD**: 验收线明确；D6/D7 gated 处置裁定。
+
+#### [Task] M5-WP05-T02: D5 检索吞吐基准
+- **目标**: `benches/wp05.rs`——10⁶ 合成语料（确定性生成，落盘复用）+
+  BM25/向量/hybrid 三表 criterion 实测；CI 只跑 10⁴ 冒烟（内存上限规避）。
+- **约束文件清单**: `crates/partisync-index/benches/wp05.rs`、`crates/partisync-index/Cargo.toml`、`crates/partisync-index/tests/m5_wp05.rs`
+- **DoD**: 三表 P50/P99 登记；验收线（BM25/向量 <100ms、hybrid <150ms）达标或如实登记不达标。
+
+#### [Task] M5-WP05-T03: 元数据仿真与收官
+- **目标**: 10⁶ entry upsert 吞吐 + 查询 P99 + RSS 峰值实测；报告
+  `docs/reports/bench/m5-wp05-scale.md`（含 10⁹–10¹² 外推段）；M4-report
+  §5 D5 行更新已清偿、D6/D7 标注 gated；看板收官。
+- **约束文件清单**: `crates/partisync-index/tests/m5_wp05.rs`、`docs/reports/bench/m5-wp05-scale.md`、`docs/reports/M4-report.md`、`docs/M5-PLAN.md`
 - **DoD**: 验收标准全项勾验；全仓回归绿。
 
 ---
