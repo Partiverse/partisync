@@ -506,7 +506,9 @@ impl<S: ListSource + 'static, K: EntrySink + 'static> ScanScheduler<S, K> {
             queue.push_back(seed.to_owned());
         }
 
-        let initial = queue.len().max(1); // 恢复重排 + seed（seed 不在重排队列时也计）
+        // pending = 待处理分片数；恢复前沿为空（已全 done）时为 0——
+        // worker 立即 tick 退出，二轮续扫幂等返回
+        let initial = queue.len();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         for shard in &queue {
             let _ = tx.send(shard.clone());

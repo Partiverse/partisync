@@ -11,6 +11,7 @@ mod s3api;
 mod web;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use partisync_cas::ChunkStore;
 use partisync_core::error::PartisyError;
@@ -21,6 +22,7 @@ use partisync_graph::store::Store;
 use partisync_graph::watch::{self, WatchConfig};
 use partisync_provider::config::{ProviderConfig, ProviderScheme};
 use partisync_provider::Provider;
+use partisync_sync::scan::{FileJournal, ScanOpts, ScanScheduler};
 
 const DEFAULT_DB: &str = "./partisync.db";
 const DEFAULT_CAS: &str = "./partisync.cas";
@@ -37,13 +39,14 @@ async fn main() {
         Some("sidecar-run") => sidecar_run_cmd(&args[1..]).await,
         Some("sidecar-status") => sidecar_status_cmd(&args[1..]).await,
         Some("index-remote") => index_remote_cmd(&args[1..]).await,
+        Some("scan-plan") => scan_plan_cmd(&args[1..]).await,
         Some("ls") => ls_cmd(&args[1..]).await,
         Some("find") => find_cmd(&args[1..]).await,
         Some("dedupe") => dedupe_cmd(&args[1..]).await,
         Some("search") => search_cmd(&args[1..]).await,
         _ => {
             eprintln!(
-                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]
+                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync scan-plan --scheme fs --root <dir> [--prefix /] [--concurrency N] [--journal <path>]  扫描调度 dry-run（分片并行 + 断点续扫）\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]
   partisync search <query> [--db <path>] [--index-root <path>] [--mode hybrid|bm25] [--limit N]  混合检索
   partisync sidecar-run <root> [--db <path>] [--sidecar-dir <dir>]   Sidecar 管线（缩略图/EXIF/嵌入）
   partisync sidecar-status [--db <path>]",
@@ -275,6 +278,128 @@ async fn jobs_cmd(_args: &[String]) -> i32 {
             eprintln!("error: {e}");
             1
         }
+    }
+}
+
+/// M5-WP03-T05：扫描调度 dry-run（SPEC docs/specs/M5-WP03.md 裁定 7）。
+///
+/// 对 provider 目标执行分片并行扫描（不入库），输出分片/条目统计与失败
+/// 清单；`--journal` 提供断点续扫（同账本二轮执行新增条目为 0）。
+async fn scan_plan_cmd(args: &[String]) -> i32 {
+    let scheme = flag_value(args, "--scheme").unwrap_or_else(|| "fs".into());
+    let Some(root) = flag_value(args, "--root") else {
+        eprintln!("error: scan-plan 需要 --root <dir>");
+        return 2;
+    };
+    let prefix = flag_value(args, "--prefix").unwrap_or_else(|| "/".into());
+    let concurrency: usize = flag_value(args, "--concurrency")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let journal_path = flag_value(args, "--journal");
+
+    let mut params = serde_json::Map::new();
+    params.insert("root".into(), serde_json::json!(root));
+    for (flag, key) in [
+        ("--bucket", "bucket"),
+        ("--endpoint", "endpoint"),
+        ("--region", "region"),
+        ("--access-key-id", "access_key_id"),
+        ("--secret-access-key", "secret_access_key"),
+        ("--username", "username"),
+        ("--password", "password"),
+    ] {
+        if let Some(v) = flag_value(args, flag) {
+            params.insert(key.into(), serde_json::json!(v));
+        }
+    }
+    let cfg = ProviderConfig {
+        scheme: match scheme.as_str() {
+            "s3" => ProviderScheme::S3,
+            "webdav" => ProviderScheme::Webdav,
+            "fs" => ProviderScheme::Fs,
+            other => {
+                eprintln!("error: 未知 scheme: {other}");
+                return 2;
+            }
+        },
+        params,
+    };
+    let provider = match Provider::from_config(&cfg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+
+    let sink = Arc::new(CountSink::default());
+    let scheduler = ScanScheduler::with_opts(
+        provider,
+        sink.clone(),
+        ScanOpts {
+            concurrency,
+            ..ScanOpts::default()
+        },
+    );
+    let started = std::time::Instant::now();
+    // prefix 归一：provider 内部路径无前导 /
+    let seed = prefix.trim_start_matches('/').trim_end_matches('/');
+    let result = match &journal_path {
+        Some(path) => scheduler.run_journal(seed, FileJournal::new(path)).await,
+        None => scheduler.run(seed).await,
+    };
+    match result {
+        Ok(stats) => {
+            println!(
+                "scan-plan 完成: scheme={scheme} root={root} prefix=\"{prefix}\" concurrency={concurrency}{}",
+                journal_path
+                    .as_ref()
+                    .map(|p| format!(" journal={p}"))
+                    .unwrap_or_default()
+            );
+            println!(
+                "  分片: done={} failed={}  目录: {}",
+                stats.shards_done, stats.shards_failed, stats.dirs
+            );
+            println!(
+                "  条目: 累计 {}（本次新增 {}）",
+                stats.entries,
+                sink.count()
+            );
+            println!("  耗时: {:?}", started.elapsed());
+            if stats.shards_failed > 0 {
+                println!("  ⚠ 有失败分片：排查源后带同 --journal 重跑即可补扫");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("scan-plan 失败: {e}");
+            1
+        }
+    }
+}
+
+/// dry-run 计数 sink（裁定 7：不入库；跨分片乱序安全——只计数）。
+#[derive(Default)]
+struct CountSink {
+    entries: std::sync::atomic::AtomicU64,
+}
+
+impl CountSink {
+    fn count(&self) -> u64 {
+        self.entries.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl partisync_sync::scan::EntrySink for CountSink {
+    async fn apply(
+        &self,
+        _dir: &str,
+        entries: &[partisync_sync::scan::ListedNode],
+    ) -> Result<(), PartisyError> {
+        self.entries
+            .fetch_add(entries.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 

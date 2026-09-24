@@ -7,6 +7,7 @@ description = "PartiSync 命令行界面：init/index/ls/find/dedupe/serve/sync 
 
 [dependencies]
 partisync-core = { path = "../partisync-core", version = "0.1.0" }
+partisync-sync = { path = "../partisync-sync", version = "0.1.0" } # M5-WP03-T05 scan-plan 子命令（壳→能力层向下依赖）
 partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
 partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
 partisync-ai = { path = "../partisync-ai", version = "0.1.0" } # M4-WP01 sidecar 调度

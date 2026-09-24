@@ -5812,6 +5812,7 @@ dependencies = [
  "partisync-graph",
  "partisync-index",
  "partisync-provider",
+ "partisync-sync",
  "percent-encoding",
  "serde",
  "serde_json",

@@ -619,3 +619,44 @@ async fn t04_corrupt_journal_errors_not_panic() {
     .unwrap_err();
     assert!(err.to_string().contains("账本损坏"), "got {err}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_resume_fully_done_journal_returns_immediately() {
+    let journal_path = tmp_root("t04-fully-done").join("scan.json");
+    let (src, expect) = wide_tree(0);
+    let sink = Arc::new(CollectSink::default());
+
+    // 第一轮完整扫描落账本
+    ScanScheduler::with_opts(
+        src,
+        sink.clone(),
+        ScanOpts {
+            concurrency: 4,
+            ..ScanOpts::default()
+        },
+    )
+    .run_journal("", FileJournal::new(&journal_path))
+    .await
+    .unwrap();
+
+    // 第二轮：前沿为空（全 done）→ 立即返回、零新条目、视图不变
+    let (src2, _) = wide_tree(0);
+    let t0 = Instant::now();
+    let stats = ScanScheduler::with_opts(
+        src2,
+        sink.clone(),
+        ScanOpts {
+            concurrency: 4,
+            ..ScanOpts::default()
+        },
+    )
+    .run_journal("", FileJournal::new(&journal_path))
+    .await
+    .unwrap();
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "空前沿不得等待 tick 悬挂"
+    );
+    assert_eq!(stats.entries, expect.len() as u64, "累计统计保持");
+    assert_eq!(sink.seen(), expect);
+}
