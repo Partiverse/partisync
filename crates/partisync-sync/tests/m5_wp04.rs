@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use partisync_sync::event::{
     apply_batch, poll_with_retry, EventDrain, EventJournal, EventJournalState, EventKind,
-    EventOpts, EventRecord, EventSource, FileEventJournal,
+    EventOpts, EventRecord, EventSource, EventStats, FileEventJournal,
 };
 
 fn tmp_root(tag: &str) -> PathBuf {
@@ -278,4 +278,107 @@ async fn t05_concurrent_sources_isolated_checkpoints() {
     assert_eq!(loaded.sources.len(), 2);
     assert_eq!(loaded.sources["sqs"].processed, 1);
     assert_eq!(loaded.sources["kafka"].processed, 1);
+}
+
+// ---------- T05：基准（SPEC 验收：1k 事件吞吐 + 并发 webhook 落盘） ----------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "基准：显式运行并登记 docs/reports/bench/M5-WP04-event-drain.md"]
+async fn t05_bench_mock_source_1k_events() {
+    let journal_path = tmp_root("t05-bench").join("e.json");
+    let source = MockSource::new("bench");
+    for i in 0..1024u64 {
+        source.push(rec(
+            "bench",
+            "sp",
+            &format!("p/{i}"),
+            EventKind::Created,
+            &format!("c{i}"),
+        ));
+    }
+
+    let journal = FileEventJournal::new(&journal_path);
+    let drain = EventDrain::with_opts(source, journal, EventOpts::default());
+
+    let t0 = std::time::Instant::now();
+    let mut total = EventStats::default();
+    // 多批：run_once 一次性 poll max=256 → 1024 需 4 轮
+    for _ in 0..4 {
+        let s = drain.run_once().await.unwrap();
+        total.applied += s.applied;
+        total.skipped += s.skipped;
+        total.source_failed += s.source_failed;
+    }
+    let elapsed = t0.elapsed();
+    println!(
+        "1k 事件 4 轮 run_once: {:?}  applied={}  ≈ {:.0} evt/s",
+        elapsed,
+        total.applied,
+        total.applied as f64 / elapsed.as_secs_f64()
+    );
+    assert_eq!(total.applied, 1024);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "基准：显式运行并登记 docs/reports/bench/M5-WP04-event-drain.md"]
+async fn t05_bench_webhook_inproc_apply_throughput() {
+    // 不引入 reqwest/tower dev-deps——直接测 apply_batch 1k 事件落 journal
+    // 吞吐（验收口径 = 单源处理能力；webhook 并发入站由 mpsc 转送归 M5-WP04 后续接线）
+    use std::sync::Arc;
+    let journal_path = tmp_root("t05-apply").join("e.json");
+    let journal = Arc::new(FileEventJournal::new(&journal_path));
+    let mut state = EventJournalState::default();
+
+    let n: u64 = 4096;
+    let t0 = std::time::Instant::now();
+    for batch_start in (0..n).step_by(256) {
+        let batch: Vec<EventRecord> = (0..256)
+            .map(|i| {
+                let k = batch_start + i;
+                rec(
+                    "bench",
+                    "sp",
+                    &format!("p/{k}"),
+                    EventKind::Created,
+                    &format!("c{k}"),
+                )
+            })
+            .collect();
+        struct Noop;
+        impl EventSource for Noop {
+            async fn poll_batch(
+                &self,
+                _max: usize,
+                _deadline: Duration,
+            ) -> Result<Vec<EventRecord>, partisync_sync::event::EventError> {
+                Ok(Vec::new())
+            }
+            async fn commit_cursor(
+                &self,
+                _cursor: &str,
+            ) -> Result<(), partisync_sync::event::EventError> {
+                Ok(())
+            }
+            fn name(&self) -> &str {
+                "noop"
+            }
+        }
+        apply_batch(
+            &Noop,
+            journal.as_ref(),
+            &mut state,
+            batch,
+            &EventOpts::default(),
+        )
+        .await
+        .unwrap();
+    }
+    let elapsed = t0.elapsed();
+    println!(
+        "apply_batch 4k 事件 (16×256) + journal save: {:?}  ≈ {:.0} evt/s",
+        elapsed,
+        n as f64 / elapsed.as_secs_f64()
+    );
+    let ckpt = journal.load().await.unwrap().unwrap();
+    assert_eq!(ckpt.sources["noop"].processed, n);
 }
