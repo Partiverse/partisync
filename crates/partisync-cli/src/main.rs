@@ -22,6 +22,7 @@ use partisync_graph::store::Store;
 use partisync_graph::watch::{self, WatchConfig};
 use partisync_provider::config::{ProviderConfig, ProviderScheme};
 use partisync_provider::Provider;
+use partisync_sync::event::{EventDrain, EventSource};
 use partisync_sync::scan::{FileJournal, ScanOpts, ScanScheduler};
 
 const DEFAULT_DB: &str = "./partisync.db";
@@ -40,13 +41,14 @@ async fn main() {
         Some("sidecar-status") => sidecar_status_cmd(&args[1..]).await,
         Some("index-remote") => index_remote_cmd(&args[1..]).await,
         Some("scan-plan") => scan_plan_cmd(&args[1..]).await,
+        Some("event-drain") => event_drain_cmd(&args[1..]).await,
         Some("ls") => ls_cmd(&args[1..]).await,
         Some("find") => find_cmd(&args[1..]).await,
         Some("dedupe") => dedupe_cmd(&args[1..]).await,
         Some("search") => search_cmd(&args[1..]).await,
         _ => {
             eprintln!(
-                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync scan-plan --scheme fs --root <dir> [--prefix /] [--concurrency N] [--journal <path>]  扫描调度 dry-run（分片并行 + 断点续扫）\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]
+                "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync scan-plan --scheme fs --root <dir> [--prefix /] [--concurrency N] [--journal <path>]  扫描调度 dry-run（分片并行 + 断点续扫）\n  partisync event-drain --source mock [--space <s>] [--journal <path>] [--cursor <tok>]  云事件流增量 journal（v0.1 mock source）\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]
   partisync search <query> [--db <path>] [--index-root <path>] [--mode hybrid|bm25] [--limit N]  混合检索
   partisync sidecar-run <root> [--db <path>] [--sidecar-dir <dir>]   Sidecar 管线（缩略图/EXIF/嵌入）
   partisync sidecar-status [--db <path>]",
@@ -377,6 +379,75 @@ async fn scan_plan_cmd(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// M5-WP04-T04：云事件流增量 journal（SPEC docs/specs/M5-WP04.md 裁定 7/8）。
+///
+/// v0.1 仅 mock source（正式 SQS/Kafka SDK 接线需 ADR 卡，WP04-T02 注）。
+/// 单 source 单次拉一批 → 应用 → checkpoint 续跑；常驻 Ctrl-C 桥接
+/// tokio signal。
+async fn event_drain_cmd(args: &[String]) -> i32 {
+    let source_kind = flag_value(args, "--source").unwrap_or_else(|| "mock".into());
+    if source_kind != "mock" {
+        eprintln!(
+            "error: v0.1 event-drain 仅支持 --source mock（{source_kind} SDK 接线归后续 ADR）"
+        );
+        return 2;
+    }
+    let space = flag_value(args, "--space").unwrap_or_else(|| "default".into());
+    let journal_path = match flag_value(args, "--journal") {
+        Some(p) => p,
+        None => {
+            eprintln!("error: event-drain 需要 --journal <path>");
+            return 2;
+        }
+    };
+    let _cursor = flag_value(args, "--cursor"); // v0.1 占位：mock 自身管队列
+
+    // v0.1 mock source：从 stdin/固定种子产事件（实际 prod 接 SQS/Kafka）
+    // 测试桩只发 1 批空 batch 验证账本/续跑闭环
+
+    let journal = std::sync::Arc::new(partisync_sync::event::FileEventJournal::new(&journal_path));
+    let source = EventDrain::new(partisd_cli_mock_source(), journal.clone());
+    match source.run_once().await {
+        Ok(stats) => {
+            println!(
+                "event-drain 完成: source=mock space={space} journal={journal_path}\n  applied={} skipped={} source_failed={}",
+                stats.applied, stats.skipped, stats.source_failed
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("event-drain 失败: {e}");
+            1
+        }
+    }
+}
+
+/// v0.1 mock source 桩：空队列（v0.1 仅验证闭环 + 续跑）；prod 走
+/// --source sqs|kafka（ADR 后续卡）。
+fn partisd_cli_mock_source() -> impl EventSource {
+    struct EmptySource;
+    impl EventSource for EmptySource {
+        async fn poll_batch(
+            &self,
+            _max: usize,
+            _deadline: std::time::Duration,
+        ) -> Result<Vec<partisync_sync::event::EventRecord>, partisync_sync::event::EventError>
+        {
+            Ok(Vec::new())
+        }
+        async fn commit_cursor(
+            &self,
+            _cursor: &str,
+        ) -> Result<(), partisync_sync::event::EventError> {
+            Ok(())
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+    }
+    EmptySource
 }
 
 /// dry-run 计数 sink（裁定 7：不入库；跨分片乱序安全——只计数）。
