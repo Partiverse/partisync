@@ -125,6 +125,11 @@ use std::time::{Duration, Instant};
 use partisync_core::error::{PartisyError, Severity};
 use partisync_sync::scan::{EntrySink, ScanOpts, ScanScheduler};
 
+/// 调度器测试串行锁：failpoint 是进程全局态（sync::failpoint），并行测试
+/// 互相污染（A 的注入点在 B 的 worker 里 panic）——持锁串行化所有调度器
+/// 测试（单个 <1s，总开销可忽略）。
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn fatal(what: &str) -> PartisyError {
     PartisyError {
         severity: Severity::Fatal,
@@ -133,13 +138,16 @@ fn fatal(what: &str) -> PartisyError {
 }
 
 /// 确定性 fake 清单源：内存树 + 每次列取延迟 + 可控失败。
+#[derive(Clone)]
 struct FakeSource {
     tree: HashMap<String, Vec<ListedNode>>,
     delay_ms: u64,
     /// 这些目录每次列都失败（失败隔离测试）。
     fail_always: Vec<String>,
     /// 这些目录首次列失败、重试成功（重试语义测试）。
-    fail_once: Mutex<BTreeSet<String>>,
+    fail_once: Arc<Mutex<BTreeSet<String>>>,
+    /// 每目录 list 调用计数（恢复不重扫断言；克隆共享——克隆体同账）。
+    calls: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl FakeSource {
@@ -148,8 +156,13 @@ impl FakeSource {
             tree: HashMap::new(),
             delay_ms,
             fail_always: Vec::new(),
-            fail_once: Mutex::new(BTreeSet::new()),
+            fail_once: Arc::new(Mutex::new(BTreeSet::new())),
+            calls: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn calls_of(&self, dir: &str) -> usize {
+        *self.calls.lock().unwrap().get(dir).unwrap_or(&0)
     }
 
     fn put(&mut self, dir: &str, entries: Vec<ListedNode>) {
@@ -177,6 +190,12 @@ impl FakeSource {
 
 impl ListSource for FakeSource {
     async fn list_dir(&self, dir: &str) -> Result<Vec<ListedNode>, PartisyError> {
+        *self
+            .calls
+            .lock()
+            .unwrap()
+            .entry(dir.to_owned())
+            .or_insert(0) += 1;
         if self.delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
         }
@@ -233,7 +252,7 @@ fn wide_tree(delay_ms: u64) -> (FakeSource, BTreeSet<String>) {
     expect.insert("root-a.txt".into());
     expect.insert("root-b.txt".into());
 
-    for i in 0..24u32 {
+    for i in 0..48u32 {
         let dir = format!("d{i:02}");
         let files: Vec<ListedNode> = (0..3)
             .map(|k| FakeSource::file(&format!("{dir}/f{k}.txt"), k))
@@ -244,7 +263,7 @@ fn wide_tree(delay_ms: u64) -> (FakeSource, BTreeSet<String>) {
         root.push(FakeSource::dir(&dir));
         src.put(&dir, files);
     }
-    for j in 0..5u32 {
+    for j in 0..10u32 {
         let dir = format!("top/sub{j}");
         let files: Vec<ListedNode> = (0..2)
             .map(|k| FakeSource::file(&format!("{dir}/g{k}.txt"), k))
@@ -266,6 +285,7 @@ fn wide_tree(delay_ms: u64) -> (FakeSource, BTreeSet<String>) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t03_parallel_speedup_and_set_equality() {
+    let _serial = SERIAL.lock().await;
     // 串行基线（concurrency=1，26 分片 × 20ms ≈ 520ms）
     let (src, expect) = wide_tree(20);
     let sink = Arc::new(CollectSink::default());
@@ -283,7 +303,7 @@ async fn t03_parallel_speedup_and_set_equality() {
     .unwrap();
     let serial = t0.elapsed();
     assert_eq!(sink.seen(), expect);
-    assert_eq!(stats_serial.shards_done, 1 + 24 + 1 + 5); // 根+24 叶+top+5 子
+    assert_eq!(stats_serial.shards_done, 1 + 48 + 1 + 10); // 根+48 叶+top+10 子
     assert_eq!(stats_serial.entries, expect.len() as u64);
 
     // 并行（concurrency=4）：集合一致 + 加速比 ≥ 2.5×
@@ -311,6 +331,7 @@ async fn t03_parallel_speedup_and_set_equality() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t03_source_fail_isolation_and_retry() {
+    let _serial = SERIAL.lock().await;
     // 持续失败：failed 计 1、不阻塞其余（条目数差该目录 3 文件）
     let (mut src, mut expect) = wide_tree(0);
     src.fail_always = vec!["d05".into()];
@@ -334,7 +355,7 @@ async fn t03_source_fail_isolation_and_retry() {
 
     // 首次失败重试成功：不计 failed
     let (mut src, expect) = wide_tree(0);
-    src.fail_once = Mutex::new(BTreeSet::from(["d07".into()]));
+    src.fail_once = Arc::new(Mutex::new(BTreeSet::from(["d07".into()])));
     let sink = Arc::new(CollectSink::default());
     let stats = ScanScheduler::with_opts(
         src,
@@ -353,6 +374,7 @@ async fn t03_source_fail_isolation_and_retry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t03_sink_fail_fast_stops_pool() {
+    let _serial = SERIAL.lock().await;
     // sink 在 d10 批次失败 → run 返回 Err 且池提前停（串行确定性：
     // 已见条目 < 全集）
     let (src, expect) = wide_tree(0);
@@ -392,6 +414,7 @@ impl EntrySink for FailingSink {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t03_warning_on_huge_flat_shard() {
+    let _serial = SERIAL.lock().await;
     // 单分片 8 文件 > 阈值 5 → 告警回调一次；条目不丢
     let mut src = FakeSource::new(0);
     let files: Vec<ListedNode> = (0..8)
@@ -421,4 +444,178 @@ async fn t03_warning_on_huge_flat_shard() {
     .unwrap();
     assert_eq!(stats.entries, 8);
     assert_eq!(warnings.lock().unwrap().len(), 1);
+}
+
+// ---------- T04：断点恢复（SPEC 裁定 4/5） ----------
+
+use partisync_sync::failpoint;
+use partisync_sync::scan::{FileJournal, JournalState, ScanJournal};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_crash_resume_skips_done_and_converges() {
+    let _serial = SERIAL.lock().await;
+    failpoint::clear();
+    let journal_path = tmp_root("t04-journal").join("scan.json");
+    let (src1, expect) = wide_tree(0);
+    let sink = Arc::new(CollectSink::default()); // sink = 持久索引（跨 run 共享）
+
+    // 第一轮：failpoint 在分片完成后崩溃（串行 → 根分片已记账落盘）
+    failpoint::enable("scan.shard_done");
+    let err = ScanScheduler::with_opts(
+        src1,
+        sink.clone(),
+        ScanOpts {
+            concurrency: 1,
+            ..ScanOpts::default()
+        },
+    )
+    .run_journal("", FileJournal::new(&journal_path))
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("join"),
+        "failpoint panic 应以 join 错误浮出"
+    );
+    let st1 = FileJournal::new(&journal_path)
+        .load()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        st1.done.iter().any(|d| d.dir.is_empty()),
+        "根分片应已记账：{:?}",
+        st1.done
+    );
+    failpoint::clear();
+
+    // 第二轮：同账本恢复（全新源实例）——done 分片零调用、全集一致
+    let (src2_inner, _) = wide_tree(0);
+    let src2 = Arc::new(src2_inner);
+    let stats = ScanScheduler::with_opts(
+        src2.clone(),
+        sink.clone(),
+        ScanOpts {
+            concurrency: 2,
+            ..ScanOpts::default()
+        },
+    )
+    .run_journal("", FileJournal::new(&journal_path))
+    .await
+    .unwrap();
+    assert_eq!(sink.seen(), expect, "恢复后条目集与全集一致");
+    let st2 = FileJournal::new(&journal_path)
+        .load()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(st2.done.len(), 60);
+    assert!(st2.failed.is_empty());
+    assert_eq!(stats.entries, expect.len() as u64);
+    // done 分片不重扫的直接证据：根目录（第一轮已记账）list 调用为 0，
+    // 待扫分片恰好 1 次
+    assert_eq!(src2.calls_of(""), 0, "done 分片不得重扫");
+    assert_eq!(src2.calls_of("d00"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_failed_shard_requeued_on_resume() {
+    let _serial = SERIAL.lock().await;
+    failpoint::clear();
+    let journal_path = tmp_root("t04-requeue").join("scan.json");
+
+    // 第一轮：d05 持续失败 → failed 入账本
+    let (src, expect) = wide_tree(0);
+    let src = {
+        let mut s = src;
+        s.fail_always = vec!["d05".into()];
+        s
+    };
+    let sink = Arc::new(CollectSink::default());
+    let src2 = {
+        let mut s = src.clone();
+        s.fail_always.clear();
+        s
+    };
+    let stats = ScanScheduler::with_opts(
+        src,
+        sink.clone(),
+        ScanOpts {
+            concurrency: 4,
+            ..ScanOpts::default()
+        },
+    )
+    .run_journal("", FileJournal::new(&journal_path))
+    .await
+    .unwrap();
+    assert_eq!(stats.shards_failed, 1);
+    assert!(!sink.seen().contains("d05/f0.txt"));
+
+    // 第二轮：源恢复（不再失败）→ failed 重入队补扫成功，账本清 failed
+    let stats2 = ScanScheduler::with_opts(
+        src2,
+        sink.clone(),
+        ScanOpts {
+            concurrency: 4,
+            ..ScanOpts::default()
+        },
+    )
+    .run_journal("", FileJournal::new(&journal_path))
+    .await
+    .unwrap();
+    assert_eq!(stats2.shards_failed, 0);
+    assert_eq!(sink.seen(), expect, "failed 补扫后全集一致");
+    let st = FileJournal::new(&journal_path)
+        .load()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(st.failed.is_empty());
+    assert_eq!(st.done.len(), 60);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_file_journal_roundtrip_and_atomic() {
+    let path = tmp_root("t04-roundtrip").join("scan.json");
+    let j = FileJournal::new(&path);
+    assert!(j.load().await.unwrap().is_none(), "无账本 = None");
+
+    let state = JournalState {
+        seed: "".into(),
+        done: vec![partisync_sync::scan::ShardDone {
+            dir: "d01".into(),
+            subdirs: vec!["d01/x".into()],
+        }],
+        failed: vec![("d02".into(), "boom".into())],
+        entries: 7,
+        dirs: 3,
+    };
+    j.save(&state).await.unwrap();
+    assert_eq!(j.load().await.unwrap().as_ref(), Some(&state));
+    assert!(
+        !tmp_root("t04-roundtrip").join("scan.json.tmp").exists(),
+        "rename 后临时文件不残留"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_corrupt_journal_errors_not_panic() {
+    let dir = tmp_root("t04-corrupt");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("scan.json");
+    std::fs::write(&path, b"{ truncated json...").unwrap();
+
+    let (src, _expect) = wide_tree(0);
+    let sink = Arc::new(CollectSink::default());
+    let err = ScanScheduler::with_opts(
+        src,
+        sink,
+        ScanOpts {
+            concurrency: 2,
+            ..ScanOpts::default()
+        },
+    )
+    .run_journal("", FileJournal::new(&path))
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("账本损坏"), "got {err}");
 }

@@ -5939,6 +5939,7 @@ dependencies = [
  "partisync-graph",
  "partisync-provider",
  "proptest",
+ "serde",
  "serde_json",
  "tokio",
  "x25519-dalek",
