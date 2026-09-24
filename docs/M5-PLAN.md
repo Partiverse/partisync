@@ -11,7 +11,7 @@
 |---|---|---|---|---|
 | **WP01** | 设备侧 UploadAck 协议与可靠传输 | AI 自动执行 | 解决 iroh push fire-and-forget，保证 Hub CAS 落库前不丢数据 | **已完成 (6/6) ✅** |
 | **WP02** | 联邦路由协议 (Multi-Hub Federation) | 规范先行 + AI | 基于 space 前缀的多 Hub 路由协商与 Raft 视图同步 | **已完成 (7/7) ✅** |
-| **WP03** | 分布式扫描调度器 | AI 自动执行 | 前缀分片并行 LIST、动态负载均衡与扫描断点恢复 | 待排期 |
+| **WP03** | 分布式扫描调度器 | AI 自动执行 | 前缀分片并行 LIST、动态负载均衡与扫描断点恢复 | **进行中 (1/6)** |
 | **WP04** | 云事件流摄取引擎 | AI 自动执行 | SQS / Webhook / Kafka 增量事件流适配器与去重流水线 | 待排期 |
 | **WP05** | 真实规模性能基准 (10⁶ - 10¹² 仿真) | AI 压测评估 | 替代合成评估，真实多模态/图谱元数据规模化时延与内存评估 | 待排期 |
 | **WP06** | 夜间混沌测试套件 (Chaos Suite) | AI 自动执行 | 覆盖网络分区、断网重连、宕机恢复、并发竞争混沌测试 | 待排期 |
@@ -118,6 +118,56 @@ WP02 总体目标：最小可用多 Hub 联邦——空间归属经协商产生�
 - **目标**: 双 hub loopback 全链（claim→sync→query→redirect）+ 分区恢复 + 幂等重放矩阵；RouteQuery P50/P99 与 10⁴ 行全量握手吞吐实测；报告落档 + 看板收官。
 - **约束文件清单**: `crates/partisync-hub/tests/m5_wp02.rs`、`docs/reports/bench/M5-WP02-federation.md`、`docs/M5-PLAN.md`
 - **DoD**: 验收标准（规格 §验收）全项勾验；M3/M5 既有套件原样通过；报告含增量协议触发条件评估。
+
+---
+
+## 2.75 WP03 自动化任务卡分解 (Execution Contract)
+
+WP03 总体目标：扫描调度内核——目录前缀即分片、worker 池自取队列（闲者
+多劳）、分片账本持久化断点恢复（规格见 [specs/M5-WP03.md](specs/M5-WP03.md)，
+已批准）。
+
+#### [Task] M5-WP03-T01: 规格与任务卡落档
+- **目标**: `docs/specs/M5-WP03.md`（裁定 1-8 + 契约 + 验收标准）+ 本看板任务卡。
+- **约束文件清单**: `docs/specs/M5-WP03.md`、`docs/M5-PLAN.md`
+- **DoD**: 规格含可执行验收标准；扫描调度位置/分片粒度/失败语义裁定明确。
+
+#### [Task] M5-WP03-T02: 分片模型与清单源
+- **目标**: `ListedNode`/`ListSource`/`EntrySink`/`ShardStatus`/`ScanStats`
+  （scan.rs 新建）；`impl ListSource for Provider`（sync 侧，孤儿规则合规）；
+  sync Cargo.toml + partisync-provider 依赖。
+- **约束文件清单**: `crates/partisync-sync/src/scan.rs`、`crates/partisync-sync/src/lib.rs`、`crates/partisync-sync/Cargo.toml`、`crates/partisync-sync/tests/m5_wp03.rs`
+- **DoD**: fs tmpdir 真实树走通 Provider→ListSource（文件/子目录混合、
+  空目录、根前缀）；零新外部依赖。
+
+#### [Task] M5-WP03-T03: 调度器核心
+- **目标**: `ScanScheduler`/`ScanOpts`——固定 worker 池、BFS 分片队列自取、
+  文件批（512）交 sink、原子统计 + 进度回调、失败语义（源失败重试 1 次→
+  failed；sink 失败 fail-fast）。
+- **约束文件清单**: `crates/partisync-sync/src/scan.rs`、`crates/partisync-sync/tests/m5_wp03.rs`
+- **DoD**: fake source 下 concurrency=4 加速比 ≥2.5× 且条目集与串行基线
+  一致；失败隔离（failed 不阻塞）与 fail-fast 语义测试全绿。
+
+#### [Task] M5-WP03-T04: 断点恢复
+- **目标**: `ScanJournal`/`JournalState`/`FileJournal`（临时文件+原子
+  rename）；failpoint 命名点（`scan.before_sink`/`scan.shard_done`）。
+- **约束文件清单**: `crates/partisync-sync/src/scan.rs`、`crates/partisync-sync/tests/m5_wp03.rs`
+- **DoD**: 注入中断后 resume——done 分片不重扫（source 计数断言）、failed
+  重入队、最终条目集一致；账本半写（截断）load 容错不 panic。
+
+#### [Task] M5-WP03-T05: CLI scan-plan 子命令
+- **目标**: `partisync scan-plan --scheme fs --root <dir> [--concurrency N]
+  [--journal <path>]`——dry-run 统计（分片/条目/吞吐/失败清单）+ 续扫幂等。
+- **约束文件清单**: `crates/partisync-cli/src/main.rs`、`crates/partisync-sync/tests/m5_wp03.rs`
+- **DoD**: fs 目标 dry-run 输出统计；同 journal 二轮执行新增条目为 0；
+  用法文本更新。
+
+#### [Task] M5-WP03-T06: 基准与收官
+- **目标**: 1/2/4/8 worker 加速曲线 + 恢复正确性 + 吞吐实测；报告落档
+  `docs/reports/bench/M5-WP03-scan-scheduler.md`；看板收官。
+- **约束文件清单**: `crates/partisync-sync/tests/m5_wp03.rs`、`docs/reports/bench/M5-WP03-scan-scheduler.md`、`docs/M5-PLAN.md`
+- **DoD**: 验收标准（规格 §验收）全项勾验；全仓回归绿；报告含巨型扁平
+  目录与 range 分片后续卡触发条件评估。
 
 ---
 
