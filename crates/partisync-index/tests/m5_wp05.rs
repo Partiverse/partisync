@@ -116,15 +116,37 @@ async fn t02_smoke_retrieval_correctness() {
     }
     lat.sort();
     let p99 = lat[98];
-    assert!(p99 < Duration::from_millis(20), "10⁴ 向量 P99={p99:?} 超 20ms");
+    assert!(
+        p99 < Duration::from_millis(20),
+        "10⁴ 向量 P99={p99:?} 超 20ms"
+    );
 }
 
 /// 10⁵ 元数据仿真（裁定 3 的 CI 安全缩比）：upsert 批量 + path 查询。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "元数据仿真：显式跑（cargo test -p partisync-index --test m5_wp05 t03 -- --ignored --nocapture）"]
 async fn t03_metadata_simulation_100k() {
-    let db = tmp_root("meta-sim").join("graph.db");
+    let dir = tmp_root("meta-sim");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("graph.db");
     let store = Store::open(&db).await.unwrap();
+    store
+        .seed_device_volume("dev-sim", "sim", "sim")
+        .await
+        .unwrap();
+    let root = store
+        .add_entry(
+            None,
+            "r",
+            "/",
+            partisync_graph::store::EntryKind::Dir,
+            0,
+            0,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     let n: u64 = 100_000;
     let mut rng = Lcg(7);
 
@@ -135,7 +157,7 @@ async fn t03_metadata_simulation_100k() {
                 let i = chunk * 5_000 + k;
                 FileInsert {
                     id: format!("e{i:07}"),
-                    parent_id: Some("root".into()),
+                    parent_id: Some(root.clone()),
                     name: format!("f{i:07}.bin"),
                     path: format!("/data/f{i:07}.bin"),
                     size: rng.next() % 1_000_000,
@@ -165,9 +187,5 @@ async fn t03_metadata_simulation_100k() {
         lat.push(t0.elapsed());
     }
     lat.sort();
-    println!(
-        "path 查询 P50={:?} P99={:?}",
-        lat[500],
-        lat[990]
-    );
+    println!("path 查询 P50={:?} P99={:?}", lat[500], lat[990]);
 }

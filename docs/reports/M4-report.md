@@ -90,7 +90,7 @@ ADR（全部已接受）：0015（iroh 设备通道 hub 侧）· 0016（iroh-blo
 | D3 | cli clippy 2 处清偿（M4-WP99-T01，当前 clippy 门禁红之唯一来源） | **M5 开局 P0** → ✅ **已清偿**（`aefdee0`，2026-09-23） |
 | **D4'** | WP06 内部探针 3 项 P1 加固（批次上限 / 跨库校验 / c2pa 形态） | ✅ **全部清偿**（M4-WP99-T02 `f9238e0` / T03 `c4af484` / T04 `b231d28`，2026-09-23 提交 3 commit + CI 全绿） |
 | D4 | 渗透 3 项 P1 加固（M4-WP99-T02/03/04 预留：批次上限/跨库校验/c2pa 形态）+ **LLM 新增 P0 立即修复**（T3.4.I `include_vectors` 默认 false + opt-in） | M5 | **D4 ✅ 全部清偿**（3 P1: T02 `f9238e0` / T03 `c4af484` / T04 `b231d28`；LLM P0: T07 `85cb297`，2026-09-23 共 4 commit + CI 全绿） |
-| D5 | WP02 检索吞吐基准实测（建 bench 文件 + reranker 真模型冒烟 + SIMD 环境解决） | M5 |
+| D5 | WP02 检索吞吐基准实测（建 bench 文件 + reranker 真模型冒烟 + SIMD 环境解决） | **已清偿（M5-WP05）**：三表 criterion 实测 BM25@10⁶ 636µs / 向量+hybrid@2×10⁴ 9-10ms 达标；usearch 写路径超线性缺陷发现并修复（`f2530e4`）；见 docs/reports/bench/m5-wp05-scale.md |
 | D6 | WP01 三推理栈真模型冒烟（HF 可达后补录真实吞吐） | M5 |
 | D7 | 真实评估集（200 语料/40 查询、双人盲标、真实 INBOX 分层）+ hybrid 两档评测 | M5+（真实数据面后） |
 | D8 | MCP e2e 真实 AI Agent 集成测试（WP03 用户指令后置项） | M5 |

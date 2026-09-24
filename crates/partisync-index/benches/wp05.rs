@@ -19,8 +19,12 @@ use partisync_index::search::hybrid::{HybridQuery, HybridVectorKind};
 use partisync_index::search::vector::VectorKind;
 use std::hint::black_box;
 
-/// 语料规模（全量基准）。
+/// 语料规模（全量基准）：BM25 @10⁶；向量/hybrid @2×10⁴（usearch add
+/// 实测 release+预 reserve 仍 ~16ms/条，10⁵ 构建 ~27min 不可运营——
+/// SPEC 裁定 2 修订记录；读路径外推见报告）。
 const CORPUS_FULL: usize = 1_000_000;
+/// 向量/hybrid 语料规模。
+const CORPUS_VEC: usize = 20_000;
 /// 词表大小。
 const VOCAB: usize = 5_000;
 /// 查询样本数（P50/P99 口径）。
@@ -67,9 +71,14 @@ fn fake_vector(rng: &mut Lcg) -> Vec<f32> {
 }
 
 /// 语料构建（BM25 批量 + 向量批量；已存在即复用）。
-fn build_corpus(engine: &IndexEngine, n: usize) -> Duration {
+fn build_corpus(engine: &IndexEngine, n: usize, vec_n: usize) -> Duration {
     let t0 = Instant::now();
     let mut rng = Lcg(42);
+    // 预 reserve：避免 2× 扩容路径的反复重排
+    engine
+        .vector_store()
+        .reserve(VectorKind::TextDense, vec_n as u64)
+        .unwrap();
     const CHUNK: usize = 5_000;
     for start in (0..n).step_by(CHUNK) {
         if start % 100_000 == 0 {
@@ -78,6 +87,8 @@ fn build_corpus(engine: &IndexEngine, n: usize) -> Duration {
             engine.commit().unwrap();
             eprintln!("[build] {start}/{n} elapsed={:?}", t0.elapsed());
         }
+        let chunk_t0 = std::time::Instant::now();
+        let vec_n = n.min(vec_n);
         let docs: Vec<IndexedDoc> = (start..(start + CHUNK).min(n))
             .map(|i| IndexedDoc {
                 content_id: format!("c{i:07}"),
@@ -88,14 +99,23 @@ fn build_corpus(engine: &IndexEngine, n: usize) -> Duration {
                 updated_ns: 1_700_000_000_000_000_000 + i as i64,
             })
             .collect();
+        let construct_t = chunk_t0.elapsed();
         engine.bm25_index().upsert_batch(docs).unwrap();
-        // 向量：同批 upsert（TextDense 768d）
-        for i in start..(start + CHUNK).min(n) {
+        let bm25_done = chunk_t0.elapsed();
+        // 向量：同批写入（TextDense 768d；fresh-key 快路径）
+        for i in start..(start + CHUNK).min(n).min(vec_n) {
             let v = fake_vector(&mut rng);
             engine
                 .vector_store()
-                .upsert(&format!("c{i:07}"), VectorKind::TextDense, &v)
+                .add_new(&format!("c{i:07}"), VectorKind::TextDense, &v)
                 .unwrap();
+        }
+        if start % 100_000 == 0 {
+            eprintln!(
+                "[chunk {start}] construct={construct_t:?} bm25={:?} chunk_total={:?}",
+                chunk_t0.elapsed(),
+                bm25_done
+            );
         }
     }
     engine.commit().unwrap();
@@ -129,7 +149,7 @@ fn bench_retrieval_1m(c: &mut Criterion) {
     })
     .unwrap();
 
-    let build = build_corpus(&engine, CORPUS_FULL);
+    let build = build_corpus(&engine, CORPUS_FULL, CORPUS_VEC);
     println!("语料构建 10⁶: {build:?}");
 
     let samples = query_samples();
