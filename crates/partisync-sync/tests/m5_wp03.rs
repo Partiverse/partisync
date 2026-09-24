@@ -125,6 +125,23 @@ use std::time::{Duration, Instant};
 use partisync_core::error::{PartisyError, Severity};
 use partisync_sync::scan::{EntrySink, ScanOpts, ScanScheduler};
 
+/// failpoint 进程全局态的 RAII 守卫（panicsafe）：构造时清空旧态（防上
+/// 一测试 panic 留下的污染）+ 析构时再清空（防本测试 panic 留下污染）。
+struct FailpointGuard;
+
+impl Drop for FailpointGuard {
+    fn drop(&mut self) {
+        failpoint::clear();
+    }
+}
+
+impl FailpointGuard {
+    fn new() -> Self {
+        failpoint::clear();
+        Self
+    }
+}
+
 /// 调度器测试串行锁：failpoint 是进程全局态（sync::failpoint），并行测试
 /// 互相污染（A 的注入点在 B 的 worker 里 panic）——持锁串行化所有调度器
 /// 测试（单个 <1s，总开销可忽略）。
@@ -286,6 +303,7 @@ fn wide_tree(delay_ms: u64) -> (FakeSource, BTreeSet<String>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t03_parallel_speedup_and_set_equality() {
     let _serial = SERIAL.lock().await;
+    let _fp = FailpointGuard::new();
     // 串行基线（concurrency=1，26 分片 × 20ms ≈ 520ms）
     let (src, expect) = wide_tree(20);
     let sink = Arc::new(CollectSink::default());
@@ -332,6 +350,7 @@ async fn t03_parallel_speedup_and_set_equality() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t03_source_fail_isolation_and_retry() {
     let _serial = SERIAL.lock().await;
+    let _fp = FailpointGuard::new();
     // 持续失败：failed 计 1、不阻塞其余（条目数差该目录 3 文件）
     let (mut src, mut expect) = wide_tree(0);
     src.fail_always = vec!["d05".into()];
@@ -375,6 +394,7 @@ async fn t03_source_fail_isolation_and_retry() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t03_sink_fail_fast_stops_pool() {
     let _serial = SERIAL.lock().await;
+    let _fp = FailpointGuard::new();
     // sink 在 d10 批次失败 → run 返回 Err 且池提前停（串行确定性：
     // 已见条目 < 全集）
     let (src, expect) = wide_tree(0);
@@ -415,6 +435,7 @@ impl EntrySink for FailingSink {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t03_warning_on_huge_flat_shard() {
     let _serial = SERIAL.lock().await;
+    let _fp = FailpointGuard::new();
     // 单分片 8 文件 > 阈值 5 → 告警回调一次；条目不丢
     let mut src = FakeSource::new(0);
     let files: Vec<ListedNode> = (0..8)
@@ -454,7 +475,7 @@ use partisync_sync::scan::{FileJournal, JournalState, ScanJournal};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t04_crash_resume_skips_done_and_converges() {
     let _serial = SERIAL.lock().await;
-    failpoint::clear();
+    let _fp = FailpointGuard::new();
     let journal_path = tmp_root("t04-journal").join("scan.json");
     let (src1, expect) = wide_tree(0);
     let sink = Arc::new(CollectSink::default()); // sink = 持久索引（跨 run 共享）
@@ -520,7 +541,7 @@ async fn t04_crash_resume_skips_done_and_converges() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t04_failed_shard_requeued_on_resume() {
     let _serial = SERIAL.lock().await;
-    failpoint::clear();
+    let _fp = FailpointGuard::new();
     let journal_path = tmp_root("t04-requeue").join("scan.json");
 
     // 第一轮：d05 持续失败 → failed 入账本
