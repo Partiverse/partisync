@@ -65,6 +65,32 @@ usearch HNSW 的 remove/contains 代价随规模超线性（10⁴ 规模实测 ~
 `m5_wp05`：1 通过（2×10³ 冒烟正确性）+ 1 ignored（10⁵ 元数据仿真，已实测）；
 bench `wp05` 全量口径 WP05_FULL=1 显式跑（CI 不跑）。全仓回归 + CI 见收官提交。
 
+## 7.5. 修订记录（M5-WP07, 2026-09-25）
+
+§2 向量/hybrid 数字与 §4「向量写入 16ms/条地板」**作废重测**：根因定位
+为**测量环境自伤**——本机为绕过 Apple Clang SME 探针崩溃而全量
+`NK_TARGET_*=0`，numkong 动态 dispatch 无 SIMD 可用 → 回退
+`nk_angular_f32_serial` 标量内核（sample 实证 80%+ CPU 在该函数），
+距离计算慢 ~1000×。**usearch 库本身无缺陷**。
+
+修正口径（仅关 SME/F8 探针，保留 NEON）重测
+（[specs/M5-WP07.md](../../specs/M5-WP07.md)、tests/m5_wp07.rs）：
+
+| 指标 | 标量口径（作废） | **NEON 口径（有效）** |
+|---|---|---|
+| add 吞吐 | 16ms/条（10⁶ 构建 4.4h） | **1208 条/s（10⁵ 构建 83s）** |
+| 向量 top-10 P99 @2×10⁴ | 12.3ms | — |
+| 向量 top-10 P99 @10⁵ | — | **532µs**（验收 100ms，188× 余量） |
+
+§4 外推表「向量写入 10⁹ 不可行 = 阻塞项」解除：1208 条/s 单线程下
+10⁶ ≈ 14min、10⁹ 需并行分片（联邦口径）——不再阻塞。剩余跟进（非
+阻塞）：numkong 动态 dispatch 间接开销（539µs/add 仍高于理论 µs 级，
+可试 NK_DYNAMIC_DISPATCH=0 静态选核）。
+
+**环境纪律**：`NK_TARGET_*=0` 全量 env 仅用于「必须编译」场景
+（workspace test/clippy）；**一切性能测量必须用只关 SME/F8 的 env**，
+否则数字为标量回退口径。
+
 ## 7. 后续卡建议（不阻塞收官）
 
 1. **usearch add 吞吐**（阻塞 10⁵+ 向量）：查 C 层编译 flags/SIMD、
