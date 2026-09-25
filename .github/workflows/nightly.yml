@@ -1,0 +1,44 @@
+# 夜间混沌套件（SPEC docs/specs/M5-WP06.md 裁定 4）。
+#
+# 红线：本文件为新增夜间调度入口，不触碰 ci.yml 门禁阈值（铁律）。
+# 红灯性质：报告性（issue 留痕），不阻塞合入门禁。
+# 时长预算：Linux 单 job，全量测试 + ignored 混沌/基准冒烟 ≈ 40-60min。
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # UTC 18:00 = 北京 02:00（低峰窗口）
+  workflow_dispatch: # 手动触发（验收口径）
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+
+      # 全量常规套件（与 ci 同口径，双重确认）
+      - name: cargo test --workspace
+        run: cargo test --workspace 2>&1 | tee nightly_test.log
+
+      # ignored 混沌/基准冒烟（显式口径；WP05 10⁶ 全量基准不进夜间——1h 级）
+      - name: chaos & bench smoke (ignored)
+        run: |
+          cargo test -p partisync-sync --test m5_wp03 t06_bench -- --ignored --nocapture 2>&1 | tee -a nightly_ignored.log
+          cargo test -p partisync-index --test m5_wp05 t03 -- --ignored --nocapture 2>&1 | tee -a nightly_ignored.log
+          cargo test -p partisync-sync --test m5_wp04 t05_bench -- --ignored --nocapture 2>&1 | tee -a nightly_ignored.log
+
+      # 失败 artifact 留痕（报告性质，不阻塞）
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-logs
+          path: |
+            nightly_test.log
+            nightly_ignored.log
+          retention-days: 14

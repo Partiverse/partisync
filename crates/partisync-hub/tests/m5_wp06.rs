@@ -122,7 +122,7 @@ async fn t02_leader_crash_federation_query_and_recover() {
     // h2 视角：对端消失 → sync 失败、本地视图照答（连接分区语义，
     // m5_wp02 已测；此处断言叠加后的恢复）
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(matches!(h2.sync_once(1).await, Err(_)));
+    assert!(h2.sync_once(1).await.is_err());
     assert!(view_route(&h2, "s-crash").await.is_some());
 
     // 同库重启 hub1（raft 日志重放恢复）→ 修正地址 → 一轮收敛

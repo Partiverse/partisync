@@ -236,7 +236,10 @@ async fn t03_ring_partition_relay_then_full_convergence() {
     // B↔C 双向 push（分区窗口内可达对收敛）
     let s1 = sim.push("b", "c").await.unwrap();
     let s2 = sim.push("c", "b").await.unwrap();
-    assert!(s1.applied + s2.applied >= 2, "B↔C 应至少互传 1 条: {s1:?} {s2:?}");
+    assert!(
+        s1.applied + s2.applied >= 2,
+        "B↔C 应至少互传 1 条: {s1:?} {s2:?}"
+    );
 
     // 逐对恢复 + push：**已知协议语义**（M2-WP09 裁定）——oplog 行应用后
     // 全局 trim（无中继转发），环形分区期间 A 漏看的行经 push 不再可达；
