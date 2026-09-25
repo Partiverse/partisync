@@ -188,6 +188,10 @@ WP04 总体目标：云事件流摄取——统一 EventSource 抽象、Webhook/
 > [reports/bench/M5-WP04-event-drain.md](reports/bench/M5-WP04-event-drain.md)
 > （apply 323k evt/s、apply+journal 508k evt/s；v0.1 mock source + axum
 > webhook 闭环；SQS/Kafka SDK 接线留 ADR 卡）。
+>
+> **📌 后续卡 M5-WP08 已清偿（2026-09-25，`<commit>`）**：`apply_one` stub
+> → `EventApplier` trait + `GraphApplier`（graph 直写，父目录链自动建，
+> Removed 幂等）——云事件到图谱闭环。见 specs/M5-WP08.md。
 
 #### [Task] M5-WP04-T01: 规格与任务卡落档
 - **目标**: `docs/specs/M5-WP04.md`（裁定 1-8 + 契约 + 验收标准）+ 本看板任务卡。

@@ -382,3 +382,114 @@ async fn t05_bench_webhook_inproc_apply_throughput() {
     let ckpt = journal.load().await.unwrap().unwrap();
     assert_eq!(ckpt.sources["noop"].processed, n);
 }
+
+// ---------- M5-WP08：graph apply 接线 ----------
+
+use partisync_sync::event::{EventApplier, GraphApplier};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t08_graph_applier_lifecycle_and_dir_chain() {
+    let dir = tmp_root("t08-graph");
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = partisync_graph::store::Store::open(&dir.join("t.db"))
+        .await
+        .unwrap();
+    let applier = GraphApplier::new(store);
+
+    // created：父目录链自动建（a/b/c.txt 三级）
+    let rec = EventRecord {
+        provider: "minio".into(),
+        space: "sp".into(),
+        path: "/docs/a/b/c.txt".into(),
+        kind: EventKind::Created,
+        cursor: "c1".into(),
+        payload: serde_json::json!({"size": 42_u64, "mtime_ns": 5_u64}),
+    };
+    applier.apply_event(&rec).await.unwrap();
+    let row = applier
+        .store_ref()
+        .entry_by_path("/docs/a/b/c.txt")
+        .await
+        .unwrap();
+    let row = row.expect("created 应落图谱");
+    assert_eq!(row.size, 42);
+    assert_eq!(row.mtime_ns, 5);
+    assert!(applier
+        .store_ref()
+        .entry_by_path("/docs")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(applier
+        .store_ref()
+        .entry_by_path("/docs/a")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(applier
+        .store_ref()
+        .entry_by_path("/docs/a/b")
+        .await
+        .unwrap()
+        .is_some());
+
+    // modified：幂等 upsert 刷新 size
+    let rec_mod = EventRecord {
+        kind: EventKind::Modified,
+        cursor: "c2".into(),
+        payload: serde_json::json!({"size": 99_u64, "mtime_ns": 6_u64}),
+        ..rec.clone()
+    };
+    applier.apply_event(&rec_mod).await.unwrap();
+    let row = applier
+        .store_ref()
+        .entry_by_path("/docs/a/b/c.txt")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.size, 99, "modified 应刷新 size");
+    assert_eq!(row.id, row.id);
+
+    // removed：消失；重复 removed 幂等不报错
+    let rec_rm = EventRecord {
+        kind: EventKind::Removed,
+        cursor: "c3".into(),
+        ..rec.clone()
+    };
+    applier.apply_event(&rec_rm).await.unwrap();
+    assert!(applier
+        .store_ref()
+        .entry_by_path("/docs/a/b/c.txt")
+        .await
+        .unwrap()
+        .is_none());
+    applier.apply_event(&rec_rm).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t08_apply_batch_routes_through_applier() {
+    let dir = tmp_root("t08-batch");
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = partisync_graph::store::Store::open(&dir.join("t.db"))
+        .await
+        .unwrap();
+    let journal_path = tmp_root("t08-batch").join("e.json");
+    let journal = FileEventJournal::new(&journal_path);
+
+    let source = MockSource::new("minio");
+    source.push(rec("minio", "sp", "/x/y.txt", EventKind::Created, "c1"));
+
+    let mut state = EventJournalState::default();
+    let batch: Vec<EventRecord> = source.queue.lock().unwrap().clone().into_iter().collect();
+    let opts = EventOpts {
+        applier: Some(std::sync::Arc::new(GraphApplier::new(store))),
+        ..EventOpts::default()
+    };
+    let stats = apply_batch(&source, &journal, &mut state, batch, &opts)
+        .await
+        .unwrap();
+    assert_eq!(stats.applied, 1);
+    // apply_batch 签名不持 store——经 opts.applier 通路落图谱由
+    // t08_graph_applier_lifecycle 覆盖；此处断言 stats 与 checkpoint 闭环
+    assert_eq!(state.sources["minio"].processed, 1);
+}

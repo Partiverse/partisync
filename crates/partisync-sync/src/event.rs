@@ -14,6 +14,7 @@
 //! trait 边界；正式 SDK 接线归后续 ADR 卡，避免无审批新增顶层依赖）。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -302,6 +303,8 @@ pub struct EventOpts {
     /// （裁定 7）；`None` = 不过滤（测试桩场景）。
     #[allow(clippy::type_complexity)]
     pub space_filter: Option<std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// 事件应用面（M5-WP08 裁定 1）：Some = 真落图谱；None = stub 记账。
+    pub applier: Option<Arc<dyn EventApplier>>,
 }
 
 impl std::fmt::Debug for EventOpts {
@@ -311,6 +314,7 @@ impl std::fmt::Debug for EventOpts {
             .field("batch_deadline", &self.batch_deadline)
             .field("max_retries", &self.max_retries)
             .field("has_space_filter", &self.space_filter.is_some())
+            .field("applier", &self.applier.is_some())
             .finish()
     }
 }
@@ -322,6 +326,7 @@ impl Default for EventOpts {
             batch_deadline: Duration::from_secs(5),
             max_retries: 3,
             space_filter: None,
+            applier: None,
         }
     }
 }
@@ -377,15 +382,18 @@ pub async fn apply_batch<S: EventSource, J: EventJournal>(
                 continue;
             }
         }
-        // apply：fan-out to graph::journal::record（v0.1 stub：测试桩
-        // 直接接受，prod 接入归后续）；failpoint 用于断点续传矩阵
+        // failpoint 用于断点续传矩阵
         if failpoint::check("event.before_apply") {
             panic!(
                 "failpoint: event.before_apply @ {}/{}",
                 record.space, record.path
             );
         }
-        apply_one(&record).await?;
+        // apply：applier Some = 真落目标面（M5-WP08）；None = stub 记账
+        match &opts.applier {
+            Some(applier) => applier.apply_event(&record).await?,
+            None => apply_one(&record).await?,
+        }
         // commit cursor（成功应用后）
         source.commit_cursor(&record.cursor).await?;
         ckpt.cursor = record.cursor.clone();
@@ -452,5 +460,132 @@ impl<S: EventSource + 'static, J: EventJournal + 'static> EventDrain<S, J> {
         let stats =
             apply_batch(&*self.source, &*self.journal, &mut state, batch, &self.opts).await?;
         Ok(stats)
+    }
+}
+
+// ---------- graph apply 接线（M5-WP08 裁定 1/2） ----------
+
+use partisync_graph::store::{EntryKind, Store};
+
+/// 事件应用面（M5-WP08 裁定 1）：`EventOpts.applier` 注入；None = stub
+/// （事件仅记账，M5-WP04 v0.1 行为）。
+/// 返回 future 类型（手工 boxed——`dyn` 兼容所需，不引 async-trait 依赖）。
+pub type ApplyEventFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EventError>> + Send + 'a>>;
+
+pub trait EventApplier: Send + Sync {
+    /// 应用单条事件到目标面（图谱/索引/…）。
+    ///
+    /// # Errors
+    /// 实现方透传（fail-fast 语义同裁定 5）。
+    fn apply_event<'a>(&'a self, record: &'a EventRecord) -> ApplyEventFuture<'a>;
+}
+
+impl<T: EventApplier + ?Sized> EventApplier for Arc<T> {
+    fn apply_event<'a>(&'a self, record: &'a EventRecord) -> ApplyEventFuture<'a> {
+        (**self).apply_event(record)
+    }
+}
+
+/// graph::Store 后端（M5-WP08 裁定 2）：Created/Modified = `add_entry`
+/// 幂等 upsert（父目录链自动建）；Removed = `remove_entry`（幂等）。
+///
+/// 与 `graph::journal` 通路的分工：journal 面向本地 fs 事件（apply 时
+/// 校验 fs metadata），云事件无本地 fs 可查——直写 graph。
+pub struct GraphApplier {
+    store: Store,
+}
+
+impl GraphApplier {
+    pub fn new(store: Store) -> Self {
+        Self { store }
+    }
+
+    /// 逐级 ensure 父目录链（幂等 add_entry Dir）。
+    async fn ensure_dir_chain(&self, path: &str) -> Result<Option<String>, EventError> {
+        let mut parent_id: Option<String> = None;
+        let trimmed = path.trim_start_matches('/');
+        let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
+        // 末段是文件名，目录链含全部中间段（/docs/a/b/c.txt → docs, a, b）
+        for i in 0..parts.len().saturating_sub(1) {
+            let dir_path = format!("/{}", parts[..=i].join("/"));
+            let name = parts[i];
+            let id = self
+                .store
+                .add_entry(
+                    parent_id.as_deref(),
+                    name,
+                    &dir_path,
+                    EntryKind::Dir,
+                    0,
+                    0,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(EventError::from)?;
+            parent_id = Some(id);
+        }
+        Ok(parent_id)
+    }
+}
+
+impl GraphApplier {
+    /// store 只读访问器（测试/调用方断言用）。
+    pub fn store_ref(&self) -> &Store {
+        &self.store
+    }
+}
+
+impl EventApplier for GraphApplier {
+    fn apply_event<'a>(&'a self, record: &'a EventRecord) -> ApplyEventFuture<'a> {
+        Box::pin(async move { self.apply_event_inner(record).await })
+    }
+}
+
+impl GraphApplier {
+    async fn apply_event_inner(&self, record: &EventRecord) -> Result<(), EventError> {
+        match record.kind {
+            EventKind::Removed => {
+                self.store
+                    .remove_entry(&record.path)
+                    .await
+                    .map_err(EventError::from)?;
+                Ok(())
+            }
+            EventKind::Created | EventKind::Modified => {
+                let parent_id = self.ensure_dir_chain(&record.path).await?;
+                let name = record
+                    .path
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("");
+                let size = record
+                    .payload
+                    .get("size")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let mtime_ns = record
+                    .payload
+                    .get("mtime_ns")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.store
+                    .add_entry(
+                        parent_id.as_deref(),
+                        name,
+                        &record.path,
+                        EntryKind::File,
+                        size,
+                        mtime_ns,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(EventError::from)?;
+                Ok(())
+            }
+        }
     }
 }
