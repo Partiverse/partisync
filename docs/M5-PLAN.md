@@ -14,7 +14,7 @@
 | **WP03** | 分布式扫描调度器 | AI 自动执行 | 前缀分片并行 LIST、动态负载均衡与扫描断点恢复 | **已完成 (6/6) ✅** |
 | **WP04** | 云事件流摄取引擎 | AI 自动执行 | SQS / Webhook / Kafka 增量事件流适配器与去重流水线 | **已完成 (5/5) ✅** |
 | **WP05** | 真实规模性能基准 (10⁶ - 10¹² 仿真) | AI 压测评估 | 替代合成评估，真实多模态/图谱元数据规模化时延与内存评估 | **已完成 (3/3) ✅** |
-| **WP06** | 夜间混沌测试套件 (Chaos Suite) | AI 自动执行 | 覆盖网络分区、断网重连、宕机恢复、并发竞争混沌测试 | 待排期 |
+| **WP06** | 夜间混沌测试套件 (Chaos Suite) | AI 自动执行 | 覆盖网络分区、断网重连、宕机恢复、并发竞争混沌测试 | **进行中 (1/4)** |
 
 ---
 
@@ -244,6 +244,34 @@ D6/D7 gated 诚实划出（规格见 [specs/M5-WP05.md](specs/M5-WP05.md)，已�
   `docs/reports/bench/m5-wp05-scale.md`（含 10⁹–10¹² 外推段）；M4-report
   §5 D5 行更新已清偿、D6/D7 标注 gated；看板收官。
 - **约束文件清单**: `crates/partisync-index/tests/m5_wp05.rs`、`docs/reports/bench/m5-wp05-scale.md`、`docs/reports/M4-report.md`、`docs/M5-PLAN.md`
+- **DoD**: 验收标准全项勾验；全仓回归绿。
+
+---
+
+## 2.95 WP06 自动化任务卡分解 (Execution Contract)
+
+WP06 总体目标：夜间混沌套件——聚合 M5 各 WP 恢复语义测试 + 补缺场景
+（并发 claim race / 崩溃叠加 / 多层故障 / 环形分区编排）+ nightly 调度
+入口（规格见 [specs/M5-WP06.md](specs/M5-WP06.md)，已批准）。
+
+#### [Task] M5-WP06-T01: 规格与任务卡落档
+- **目标**: `docs/specs/M5-WP06.md`（裁定 1-6）+ 本看板任务卡。
+- **约束文件清单**: `docs/specs/M5-WP06.md`、`docs/M5-PLAN.md`
+- **DoD**: 聚合/补缺边界明确；nightly 不触碰 ci.yml 门禁（铁律红线）。
+
+#### [Task] M5-WP06-T02: hub 混沌补缺
+- **目标**: 联邦并发 claim race（20 轮真实并发，收敛唯一 winner）+ leader crash 期间联邦查询照答陈旧视图。
+- **约束文件清单**: `crates/partisync-hub/tests/m5_wp06.rs`
+- **DoD**: 20 轮全收敛；crash 期间查询正常应答、重启后反熵收敛。
+
+#### [Task] M5-WP06-T03: sync 混沌补缺
+- **目标**: scan + event failpoint 并发启用（多层故障叠加）+ chaos.rs 环形分区（A↔B 断、B↔C 通、C↔A 断）逐对恢复收敛。
+- **约束文件清单**: `crates/partisync-sync/tests/m5_wp06.rs`
+- **DoD**: 双 failpoint 独立恢复成立；环形分区全网收敛无数据丢失。
+
+#### [Task] M5-WP06-T04: nightly workflow 与收官
+- **目标**: `.github/workflows/nightly.yml`（cron + workflow_dispatch，全量测试 + ignored 冒烟）；报告 `docs/reports/M5-WP06-chaos.md`（场景矩阵）；看板收官。
+- **约束文件清单**: `.github/workflows/nightly.yml`、`docs/reports/M5-WP06-chaos.md`、`docs/M5-PLAN.md`
 - **DoD**: 验收标准全项勾验；全仓回归绿。
 
 ---
