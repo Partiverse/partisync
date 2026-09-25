@@ -2,3 +2,8 @@
 # 用法：cargo xtask <trace <TASK-ID> | report <MILESTONE>>
 [alias]
 xtask = "run -p xtask --"
+
+# ADR-0021：MSRV-aware 解析——传递依赖优先选 rust-toolchain 兼容版本
+# （aws-sdk 链 1.112+ 要求 rustc 1.94.1 > 锁定的 1.94.0）
+[resolver]
+incompatible-rust-versions = "fallback"

@@ -21,6 +21,10 @@ zeroize = { version = "1", features = ["zeroize_derive"] } # M2-WP04/WP07 密钥
 getrandom = "0.4" # M2-WP04 X25519 私钥随机源（与 workspace 0.2 共存；非顶层依赖）
 chacha20poly1305 = "0.11" # M2-WP07 XChaCha20-Poly1305 AEAD（ADR-0010 选型）
 argon2 = "0.6" # M2-WP07 主密钥 KDF（ADR-0010 选型）
+aws-sdk-sqs = { version = "=1.102.0", optional = true } # ADR-0021：SQS 适配器（纯 Rust 官方 SDK；MSRV 1.94.0 上限钉 1.102，1.112+ 需 1.94.1）
+aws-config = { version = "=1.8.18", optional = true } # ADR-0021：SQS 凭证/区域装配
+hmac = "0.13.0" # ADR-0021：webhook HMAC 签名校验（RustCrypto 纯 Rust）
+sha2 = "0.11.0" # ADR-0021：SHA-256（hmac 配对）
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -28,3 +32,6 @@ tokio = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+event-sqs = ["dep:aws-sdk-sqs", "dep:aws-config"] # ADR-0021：SQS 适配器（默认关）

@@ -34,6 +34,14 @@ yanked = "deny"
 # ADR-0016（2026-09-21）：iroh/iroh-blobs 传递链 unmaintained 三条——
 # atomic-polyfill(heapless→postcard)、paste(netdev→iroh)、proc-macro-error(genawaiter→bao-tree)；
 # 均无已知漏洞、无安全升级路径，上游切换后撤销。
+# ADR-0021（2026-09-25）：aws-smithy-http-client 1.4.2 双栈 HTTP 客户端拉
+# hyper 0.14 → h2 0.3.27、rustls 0.21 → webpki 0.101.7 旧 major 线四条公告
+# （RUSTSEC-2026-0258 h2 空 DATA 帧[官方 Low]、0098/0099 webpki 名约束、
+# 0104 webpki CRL panic）。可达性论证：本仓库经 AWS SDK 仅作出站客户端
+# （SQS ReceiveMessage/Delete），h2 空帧排队是对端接收行为不可达；webpki
+# 校验对象限 AWS 信任根端点（无恶意 CA 名约束/CRL 输入面）。无修复版本
+# （0.3/0.101 线 EOL）；撤销条件 = aws-smithy-http-client 弃用 hyper 0.14
+# 双栈或发布修复传递版。
 # ADR-0020（2026-09-22）：RUSTSEC-2023-0071 rsa Marvin Attack（PKCS#1 v1.5 解密
 # 时序侧信道，私钥运算）——本仓库经 c2pa 仅做签名**验证**（公钥运算），不可达；
 # 上游 RustCrypto #626 立场：无修复版本。撤销条件 = rsa 发布修复版或 c2pa 弃用 rsa。
@@ -43,4 +51,8 @@ ignore = [
     "RUSTSEC-2024-0436", # ADR-0016
     "RUSTSEC-2024-0370", # ADR-0016
     "RUSTSEC-2023-0071", # ADR-0020
+    "RUSTSEC-2026-0258", # ADR-0021（h2 0.3 双栈，见上注）
+    "RUSTSEC-2026-0098", # ADR-0021（webpki 0.101 双栈）
+    "RUSTSEC-2026-0099", # ADR-0021（webpki 0.101 双栈）
+    "RUSTSEC-2026-0104", # ADR-0021（webpki 0.101 双栈）
 ]
