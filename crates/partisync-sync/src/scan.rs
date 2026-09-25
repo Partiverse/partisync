@@ -362,9 +362,13 @@ impl Counters {
     }
 }
 
-/// 终止轮询间隔：pending 归零/abort 的兜底重查周期——替代条件变量广播，
-/// 无丢失唤醒窗口（每 tick 重查，正确性不依赖时序）。
-const POLL_TICK: Duration = Duration::from_millis(50);
+/// 终止轮询间隔（M5-WP09）：worker 空转时的兜底重查周期——替代条件
+/// 变量广播，无丢失唤醒窗口（每 wake 重查 pending/abort，正确性不依赖
+/// 时序）。**空闲动态退避**：连续空转 sleep 从 1ms 指数升至本上限——
+/// 有分片到达时尾延迟 ≤1ms（原固定 50ms 的 1/50），空闲 CPU 开销
+/// 指数衰减。
+const POLL_TICK_MIN: Duration = Duration::from_millis(1);
+const POLL_TICK_MAX: Duration = Duration::from_millis(50);
 
 /// worker 共享协调态（裁定 3）：`pending = 排队 + 在途` 分片数；worker 取
 /// 分片自 mpsc，终止 = **pending 归零**（最后一片收尾后全池 tick 退出）或
@@ -380,16 +384,21 @@ struct PoolNet {
 impl PoolNet {
     /// 取下一个分片；`None` = 全局完成（pending 归零）或已 abort。
     async fn next_shard(&self) -> Option<String> {
+        // 空转退避：连续 miss 时 1ms → 2ms → 4ms … ≤50ms；取到即重置
+        let mut idle_rounds: u32 = 0;
         loop {
             if self.pending.load(Ordering::SeqCst) == 0 || self.abort.load(Ordering::SeqCst) {
                 return None;
             }
             // 锁内 recv（多 worker 串行取件）；tick 兜底重查终止条件
+            let tick = POLL_TICK_MIN
+                .saturating_mul(1u32 << idle_rounds.min(6))
+                .min(POLL_TICK_MAX);
             let mut guard = self.rx.lock().await;
-            match tokio::time::timeout(POLL_TICK, guard.recv()).await {
+            match tokio::time::timeout(tick, guard.recv()).await {
                 Ok(Some(shard)) => return Some(shard),
                 Ok(None) => return None, // 通道关闭（异常路径，防御性退出）
-                Err(_elapsed) => {}      // tick：重查 pending/abort
+                Err(_elapsed) => idle_rounds = idle_rounds.saturating_add(1),
             }
         }
     }
