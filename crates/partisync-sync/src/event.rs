@@ -589,3 +589,37 @@ impl GraphApplier {
         }
     }
 }
+// ---------- webhook HMAC 签名校验（ADR-0021；D2 OSCP 复审面） ----------
+
+/// webhook HMAC-SHA256 签名校验（ADR-0021 §3）：MinIO / 自建推送网关
+/// 通用口径——`signature_header` 形如 `sha256=<hex>`（前缀可省）。
+/// 恒时比较（`hmac::verify` 走 subtle `ct_eq`）。
+///
+/// 安全注意：secret 轮换 / 重放窗口（nonce+时间戳）归接线卡与 D2 OSCP
+/// 复审（当前挂起，见 M5-WP00 §4）。
+#[must_use]
+pub fn verify_hmac_sha256(secret: &str, body: &[u8], signature_header: &str) -> bool {
+    let Some(expected) = hex_decode(
+        signature_header
+            .strip_prefix("sha256=")
+            .unwrap_or(signature_header),
+    ) else {
+        return false;
+    };
+    use hmac::Mac; // digest 0.11 Mac trait（verify_slice）
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(body);
+    // verify_slice = subtle ct_eq 恒时比较（digest 0.11 Mac 方法）
+    mac.verify_slice(&expected).is_ok()
+}
+
+/// 紧凑 hex decode（两两一组；非法字符 = None）。
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
+        .collect()
+}

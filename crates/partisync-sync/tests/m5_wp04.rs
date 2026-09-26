@@ -493,3 +493,81 @@ async fn t08_apply_batch_routes_through_applier() {
     // t08_graph_applier_lifecycle 覆盖；此处断言 stats 与 checkpoint 闭环
     assert_eq!(state.sources["minio"].processed, 1);
 }
+
+// ---------- M5-WP04 SQS adapter + webhook HMAC（ADR-0021） ----------
+#[cfg(feature = "event-sqs")]
+mod wp04_sqs {
+    use super::*;
+    #[test]
+    fn wp04_s3_event_name_mapping() {
+        use partisync_sync::event::EventKind::*;
+        use partisync_sync::event_sqs::map_s3_event_name;
+        assert_eq!(map_s3_event_name("ObjectCreated:Put"), Some(Created));
+        assert_eq!(map_s3_event_name("ObjectCreated:Copy"), Some(Created));
+        assert_eq!(map_s3_event_name("ObjectRemoved:Delete"), Some(Removed));
+        assert_eq!(map_s3_event_name("ObjectRestore:Post"), Some(Modified));
+        assert_eq!(map_s3_event_name("Unknown:Type"), None);
+    }
+
+    #[test]
+    fn wp04_parse_s3_notification_extracts_records() {
+        use partisync_sync::event_sqs::parse_s3_notification;
+        let body = r#"{
+        "Records": [
+            {
+                "eventName": "ObjectCreated:Put",
+                "s3": {"object": {"key": "docs/a.txt", "size": 42}}
+            },
+            {
+                "eventName": "ObjectRemoved:Delete",
+                "s3": {"object": {"key": "docs/b.txt", "size": 0}}
+            }
+        ]
+    }"#;
+        let events = parse_s3_notification("sp", "h1", body);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].path, "docs/a.txt");
+        assert_eq!(events[0].cursor, "h1");
+        assert!(matches!(events[0].kind, EventKind::Created));
+        assert!(matches!(events[1].kind, EventKind::Removed));
+    }
+
+    #[test]
+    fn wp04_parse_s3_notification_handles_empty_or_malformed() {
+        use partisync_sync::event_sqs::parse_s3_notification;
+        assert_eq!(parse_s3_notification("sp", "h", "").len(), 0);
+        assert_eq!(parse_s3_notification("sp", "h", "{}").len(), 0);
+        assert_eq!(parse_s3_notification("sp", "h", "not json").len(), 0);
+        assert_eq!(
+            parse_s3_notification(
+                "sp",
+                "h",
+                r#"{"Records":[{"eventName":"X","s3":{"object":{"key":"a","size":0}}}]}"#
+            )
+            .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn wp04_hmac_sha256_roundtrip() {
+        use hmac::Mac;
+        use partisync_sync::event::verify_hmac_sha256;
+        let secret = "k3y-secret";
+        let body = b"hello world";
+        let mut mac =
+            <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(secret.as_bytes())
+                .expect("hmac key");
+        mac.update(body);
+        let tag = mac.finalize().into_bytes();
+        let mut hex = String::with_capacity(64);
+        for b in tag {
+            use std::fmt::Write as _;
+            write!(&mut hex, "{b:02x}").unwrap();
+        }
+        assert!(verify_hmac_sha256(secret, body, &format!("sha256={hex}")));
+        assert!(verify_hmac_sha256(secret, body, &hex));
+        // 错误 secret 应失败（恒时）
+        assert!(!verify_hmac_sha256("wrong", body, &hex));
+    }
+}

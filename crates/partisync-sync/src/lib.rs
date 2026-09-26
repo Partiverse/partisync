@@ -10,6 +10,9 @@ pub mod capture;
 pub mod chaos;
 pub mod crypto;
 pub mod event;
+/// SQS 事件源（ADR-0021；feature `event-sqs`，默认关）。
+#[cfg(feature = "event-sqs")]
+pub mod event_sqs;
 pub mod failpoint;
 pub mod pairing;
 pub mod reconcile;
