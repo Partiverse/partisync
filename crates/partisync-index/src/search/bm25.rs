@@ -98,17 +98,14 @@ fn err(what: &str, e: impl std::fmt::Display) -> PartisyError {
 /// 触发动机： LCSTS query 频含 `：` `？` `！` `，` 等全角标点， 直送
 /// tantivy QueryParser 会报 `Syntax Error`（见 SPEC M6-D67 §D7）。
 ///
-/// # Examples
-/// ```
-/// assert_eq!(sanitize_query("银行：房贷政策没变？"), "银行 房贷政策没变");
-/// assert_eq!(sanitize_query("\"hello\" +world"), "hello   world");
-/// ```
+/// 行为契约见本文件 `tests::sanitize_query_strips_reserved` 单测（私有函数，
+/// doctest 在 `pub` 范围外不可见）。
 fn sanitize_query(q: &str) -> String {
     // tantivy 保留字符：+ - ^ " * ? : ~ ( ) [ ] { } \ / ! 及其 CJK 全角对应字
     const RESERVED: &[char] = &[
         '+', '-', '^', '"', '\'', '*', '?', ':', '~', '(', ')', '[', ']', '{', '}', '\\', '/', '!',
-        '　', '：', '？', '！', '（', '）', '【', '】', '「', '」', '『', '』', '《', '》', '，', '。',
-        '、', '；', '—', '…', '～', '＂', '＇', '＋', '＝', '＜', '＞',
+        '　', '：', '？', '！', '（', '）', '【', '】', '「', '」', '『', '』', '《', '》', '，',
+        '。', '、', '；', '—', '…', '～', '＂', '＇', '＋', '＝', '＜', '＞',
     ];
     let mut out = String::with_capacity(q.len());
     let mut prev_space = false;
@@ -148,11 +145,8 @@ fn is_cjk(c: char) -> bool {
 /// 在写入文档 / 解析查询前把 CJK 字符 fan-out 为空格分隔的 unigram 与
 /// bigram； tantivy 默认分词器随后按空格切分。 复杂度 O(n)， 零额外依赖。
 ///
-/// # Examples
-/// ```
-/// assert_eq!(cjk_fan_out("银行"), "银 行 银行 ");
-/// assert_eq!(cjk_fan_out("hello"), "hello");
-/// ```
+/// 行为契约见本文件 `tests::cjk_fan_out_basic` 单测（私有函数， doctest
+/// 在 `pub` 范围外不可见）。
 fn cjk_fan_out(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     let mut prev: Option<char> = None;
@@ -256,10 +250,10 @@ impl Bm25Index {
         d.add_text(fn_field, &doc.filename);
         d.add_text(tags_field, doc.tags.join(" "));
         if let Some(ref ocr) = doc.ocr_text {
-            d.add_text(ocr_field, &cjk_fan_out(ocr));
+            d.add_text(ocr_field, cjk_fan_out(ocr));
         }
         if let Some(ref tx) = doc.transcript_text {
-            d.add_text(tx_field, &cjk_fan_out(tx));
+            d.add_text(tx_field, cjk_fan_out(tx));
         }
         d.add_i64(upd_field, doc.updated_ns);
 
@@ -293,10 +287,10 @@ impl Bm25Index {
             d.add_text(fn_field, &doc.filename);
             d.add_text(tags_field, doc.tags.join(" "));
             if let Some(ref ocr) = doc.ocr_text {
-                d.add_text(ocr_field, &cjk_fan_out(ocr));
+                d.add_text(ocr_field, cjk_fan_out(ocr));
             }
             if let Some(ref tx) = doc.transcript_text {
-                d.add_text(tx_field, &cjk_fan_out(tx));
+                d.add_text(tx_field, cjk_fan_out(tx));
             }
             d.add_i64(upd_field, doc.updated_ns);
             writer
@@ -510,15 +504,9 @@ mod tests {
     #[test]
     fn sanitize_query_strips_reserved() {
         // CJK 全角标点 → 空格（去尾随空白）
-        assert_eq!(
-            sanitize_query("银行：房贷政策没变？"),
-            "银行 房贷政策没变"
-        );
+        assert_eq!(sanitize_query("银行：房贷政策没变？"), "银行 房贷政策没变");
         // ASCII 双引号 / 加号替换；首尾 trim， 中间多空格保留（tantivy tokenize 时折叠）
-        assert_eq!(
-            sanitize_query("\"hello\" +world"),
-            "hello   world"
-        );
+        assert_eq!(sanitize_query("\"hello\" +world"), "hello   world");
         // 混合全角标点 + 引号；连续保留字符折叠为单空格
         assert_eq!(
             sanitize_query("（新华视点）：反腐\"灰色文化\"？"),
@@ -559,7 +547,10 @@ mod tests {
                 include_transcript: true,
             })
             .unwrap();
-        assert!(result.total >= 1, "CJK query should match doc with shared tokens");
+        assert!(
+            result.total >= 1,
+            "CJK query should match doc with shared tokens"
+        );
         assert_eq!(result.hits[0].content_id, "c1");
     }
 
@@ -599,7 +590,7 @@ mod tests {
         idx.commit().unwrap();
         idx.force_reload().unwrap();
 
-// 查询 1: 完整 bigram 匹配 → 必中
+        // 查询 1: 完整 bigram 匹配 → 必中
         let r = idx
             .search(Bm25Query {
                 query: "新华社受权".to_string(),
