@@ -91,6 +91,97 @@ fn err(what: &str, e: impl std::fmt::Display) -> PartisyError {
     }
 }
 
+/// 清洗查询字符串：剥离 tantivy QueryParser 的保留算子字符与其 CJK 全角
+/// 对应字， 替换为空格； 字母/数字/中文/下划线/空格保留。 后续 BM25 词项
+/// 切分走 tantivy 默认 tokenzier， 因此仅在标点层做规整， 不改变语义。
+///
+/// 触发动机： LCSTS query 频含 `：` `？` `！` `，` 等全角标点， 直送
+/// tantivy QueryParser 会报 `Syntax Error`（见 SPEC M6-D67 §D7）。
+///
+/// # Examples
+/// ```
+/// assert_eq!(sanitize_query("银行：房贷政策没变？"), "银行 房贷政策没变");
+/// assert_eq!(sanitize_query("\"hello\" +world"), "hello   world");
+/// ```
+fn sanitize_query(q: &str) -> String {
+    // tantivy 保留字符：+ - ^ " * ? : ~ ( ) [ ] { } \ / ! 及其 CJK 全角对应字
+    const RESERVED: &[char] = &[
+        '+', '-', '^', '"', '\'', '*', '?', ':', '~', '(', ')', '[', ']', '{', '}', '\\', '/', '!',
+        '　', '：', '？', '！', '（', '）', '【', '】', '「', '」', '『', '』', '《', '》', '，', '。',
+        '、', '；', '—', '…', '～', '＂', '＇', '＋', '＝', '＜', '＞',
+    ];
+    let mut out = String::with_capacity(q.len());
+    let mut prev_space = false;
+    for c in q.chars() {
+        if RESERVED.contains(&c) {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// 是否 CJK 统一表意（基本汉字 + 扩展 A–F + 兼容 + 部首 + 笔画）。
+/// 与 jieba 等中文分词器对「中文」的覆盖一致。
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs (基本汉字)
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{20000}'..='\u{2A6DF}' // Extension B
+        | '\u{2A700}'..='\u{2B73F}' // Extension C
+        | '\u{2B740}'..='\u{2B81F}' // Extension D
+        | '\u{2B820}'..='\u{2CEAF}' // Extension E
+        | '\u{F900}'..='\u{FAFF}'   // CJK Compatibility Ideographs
+        | '\u{2F800}'..='\u{2FA1F}' // Compatibility Supplement
+    )
+}
+
+/// CJK 字符 n-gram 切分： 含 CJK 的 run 切成 unigram + bigram， 空格分隔。
+///
+/// 触发动机： tantivy `SimpleTokenizer` 把无空格中文 run 当作 ONE token
+/// （UAX#29 字母连贯）， BM25 文档/查询粒度错位 → Recall=0。 本函数
+/// 在写入文档 / 解析查询前把 CJK 字符 fan-out 为空格分隔的 unigram 与
+/// bigram； tantivy 默认分词器随后按空格切分。 复杂度 O(n)， 零额外依赖。
+///
+/// # Examples
+/// ```
+/// assert_eq!(cjk_fan_out("银行"), "银 行 银行 ");
+/// assert_eq!(cjk_fan_out("hello"), "hello");
+/// ```
+fn cjk_fan_out(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    let mut prev: Option<char> = None;
+    let mut prev_was_cjk = false;
+    for c in s.chars() {
+        if is_cjk(c) {
+            // 单字 unigram
+            out.push(c);
+            out.push(' ');
+            // 与前一个 CJK 拼 bigram
+            if prev_was_cjk {
+                if let Some(p) = prev {
+                    out.push(p);
+                    out.push(c);
+                    out.push(' ');
+                }
+            }
+            prev = Some(c);
+            prev_was_cjk = true;
+        } else {
+            // 非 CJK 字符原样写入（保留分词边界）
+            out.push(c);
+            prev_was_cjk = false;
+            prev = None;
+        }
+    }
+    out
+}
+
 /// BM25 全文索引（tantivy 0.26）。
 ///
 /// 实例持有 `Index`（不可变）和 `IndexWriter`（可变，共享写锁）。
@@ -165,10 +256,10 @@ impl Bm25Index {
         d.add_text(fn_field, &doc.filename);
         d.add_text(tags_field, doc.tags.join(" "));
         if let Some(ref ocr) = doc.ocr_text {
-            d.add_text(ocr_field, ocr);
+            d.add_text(ocr_field, &cjk_fan_out(ocr));
         }
         if let Some(ref tx) = doc.transcript_text {
-            d.add_text(tx_field, tx);
+            d.add_text(tx_field, &cjk_fan_out(tx));
         }
         d.add_i64(upd_field, doc.updated_ns);
 
@@ -202,10 +293,10 @@ impl Bm25Index {
             d.add_text(fn_field, &doc.filename);
             d.add_text(tags_field, doc.tags.join(" "));
             if let Some(ref ocr) = doc.ocr_text {
-                d.add_text(ocr_field, ocr);
+                d.add_text(ocr_field, &cjk_fan_out(ocr));
             }
             if let Some(ref tx) = doc.transcript_text {
-                d.add_text(tx_field, tx);
+                d.add_text(tx_field, &cjk_fan_out(tx));
             }
             d.add_i64(upd_field, doc.updated_ns);
             writer
@@ -241,15 +332,23 @@ impl Bm25Index {
 
     /// 执行 BM25 查询。
     ///
+    /// 在丢给 tantivy `QueryParser` 前做两层预处理：
+    /// 1. `sanitize_query` 移除 tantivy 保留算子字符与全角 CJK 标点， 避免
+    ///    `Syntax Error`。
+    /// 2. `cjk_fan_out` 把 CJK 字符 run 切到 unigram + bigram 空格分隔，
+    ///    与文档写入时的预处理对齐（tantivy 默认分词器 UAX#29 把无空格
+    ///    中文视作 ONE token， 导致 BM25 文档/查询粒度错位 → Recall=0）。
+    ///
     /// # Errors
     /// 查询解析 / 搜索错误 → Fatal。
     pub fn search(&self, q: Bm25Query) -> Result<Bm25Result, PartisyError> {
         let start = std::time::Instant::now();
         let searcher = self.reader.searcher();
 
+        let pre_query = cjk_fan_out(&sanitize_query(&q.query));
         let parsed = self
             .parser
-            .parse_query(&q.query)
+            .parse_query(&pre_query)
             .map_err(|e| err("bm25 parse query", e))?;
 
         let (id_field, _fn_field, _tags_field, ocr_field, tx_field, _) = field_ids(&self.schema);
@@ -406,5 +505,119 @@ mod tests {
             .unwrap();
         assert_eq!(result3.total, 0);
         assert!(result3.hits.is_empty());
+    }
+
+    #[test]
+    fn sanitize_query_strips_reserved() {
+        // CJK 全角标点 → 空格（去尾随空白）
+        assert_eq!(
+            sanitize_query("银行：房贷政策没变？"),
+            "银行 房贷政策没变"
+        );
+        // ASCII 双引号 / 加号替换；首尾 trim， 中间多空格保留（tantivy tokenize 时折叠）
+        assert_eq!(
+            sanitize_query("\"hello\" +world"),
+            "hello   world"
+        );
+        // 混合全角标点 + 引号；连续保留字符折叠为单空格
+        assert_eq!(
+            sanitize_query("（新华视点）：反腐\"灰色文化\"？"),
+            "新华视点 反腐 灰色文化"
+        );
+        // ASCII 半角保留字符亦清洗
+        assert_eq!(sanitize_query("a+b*c"), "a b c");
+        // 数字 / 字母 / 下划线保留
+        assert_eq!(sanitize_query("Q3_review 2024"), "Q3_review 2024");
+        // 全部保留字 → 空串
+        assert_eq!(sanitize_query(":::"), "");
+        // 多次连续保留字符 → 单空格（trim 后为空）
+        assert_eq!(sanitize_query("a?!?!b"), "a b");
+    }
+
+    #[test]
+    fn search_handles_cjk_punctuation() {
+        // 回归：含 CJK 全角标点的 query 不再触发 tantivy Syntax Error。
+        let dir = tempfile::tempdir().unwrap();
+        let idx = Bm25Index::open_or_create(dir.path()).unwrap();
+
+        idx.upsert(IndexedDoc {
+            content_id: "c1".to_string(),
+            filename: "doc1.md".to_string(),
+            tags: vec!["lcsts".to_string()],
+            ocr_text: Some("银行：房贷政策没变？央行表态".to_string()),
+            transcript_text: None,
+            updated_ns: 1_700_000_000_000_000_000_i64,
+        })
+        .unwrap();
+        idx.commit().unwrap();
+        idx.force_reload().unwrap();
+
+        let result = idx
+            .search(Bm25Query {
+                query: "银行：房贷政策没变？".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert!(result.total >= 1, "CJK query should match doc with shared tokens");
+        assert_eq!(result.hits[0].content_id, "c1");
+    }
+
+    #[test]
+    fn cjk_fan_out_basic() {
+        // 2 个 CJK → 2 unigram + 1 bigram + 尾部空格
+        assert_eq!(cjk_fan_out("银行"), "银 行 银行 ");
+        // 5 个 CJK → 5 unigram + 4 bigram
+        assert_eq!(
+            cjk_fan_out("新华社受权"),
+            "新 华 新华 社 华社 受 社受 权 受权 "
+        );
+        // 非 CJK 原样保留
+        assert_eq!(cjk_fan_out("hello"), "hello");
+        assert_eq!(cjk_fan_out("Q3 review"), "Q3 review");
+        // 混合 CJK + 标点 + 拉丁（CJK unigram + 标点/拉丁原样保留）
+        assert_eq!(cjk_fan_out("中-A"), "中 -A");
+        // 空串
+        assert_eq!(cjk_fan_out(""), "");
+    }
+
+    #[test]
+    fn cjk_fan_out_match_lcsts() {
+        // 回归： 真实 LCSTS query / 文档走 cjk_fan_out 后能命中。
+        let dir = tempfile::tempdir().unwrap();
+        let idx = Bm25Index::open_or_create(dir.path()).unwrap();
+
+        idx.upsert(IndexedDoc {
+            content_id: "c1".to_string(),
+            filename: "lcsts_doc.md".to_string(),
+            tags: vec!["lcsts".to_string()],
+            ocr_text: Some("新华社受权于18日全文播发修改后的立法法全文".to_string()),
+            transcript_text: None,
+            updated_ns: 1_700_000_000_000_000_000_i64,
+        })
+        .unwrap();
+        idx.commit().unwrap();
+        idx.force_reload().unwrap();
+
+// 查询 1: 完整 bigram 匹配 → 必中
+        let r = idx
+            .search(Bm25Query {
+                query: "新华社受权".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert!(r.total >= 1, "完整 query 应命中");
+        assert_eq!(r.hits[0].content_id, "c1");
+
+        // 查询 2: 部分 unigram 匹配 → 仍命中
+        let r = idx
+            .search(Bm25Query {
+                query: "立法".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert!(r.total >= 1, "部分 unigram 应命中");
     }
 }
