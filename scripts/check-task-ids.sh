@@ -6,7 +6,7 @@ set -euo pipefail
 base="${1:?usage: check-task-ids.sh <base> <head>}"
 head="${2:?usage: check-task-ids.sh <base> <head>}"
 
-pattern='^Task-ID: M-?[0-9]+-WP[0-9]{2}-T[0-9]{2}'
+pattern='^Task-ID: M-?[0-9]+-(WP[0-9]{2}|D[0-9]+)-T[0-9]{2}$'
 fail=0
 count=0
 
