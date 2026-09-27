@@ -57,19 +57,17 @@ impl AppState {
     /// 索引损坏） → 返回 `DesktopError::Index`， 对应 SPEC §2.6
     /// `IndexUnavailable`。
     pub async fn index(&self) -> Result<Arc<IndexEngine>, DesktopError> {
-        let index_root = self.index_root.clone();
-        let engine = self
+        let cfg = IndexEngineConfig {
+            index_root: self.index_root.clone(),
+            enable_reranker: false,
+            reranker_model_dir: None,
+        };
+        let engine: Arc<IndexEngine> = self
             .index
-            .get_or_try_init(|| async move {
-                let cfg = IndexEngineConfig {
-                    index_root,
-                    enable_reranker: false,
-                    reranker_model_dir: None,
-                };
-                IndexEngine::open_or_create(cfg).map(Arc::new)
-            })
-            .await?;
-        Ok(engine.clone())
+            .get_or_try_init(|| async move { IndexEngine::open_or_create(cfg).map(Arc::new) })
+            .await?
+            .clone();
+        Ok(engine)
     }
 }
 

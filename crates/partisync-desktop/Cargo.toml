@@ -14,9 +14,12 @@ tauri = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
-# M6-WP03-T03（IPC 命令面）：3 个 path-only workspace 内部依赖，承载 6 个
+tokio = { workspace = true } # OnceCell 懒加载（state.rs）
+# M6-WP03-T03（IPC 命令面）：4 个 path-only workspace 内部依赖，承载 6 个
 # Tauri command 处理器（get_stats / list / search / cas_stats / duplicates /
-# jobs）。 ADR-0024 修订 4 登记， 非顶层 crates.io 新依赖。
+# jobs）+ PartisyError 类型转换（error.rs）。 ADR-0024 修订 4 登记， 非顶层
+# crates.io 新依赖。
+partisync-core = { path = "../partisync-core", version = "0.1.0" }
 partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
 partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
 partisync-index = { path = "../partisync-index", version = "0.1.0" }
