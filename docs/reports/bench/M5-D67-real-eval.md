@@ -23,7 +23,17 @@
     导致 BM25 文档/查询粒度错位 → Recall=0。 在 `Bm25Index` 索引写入与
     查询解析两侧新增 `cjk_fan_out`（字符级 unigram + bigram 空格分隔），
     5 行核心 + 5 用例单测全绿， eval_real 数字 0 → 0.95。
-- ⚠️ **hybrid_no_rerank / hybrid_with_rerank 模式尚未实装**： EvalRunner 当前只暴露 `run_bm25_only`； fastembed embeddings（feature `index-embed`）已 Cargo.toml 标注但未串联 EvalRunner → 第 3 档数字缺失。 待 fastembed 接 BM25+bge-small-zh-v1.5 后扩展 EvalRunner。
+- ✅ **hybrid_no_rerank 档已端到端打通**（M6-D67-T03， 2026-09-27）：
+  - 工作路径： `HF_ENDPOINT=hf-mirror.com` + `huggingface_hub.snapshot_download`
+    预下载 `Xenova/bge-small-zh-v1.5` onnx 模型（fastembed 默认走 huggingface.co
+    不可达， hf-mirror 缺 `Content-Range` header 触发 hf-hub range resume 错误）
+  - 实测模型下载： 6 文件（onnx/model.onnx + tokenizer 等）4.7s @ hf-mirror
+  - 三档对比数字 **Recall@10=0.95（与 bm25_only 同）/ MRR=0.6312 / nDCG=0.7143**
+  - **结论**： BM25 + CJK char-ngram 在 LCSTS 短查询→长文档上**已饱和**，
+    加向量检索拖累 MRR/nDCG（RRF 融合引入 BGE-small-zh 的次优排序噪声）
+  - **ADR-0023「重新评估条件」触发**： T04 hybrid_with_rerank 优先级降低，
+    需先确认 reranker 是否能纯化 BGE 排序才值得 ~700MB 权重下载 + 推理开销
+- ⚠️ **hybrid_with_rerank 模式尚未实装**： EvalRunner 当前暴露 `run_bm25_only` + `run_hybrid_no_rerank`； fastembed `Rerank` 模型 ~700MB + 推理时延 +100ms/query， T03 数字显示 BM25 已饱和， T04 推进需先经 SPEC §重新评估条件重审。
 
 ## 验收对账（SPEC M6-D67 §验收）
 
@@ -108,14 +118,27 @@ BM25 算法上界。
   M6-D67 §D7 既定口径一致。 若需全量 2.4M 文档评测， 改
   `EVAL_DOCS=10000 EVAL_QUERIES=1000` 即可（仍受 BM25 检索时间约束）
 
-#### 真档档总表（2026-09-26 更新）
+#### 真档档总表（2026-09-27 更新）
 
 | 数据集 | 模式 | Recall@10 | MRR | nDCG@10 | 备注 |
 |--------|------|-----------|-----|---------|------|
 | wp06 fixture 50/25 | bm25_only | 0.7800 | 0.7467 | 0.7537 | 合成库基线 |
-| **LCSTS 200doc/40query** | **bm25_only** | **0.9500** | **0.9375** | **0.9408** | **真档， 本会话端到端** |
-| (待 fastembed 接) | hybrid_no_rerank | — | — | — | EvalRunner 未实装此模式 |
-| (待 bge-reranker 接) | hybrid_with_rerank | — | — | — | EvalRunner 未实装此模式 |
+| **LCSTS 200doc/40query** | **bm25_only** | **0.9500** | **0.9375** | **0.9408** | **真档， BM25 + CJK char-ngram** |
+| **LCSTS 200doc/40query** | **hybrid_no_rerank** | **0.9500** | **0.6312** | **0.7143** | **真档， BM25 + BGE-small-zh RRF 融合** |
+| LCSTS 200doc/40query | hybrid_with_rerank | — | — | — | T04 暂缓（BM25 已饱和） |
+
+**三档对比解读**：
+- **Recall@10 持平（0.95）**： BM25 已经把 ground-truth 全部召回到 top-10，
+  加向量检索无新增相关文档
+- **MRR/nDCG 反而下降（0.94 → 0.63/0.71）**： BGE-small-zh 在 LCSTS 短查询→
+  长文档上的排序不如 BM25 char-ngram 准； RRF 融合引入次优向量命中拖累排序
+- **结论**： 对当前数据集（LCSTS query=新闻摘要、doc=新闻正文）， BM25 +
+  CJK char-ngram 是 sweet spot； 引入向量需 reranker 净化的边际收益
+  未知， 推进 T04 之前需 ADR 重审
+
+#### 退化档（wp06 fixture）：BM25-only
+
+本会话以 `scripts/eval-real.sh` 端到端跑通（wp06 fixture 退化）。
 
 ### D6 三推理栈冒烟
 
