@@ -30,10 +30,15 @@ fn content_key(content_id: &str) -> u64 {
 /// 向量种类（SPEC §3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorKind {
-    /// 文本稠密向量（BGE-M3，768d）。
+    /// 文本稠密向量（legacy 768d 占位， 与 m5_wp05/07 测试集 768d synthetic 向量
+    /// 对齐； 无生产模型对应。 SPEC M6-D67-T03 不推荐新代码使用， 新 embedding
+    /// 路径走 `TextDenseZh512`）。
     TextDense,
     /// 图像稠密向量（CLIP，512d）。
     ImageDense,
+    /// 中文文本稠密向量（BGE-small-zh-v1.5 / bge-small-zh，512d）——
+    /// SPEC M6-D67-T03 新增， EvalRunner hybrid_no_rerank LCSTS 真档使用。
+    TextDenseZh512,
 }
 
 impl VectorKind {
@@ -42,6 +47,7 @@ impl VectorKind {
         match self {
             VectorKind::TextDense => (768, usearch::MetricKind::Cos),
             VectorKind::ImageDense => (512, usearch::MetricKind::Cos),
+            VectorKind::TextDenseZh512 => (512, usearch::MetricKind::Cos),
         }
     }
 
@@ -50,6 +56,7 @@ impl VectorKind {
         match self {
             VectorKind::TextDense => "embed_text_dense.bin",
             VectorKind::ImageDense => "embed_image_dense.bin",
+            VectorKind::TextDenseZh512 => "embed_text_dense_zh512.bin",
         }
     }
 }
@@ -67,6 +74,9 @@ fn index_options(dims: usize, metric: usearch::MetricKind) -> usearch::IndexOpti
 pub struct VectorStore {
     text_dense: RwLock<usearch::Index>,
     image_dense: RwLock<usearch::Index>,
+    /// 中文文本稠密向量子索引（512d）—— BGE-small-zh-v1.5 等中文模型使用。
+    /// 与 768d TextDense 并存，  不互相覆盖。 见 SPEC M6-D67-T03 §5。
+    text_dense_zh512: RwLock<usearch::Index>,
 }
 
 impl VectorStore {
@@ -83,16 +93,21 @@ impl VectorStore {
 
         let text_path = path.join("text_dense.usearch");
         let image_path = path.join("image_dense.usearch");
+        let text_zh512_path = path.join("text_dense_zh512.usearch");
 
         let (text_dims, text_metric) = VectorKind::TextDense.dims_and_metric();
         let (image_dims, image_metric) = VectorKind::ImageDense.dims_and_metric();
+        let (zh512_dims, zh512_metric) = VectorKind::TextDenseZh512.dims_and_metric();
 
         let text_dense = Self::open_or_build_index(&text_path, text_dims, text_metric)?;
         let image_dense = Self::open_or_build_index(&image_path, image_dims, image_metric)?;
+        let text_dense_zh512 =
+            Self::open_or_build_index(&text_zh512_path, zh512_dims, zh512_metric)?;
 
         Ok(Self {
             text_dense: RwLock::new(text_dense),
             image_dense: RwLock::new(image_dense),
+            text_dense_zh512: RwLock::new(text_dense_zh512),
         })
     }
 
@@ -276,6 +291,7 @@ impl VectorStore {
 
         let text_path = path.join("text_dense.usearch");
         let image_path = path.join("image_dense.usearch");
+        let text_zh512_path = path.join("text_dense_zh512.usearch");
 
         {
             let index = self.text_dense.read().map_err(|_| PartisyError {
@@ -299,6 +315,18 @@ impl VectorStore {
                 .map_err(|e| PartisyError {
                     severity: Severity::Fatal,
                     source: Some(format!("save image_dense: {e}").into()),
+                })?;
+        }
+        {
+            let index = self.text_dense_zh512.read().map_err(|_| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("text_dense_zh512 lock poison".into()),
+            })?;
+            index
+                .save(&text_zh512_path.to_string_lossy())
+                .map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("save text_dense_zh512: {e}").into()),
                 })?;
         }
         Ok(())
@@ -371,6 +399,7 @@ impl VectorStore {
     pub fn clear(&self) -> Result<(), PartisyError> {
         let (text_dims, text_metric) = VectorKind::TextDense.dims_and_metric();
         let (image_dims, image_metric) = VectorKind::ImageDense.dims_and_metric();
+        let (zh512_dims, zh512_metric) = VectorKind::TextDenseZh512.dims_and_metric();
 
         let new_text =
             usearch::Index::new(&index_options(text_dims, text_metric)).map_err(|e| {
@@ -386,6 +415,13 @@ impl VectorStore {
                     source: Some(format!("recreate image index: {e}").into()),
                 }
             })?;
+        let new_zh512 =
+            usearch::Index::new(&index_options(zh512_dims, zh512_metric)).map_err(|e| {
+                PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("recreate text_zh512 index: {e}").into()),
+                }
+            })?;
 
         *self.text_dense.write().map_err(|_| PartisyError {
             severity: Severity::Fatal,
@@ -395,20 +431,32 @@ impl VectorStore {
             severity: Severity::Fatal,
             source: Some("image_dense lock poison".into()),
         })? = new_image;
+        *self.text_dense_zh512.write().map_err(|_| PartisyError {
+            severity: Severity::Fatal,
+            source: Some("text_dense_zh512 lock poison".into()),
+        })? = new_zh512;
 
         Ok(())
     }
 
     /// 返回各向量子索引的计数。
+    ///
+    /// 返回 `(text_dense, image_dense, text_dense_zh512)` 元组。 SPEC M6-D67-T03
+    /// 新增第三字段；  既有双字段调用方需解构升级。
     #[must_use]
-    pub fn approx_count(&self) -> (u64, u64) {
+    pub fn approx_count(&self) -> (u64, u64, u64) {
         let text = self.text_dense.read().map(|i| i.size() as u64).unwrap_or(0);
         let image = self
             .image_dense
             .read()
             .map(|i| i.size() as u64)
             .unwrap_or(0);
-        (text, image)
+        let zh512 = self
+            .text_dense_zh512
+            .read()
+            .map(|i| i.size() as u64)
+            .unwrap_or(0);
+        (text, image, zh512)
     }
 
     fn lock_for_write(
@@ -423,6 +471,10 @@ impl VectorStore {
             VectorKind::ImageDense => self.image_dense.write().map_err(|_| PartisyError {
                 severity: Severity::Fatal,
                 source: Some("image_dense lock poison".into()),
+            }),
+            VectorKind::TextDenseZh512 => self.text_dense_zh512.write().map_err(|_| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("text_dense_zh512 lock poison".into()),
             }),
         }
     }
@@ -439,6 +491,10 @@ impl VectorStore {
             VectorKind::ImageDense => self.image_dense.read().map_err(|_| PartisyError {
                 severity: Severity::Fatal,
                 source: Some("image_dense lock poison".into()),
+            }),
+            VectorKind::TextDenseZh512 => self.text_dense_zh512.read().map_err(|_| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("text_dense_zh512 lock poison".into()),
             }),
         }
     }
@@ -487,7 +543,7 @@ mod tests {
         store
             .upsert("c1", VectorKind::TextDense, &text_vec)
             .unwrap();
-        let (text_n, _) = store.approx_count();
+        let (text_n, _image_n, _zh512_n) = store.approx_count();
         assert_eq!(text_n, 1);
 
         // search_keys 返回原始 u64 key，可经 content_key 比对还原

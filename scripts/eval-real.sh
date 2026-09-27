@@ -90,7 +90,9 @@ cargo run --quiet -p partisync-index --example eval_real $FEATURES -- \
     --corpus-tsv "$CORPUS_TSV" \
     --queries "$QUERIES" \
     --qrels "$QRELS" \
-    --index-dir "$INDEX_DIR" \
+    --bm25-index-dir "$INDEX_DIR" \
+    --vector-index-dir "$WORK/vector_index" \
+    --embed-cache-dir "$WORK/embed_cache" \
     --out "$EVAL_OUT" \
     | tee "$WORK/run.txt" \
     | grep -E '"(mean|num)' | head -20 || true

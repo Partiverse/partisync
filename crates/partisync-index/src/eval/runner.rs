@@ -236,6 +236,187 @@ impl EvalRunner {
             per_query,
         ))
     }
+
+    /// 跑 hybrid_no_rerank 评估（BM25 + 向量 RRF 融合， 不接 reranker）。
+    ///
+    /// 三阶段： 1) 同 `run_bm25_only` 建 BM25 索引；  2) fastembed 嵌入全部
+    /// corpus markdown 主体 → 写 usearch TextDenseZh512 子索引；  3) 每个查询
+    /// 嵌入 → 走 `HybridSearch::search_with_vector` 取得 top-K → 评分。
+    ///
+    /// `embed_cache_dir`： fastembed 模型权重缓存目录（hf-mirror CAS bridge
+    /// 预热模型落地处）。
+    ///
+    /// 需要 `index-embed` feature 编译。
+    ///
+    /// # Errors
+    /// BM25 / 向量 / fastembed / IO 错误 → Fatal。
+    #[cfg(feature = "index-embed")]
+    pub async fn run_hybrid_no_rerank(
+        &self,
+        bm25_index_path: impl AsRef<Path>,
+        vector_index_path: impl AsRef<Path>,
+        embed_cache_dir: impl AsRef<Path>,
+    ) -> Result<MetricReport, PartisyError> {
+        use std::sync::Arc;
+
+        use crate::search::hybrid::{HybridQuery, HybridSearch};
+        use crate::search::vector::VectorKind;
+
+        let docs = self.load_corpus()?;
+        let queries = self.load_queries()?;
+        let qrels = self.load_qrels()?;
+
+        // ──── Phase 1: BM25 索引 ────
+        let bm25 = Arc::new(
+            Bm25Index::open_or_create(bm25_index_path.as_ref()).map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("open bm25: {e}").into()),
+            })?,
+        );
+        bm25.upsert_batch(docs.clone()).map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("bm25 upsert: {e}").into()),
+        })?;
+        bm25.commit().map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("bm25 commit: {e}").into()),
+        })?;
+        bm25.reload().map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("bm25 reload: {e}").into()),
+        })?;
+
+        // ──── Phase 2: corpus 嵌入 → 向量索引 ────
+        let cache = embed_cache_dir.as_ref();
+        std::fs::create_dir_all(cache).map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("create embed cache dir: {e}").into()),
+        })?;
+
+        let embed_opts = fastembed::TextInitOptions::new(fastembed::EmbeddingModel::BGESmallZHV15)
+            .with_cache_dir(cache.to_path_buf())
+            .with_show_download_progress(false);
+        let mut embed_model =
+            fastembed::TextEmbedding::try_new(embed_opts).map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("fastembed init BGESmallZHV15: {e}").into()),
+            })?;
+
+        // 收集语料主体（OCR 字段 = 整个 markdown body）→ 批量嵌入
+        let corpus_texts: Vec<String> = docs
+            .iter()
+            .map(|d| d.ocr_text.clone().unwrap_or_else(|| d.filename.clone()))
+            .collect();
+
+        // 记下 content_id ↔ 文档序， 写 usearch 时回填
+        let cid_at: Vec<String> = docs.iter().map(|d| d.content_id.clone()).collect();
+
+        let embeddings = embed_model
+            .embed(
+                corpus_texts.iter().map(String::as_str).collect::<Vec<_>>(),
+                None,
+            )
+            .map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("fastembed corpus embed: {e}").into()),
+            })?;
+
+        if embeddings.len() != cid_at.len() {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!(
+                        "embeddings/ids 数量不一致： {} vs {}",
+                        embeddings.len(),
+                        cid_at.len()
+                    )
+                    .into(),
+                ),
+            });
+        }
+
+        let vector = crate::search::vector::VectorStore::open_or_create(vector_index_path.as_ref())
+            .map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("open vector store: {e}").into()),
+            })?;
+        let items: Vec<(String, VectorKind, Vec<f32>)> = cid_at
+            .iter()
+            .cloned()
+            .zip(std::iter::repeat(VectorKind::TextDenseZh512))
+            .zip(embeddings.into_iter())
+            .map(|((cid, kind), v)| (cid, kind, v))
+            .collect();
+        vector.upsert_batch(&items).map_err(|e| PartisyError {
+            severity: Severity::Fatal,
+            source: Some(format!("vector upsert batch: {e}").into()),
+        })?;
+        vector
+            .save(vector_index_path.as_ref())
+            .map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("vector save: {e}").into()),
+            })?;
+
+        // ──── Phase 3: 跑查询（hybrid） ────
+        let vector_arc: Arc<crate::search::vector::VectorStore> = Arc::new(vector);
+        // engine.rs:111 同样的双层 Arc + as 强制转换桥（trait 仅在 Arc<T> 上实现，
+        // 单层 Arc<Bm25Index> → Arc<dyn Bm25Source> 不直接 coerce）。
+        let hybrid = HybridSearch::new_without_reranker(
+            Arc::new(bm25.clone()) as Arc<dyn crate::search::hybrid::Bm25Source>,
+            Arc::new(vector_arc.clone()) as Arc<dyn crate::search::hybrid::VectorSource>,
+        );
+        let mut per_query = Vec::new();
+        for q in &queries {
+            // 嵌入查询文本
+            let q_emb = embed_model
+                .embed(vec![q.text.as_str()], None)
+                .map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("fastembed query embed: {e}").into()),
+                })?
+                .into_iter()
+                .next()
+                .ok_or_else(|| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some("fastembed query embed 空输出".into()),
+                })?;
+
+            let result = hybrid
+                .search_with_vector(
+                    &q.text,
+                    &q_emb,
+                    VectorKind::TextDenseZh512,
+                    HybridQuery {
+                        query: q.text.clone(),
+                        limit: self.k,
+                        include_transcript: q.include_transcript,
+                        filters: Default::default(),
+                        vector_kind: crate::search::hybrid::HybridVectorKind::Auto,
+                        use_reranker: false,
+                    },
+                )
+                .await
+                .map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("hybrid search: {e}").into()),
+                })?;
+
+            let retrieved: Vec<String> = result.hits.iter().map(|h| h.content_id.clone()).collect();
+            let empty_rels = HashMap::new();
+            let rels = qrels.get(&q.id).unwrap_or(&empty_rels);
+
+            let metrics = PerQueryMetrics::compute(&retrieved, rels, self.k);
+
+            per_query.push((q.id.clone(), metrics));
+        }
+
+        Ok(MetricReport::aggregate(
+            "hybrid_no_rerank".to_string(),
+            self.k,
+            per_query,
+        ))
+    }
 }
 
 #[cfg(test)]

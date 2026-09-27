@@ -7,7 +7,10 @@
 //!       --corpus-tsv <file> \
 //!       --queries <file.jsonl> \
 //!       --qrels <file.jsonl> \
-//!       --index-dir <tmpdir> \
+//!       --bm25-index-dir <tmpdir> \
+//!       --vector-index-dir <tmpdir> \
+//!       --embed-cache-dir <dir> \
+//!       --mode bm25_only | hybrid_no_rerank | hybrid_with_rerank \
 //!       --out <eval.json>
 //!
 //! 输出 JSON 到 stdout（同时 --out 落盘）， 形如：
@@ -20,15 +23,18 @@ use std::process::ExitCode;
 
 use partisync_index::EvalRunner;
 
+#[allow(dead_code)] // vector_index_dir / embed_cache_dir 仅 hybrid_no_rerank 模式使用
 struct Args {
     k: usize,
     corpus_dir: PathBuf,
     corpus_tsv: PathBuf,
     queries: PathBuf,
     qrels: PathBuf,
-    index_dir: PathBuf,
+    bm25_index_dir: PathBuf,
+    vector_index_dir: PathBuf,
+    embed_cache_dir: PathBuf,
     out: PathBuf,
-    mode: String, // 预留: hybrid_no_rerank / hybrid_with_rerank 当前未实装
+    mode: String,
 }
 
 fn arg_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -55,7 +61,9 @@ fn parse_args() -> Result<Args, String> {
     let corpus_tsv = get_path("--corpus-tsv", true)?;
     let queries = get_path("--queries", true)?;
     let qrels = get_path("--qrels", true)?;
-    let index_dir = get_path("--index-dir", true)?;
+    let bm25_index_dir = get_path("--bm25-index-dir", true)?;
+    let vector_index_dir = get_path("--vector-index-dir", true)?;
+    let embed_cache_dir = get_path("--embed-cache-dir", true)?;
     let out = get_path("--out", true)?;
     let mode = arg_value(&raw, "--mode").unwrap_or("bm25_only").to_string();
     Ok(Args {
@@ -64,7 +72,9 @@ fn parse_args() -> Result<Args, String> {
         corpus_tsv,
         queries,
         qrels,
-        index_dir,
+        bm25_index_dir,
+        vector_index_dir,
+        embed_cache_dir,
         out,
         mode,
     })
@@ -75,13 +85,30 @@ fn run() -> Result<(), String> {
     let runner = EvalRunner::new(a.k, &a.corpus_dir, &a.corpus_tsv, &a.queries, &a.qrels);
     let report = match a.mode.as_str() {
         "bm25_only" => runner
-            .run_bm25_only(&a.index_dir)
+            .run_bm25_only(&a.bm25_index_dir)
             .map_err(|e| format!("run_bm25_only: {e:?}"))?,
-        "hybrid_no_rerank" | "hybrid_with_rerank" => {
-            return Err(format!(
-                "模式 {} 尚未实装（EvalRunner 当前仅 bm25_only； 待 fastembed 实装后补）",
-                a.mode
-            ));
+        "hybrid_no_rerank" => {
+            #[cfg(feature = "index-embed")]
+            {
+                tokio::runtime::Runtime::new()
+                    .map_err(|e| format!("tokio runtime: {e}"))?
+                    .block_on(runner.run_hybrid_no_rerank(
+                        &a.bm25_index_dir,
+                        &a.vector_index_dir,
+                        &a.embed_cache_dir,
+                    ))
+                    .map_err(|e| format!("run_hybrid_no_rerank: {e:?}"))?
+            }
+            #[cfg(not(feature = "index-embed"))]
+            {
+                return Err(
+                    "hybrid_no_rerank 需要编译时 feature 'index-embed'； 当前 feature 关闭"
+                        .to_string(),
+                );
+            }
+        }
+        "hybrid_with_rerank" => {
+            return Err("模式 hybrid_with_rerank 尚未实装（属 M6-D67-T04）".to_string());
         }
         other => return Err(format!("未知模式：{other}")),
     };

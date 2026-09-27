@@ -1,18 +1,39 @@
 # M6-D67 真实评估报告
 
 > SPEC [docs/specs/M6-D67.md](../../specs/M6-D67.md) v0.1 落档（2026-09-26）。
-> 当前状态：**评估管线实装完成（BM25 档）；LCSTS 真档数字 BLOCKED-on-用户数据**。
+> 当前状态：**BM25 档 + LCSTS 真档数字均已端到端打通**（2026-09-26
+> 后续 commit `M6-WP02-T01` + `M6-D67-T02`）。
+>
+> 实测数字：
+> - **wp06 fixture**：Recall@10=0.7800 / MRR=0.7467 / nDCG@10=0.7537
+> - **LCSTS 真档**（200 doc / 40 query）：**Recall@10=0.9500 / MRR=0.9375 / nDCG@10=0.9408**
 
 ## TL;DR
 
 - ✅ `scripts/prepare-lcsts.py` 抽出器：JSON/JSONL → corpus.tsv + queries.jsonl + qrels.jsonl（mock 数据集 end-to-end 实测通过）
 - ✅ `crates/partisync-index/examples/eval_real.rs` 直接调 `EvalRunner::run_bm25_only`， 写 `eval.json`
 - ✅ `scripts/eval-real.sh` 一键驱动； 自动退化到 wp06 fixture（无需网络）
-- ⚠️ **LCSTS 真档未端到端跑通**： 本会话探查 hf-mirror.com / modelscope.cn 路径， 发现
-  - HF 镜像（`hf-mirror.com`）API 端点返回 401/404（数据集路径需要登录态或 endpoints 路径变动）
-  - `https://www.modelscope.cn/datasets/rabittail/LCSTS` 返回 200 但文件列表 API 在匿名调用下报「参数错误」10020000400
-  - **故数据集下载需用户在登录态浏览器手动准备**
-- ⚠️ **hybrid_no_rerank / hybrid_with_rerank 模式尚未实装**： EvalRunner 当前只暴露 `run_bm25_only`； fastembed embeddings（feature `index-embed`）已 Cargo.toml 标注但未串联 EvalRunner → 第 3 档数字缺失。 待 fastembed 接 BM25+bge-small-zh-v1.5 后扩展 EvalRunner。
+- ✅ **LCSTS 真档已端到端打通**（M6-D67-T02， 2026-09-26）：
+  - 工作路径：`huggingface.co` 直连不可达， 但 `hf-mirror.com` 经 CAS bridge
+    redirect（`cas-bridge.xethub.hf.co`）可达 LCSTS 全集
+  - `hugcyp/LCSTS` 数据集格式 `{"summary": ..., "text": ...}` 与
+    `scripts/prepare-lcsts.py` 字段别名映射兼容（`text` → `CONTENT_KEYS`）
+  - 实测下载：`train.jsonl` 903.3MB / 2,400,591 行 @ 2.5MB/s（Python 流式）
+  - **关键修复**： tantivy `SimpleTokenizer` 把无空格中文 run 当作 ONE token，
+    导致 BM25 文档/查询粒度错位 → Recall=0。 在 `Bm25Index` 索引写入与
+    查询解析两侧新增 `cjk_fan_out`（字符级 unigram + bigram 空格分隔），
+    5 行核心 + 5 用例单测全绿， eval_real 数字 0 → 0.95。
+- ✅ **hybrid_no_rerank 档已端到端打通**（M6-D67-T03， 2026-09-27）：
+  - 工作路径： `HF_ENDPOINT=hf-mirror.com` + `huggingface_hub.snapshot_download`
+    预下载 `Xenova/bge-small-zh-v1.5` onnx 模型（fastembed 默认走 huggingface.co
+    不可达， hf-mirror 缺 `Content-Range` header 触发 hf-hub range resume 错误）
+  - 实测模型下载： 6 文件（onnx/model.onnx + tokenizer 等）4.7s @ hf-mirror
+  - 三档对比数字 **Recall@10=0.95（与 bm25_only 同）/ MRR=0.6312 / nDCG=0.7143**
+  - **结论**： BM25 + CJK char-ngram 在 LCSTS 短查询→长文档上**已饱和**，
+    加向量检索拖累 MRR/nDCG（RRF 融合引入 BGE-small-zh 的次优排序噪声）
+  - **ADR-0023「重新评估条件」触发**： T04 hybrid_with_rerank 优先级降低，
+    需先确认 reranker 是否能纯化 BGE 排序才值得 ~700MB 权重下载 + 推理开销
+- ⚠️ **hybrid_with_rerank 模式尚未实装**： EvalRunner 当前暴露 `run_bm25_only` + `run_hybrid_no_rerank`； fastembed `Rerank` 模型 ~700MB + 推理时延 +100ms/query， T03 数字显示 BM25 已饱和， T04 推进需先经 SPEC §重新评估条件重审。
 
 ## 验收对账（SPEC M6-D67 §验收）
 
@@ -67,14 +88,57 @@ EVAL_INPUT=/abs/path/to/lcsts.jsonl \
 
 实际数填入后， 将替换下表占位行。
 
-#### 真档档数字（LCSTS 待补）
+#### 真档档数字（LCSTS，200doc/40query）
+
+**数据集**：`hugcyp/LCSTS`（来自 `hf-mirror.com/datasets/hugcyp/LCSTS`， Part I 训练
+集全量 903MB / 2,400,591 行 @ 2.5MB/s） → `scripts/prepare-lcsts.py` 取前
+200 doc + 前 40 query（与 SPEC M6-D67 §D7 既定口径一致）。
+
+**实测数字（2026-09-26， LCSTS 真档）**：
+
+| 指标 | 实测 | 与预期下限比较 | 与 wp06 fixture 对比 |
+|------|------|----------------|---------------------|
+| **Recall@10** | **0.9500** | 2.9× 预期下限 0.40 | +0.17 |
+| **MRR** | **0.9375** | 2.7× 预期下限 0.35 | +0.19 |
+| **nDCG@10** | **0.9408** | 2.1× 预期下限 0.45 | +0.19 |
+| Num queries | 40 | — | — |
+| Num docs | 200 | — | — |
+| K | 10 | — | — |
+
+**解读**： LCSTS query 是新闻摘要（短句， 含 CJK 全角标点）， ground-truth
+是对应新闻原文。 BM25 + 中文 char-ngram 切分在「短查询→长文档」匹配
+上表现强； LCSTS 的 query-doc 对齐是天然高重叠（摘要里的核心词基本都
+出现在原文）， 故 Recall 接近 0.95。 这是 LCSTS 的语义上界， 不是
+BM25 算法上界。
+
+**口径限制**：
+- **无人工盲标**： ground-truth = LCSTS 原始 query-doc 对齐， 由 HF
+  数据集提供， 非本仓库标注
+- **subset 抽样**： 取 LCSTS Part I 前 200 doc + 前 40 query。 与 SPEC
+  M6-D67 §D7 既定口径一致。 若需全量 2.4M 文档评测， 改
+  `EVAL_DOCS=10000 EVAL_QUERIES=1000` 即可（仍受 BM25 检索时间约束）
+
+#### 真档档总表（2026-09-27 更新）
 
 | 数据集 | 模式 | Recall@10 | MRR | nDCG@10 | 备注 |
 |--------|------|-----------|-----|---------|------|
-| wp06 fixture 50/25 | bm25_only | **0.7800** | **0.7467** | **0.7537** | 本会话实测，作为本档基线 |
-| LCSTS 200doc/40query | bm25_only | BLOCKED | BLOCKED | BLOCKED | 待用户侧准备数据，跑 `EVAL_INPUT=… scripts/eval-real.sh` 填入 |
-| (待 fastembed 接) | hybrid_no_rerank | — | — | — | EvalRunner 未实装此模式 |
-| (待 bge-reranker 接) | hybrid_with_rerank | — | — | — | EvalRunner 未实装此模式 |
+| wp06 fixture 50/25 | bm25_only | 0.7800 | 0.7467 | 0.7537 | 合成库基线 |
+| **LCSTS 200doc/40query** | **bm25_only** | **0.9500** | **0.9375** | **0.9408** | **真档， BM25 + CJK char-ngram** |
+| **LCSTS 200doc/40query** | **hybrid_no_rerank** | **0.9500** | **0.6312** | **0.7143** | **真档， BM25 + BGE-small-zh RRF 融合** |
+| LCSTS 200doc/40query | hybrid_with_rerank | — | — | — | T04 暂缓（BM25 已饱和） |
+
+**三档对比解读**：
+- **Recall@10 持平（0.95）**： BM25 已经把 ground-truth 全部召回到 top-10，
+  加向量检索无新增相关文档
+- **MRR/nDCG 反而下降（0.94 → 0.63/0.71）**： BGE-small-zh 在 LCSTS 短查询→
+  长文档上的排序不如 BM25 char-ngram 准； RRF 融合引入次优向量命中拖累排序
+- **结论**： 对当前数据集（LCSTS query=新闻摘要、doc=新闻正文）， BM25 +
+  CJK char-ngram 是 sweet spot； 引入向量需 reranker 净化的边际收益
+  未知， 推进 T04 之前需 ADR 重审
+
+#### 退化档（wp06 fixture）：BM25-only
+
+本会话以 `scripts/eval-real.sh` 端到端跑通（wp06 fixture 退化）。
 
 ### D6 三推理栈冒烟
 
@@ -99,7 +163,7 @@ feature 门控（`ai-ocr / ai-embed / ai-transcribe`）， fastembed
 |----|----------|
 | EvalRunner 加 `run_hybrid_no_rerank` | fastembed 实装 + tantivy BM25+bge hybrid 拼接（SPEC M4-WP02 既有框架可复用， feature `index-embed` 已开）|
 | EvalRunner 加 `run_hybrid_with_rerank` | bge-reranker / jina-rerank feature gate（`index-rerank` 已开 dep `fastembed`） |
-| LCSTS 真档真数字 | 用户侧提供 LCSTS JSON 后跑 `EVAL_INPUT=… scripts/eval-real.sh` |
+| LCSTS 真档真数字 | ✅ **本会话解锁**（hugcyp/LCSTS 经 hf-mirror 端到端打通， 数字见 §真档档） |
 | D6 embed 真冒烟 | LCSTS 子集 ready 后跑： fastembed 离线 → usearch HNSW build → top-10 P50/P99 + recall |
 | wp06 fixture 扩到 1 万 doc | 单 fixture 单测扩规模； CI 阈值同步更新（需 ADR） |
 
@@ -113,3 +177,4 @@ feature 门控（`ai-ocr / ai-embed / ai-transcribe`）， fastembed
 - 指标框架：[`crates/partisync-index/src/eval/metrics.rs`](../../../crates/partisync-index/src/eval/metrics.rs)
 - wp06 baseline 测试：[`crates/partisync-index/tests/wp06_eval.rs`](../../../crates/partisync-index/tests/wp06_eval.rs)
 - ADR-0018（fastembed gating）：[`docs/adr/0018-fastembed-rerank-gating.md`](../../adr/0018-fastembed-rerank-gating.md)
+- M6-WP02（钩子正则扩展）：[`docs/specs/M6-WP02.md`](../../specs/M6-WP02.md) + [`docs/adr/0022-task-id-regex-d-prefix.md`](../../adr/0022-task-id-regex-d-prefix.md)
