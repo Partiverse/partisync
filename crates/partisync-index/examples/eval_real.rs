@@ -23,6 +23,7 @@ use std::process::ExitCode;
 
 use partisync_index::EvalRunner;
 
+#[allow(dead_code)] // vector_index_dir / embed_cache_dir 仅 hybrid_no_rerank 模式使用
 struct Args {
     k: usize,
     corpus_dir: PathBuf,
@@ -100,9 +101,10 @@ fn run() -> Result<(), String> {
             }
             #[cfg(not(feature = "index-embed"))]
             {
-                return Err(format!(
+                return Err(
                     "hybrid_no_rerank 需要编译时 feature 'index-embed'； 当前 feature 关闭"
-                ));
+                        .to_string(),
+                );
             }
         }
         "hybrid_with_rerank" => {
