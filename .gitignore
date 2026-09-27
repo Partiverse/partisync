@@ -11,3 +11,6 @@ mutants.out*/
 
 # 本机 e2e 测试配置（含绝对路径，不入库）
 .zcode/config.json
+
+# M6-WP03 Tauri 构建产物（tauri-build 生成， 与 Tauri 官方 .gitignore 模板一致）
+crates/partisync-desktop/gen/
