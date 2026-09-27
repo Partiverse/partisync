@@ -7262,6 +7262,10 @@ dependencies = [
 name = "partisync-desktop"
 version = "0.1.0"
 dependencies = [
+ "dirs 5.0.1",
+ "partisync-cas",
+ "partisync-graph",
+ "partisync-index",
  "serde",
  "serde_json",
  "tauri",
