@@ -782,3 +782,130 @@ async fn t06_bench_worker_scaling_and_fs_throughput() {
         );
     }
 }
+
+// ─── 资源耗尽探针（补 scanner_enobufs）───
+//
+// 场景： Linux 文件描述符 / 内核缓冲区耗尽时 IO 报 ENOBUFS（在 std::io 层
+// 通常归类为 `ErrorKind::OutOfMemory` 或 `ErrorKind::WouldBlock`）。当前
+// scanner 设计里 source 错误统一走"重试 1 次 → 计入 failed"路径（裁定 5），
+// sink 错误走 fail-fast（裁定 5）。本组探针断言两种语义都不因资源耗尽而
+// panic / 静默吞掉——是 graceful failure 的回归测试。
+
+use std::io;
+
+/// 资源耗尽模拟源：被点名目录的 `list_dir` 持续抛 `ErrorKind::OutOfMemory`
+/// （Linux ENOBUFS 在 std::io 层的常见归类）。
+#[derive(Clone)]
+struct OomSource {
+    inner: FakeSource,
+    oom_dirs: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl OomSource {
+    fn new(inner: FakeSource, dirs: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            inner,
+            oom_dirs: Arc::new(Mutex::new(BTreeSet::from_iter(dirs))),
+        }
+    }
+}
+
+impl ListSource for OomSource {
+    async fn list_dir(&self, dir: &str) -> Result<Vec<ListedNode>, PartisyError> {
+        if self.oom_dirs.lock().unwrap().contains(dir) {
+            let io_err = io::Error::new(io::ErrorKind::OutOfMemory, "scanner enobufs probe");
+            return Err(PartisyError::with_source(Severity::Fatal, Box::new(io_err)));
+        }
+        self.inner.list_dir(dir).await
+    }
+}
+
+/// 资源耗尽模拟 sink：第 `fail_after` 次 apply 返 OOM 错误（模拟 sink 内
+/// 缓冲区耗尽），其余调用透传。
+struct OomSink {
+    inner: Arc<CollectSink>,
+    fail_after: usize,
+    calls: AtomicUsize,
+}
+
+impl OomSink {
+    fn new(inner: Arc<CollectSink>, fail_after: usize) -> Self {
+        Self {
+            inner,
+            fail_after,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl EntrySink for OomSink {
+    async fn apply(&self, dir: &str, entries: &[ListedNode]) -> Result<(), PartisyError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner.apply(dir, entries).await?;
+        if n >= self.fail_after {
+            let io_err = io::Error::new(io::ErrorKind::WouldBlock, "scanner enobufs probe");
+            return Err(PartisyError::with_source(Severity::Fatal, Box::new(io_err)));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_scanner_enobufs_source_out_of_memory_counts_as_failed() {
+    let _serial = SERIAL.lock().await;
+    let _fp = FailpointGuard::new();
+
+    // d42 持续 OOM → 1 分片 failed、3 文件缺失，其余 233 分片正常
+    let (inner, mut expect) = wide_tree(0);
+    for k in 0..3 {
+        expect.remove(&format!("d42/f{k}.txt"));
+    }
+    let src = OomSource::new(inner, ["d42".to_string()]);
+    let sink = Arc::new(CollectSink::default());
+    let stats = ScanScheduler::with_opts(
+        src,
+        sink.clone(),
+        ScanOpts {
+            concurrency: 4,
+            ..ScanOpts::default()
+        },
+    )
+    .run("")
+    .await
+    .expect("source OOM 必须 graceful 返 Ok、 不 panic");
+
+    assert_eq!(
+        stats.shards_failed, 1,
+        "OOM 分片计入 failed、 不向 run 传播"
+    );
+    assert_eq!(sink.seen(), expect, "其余条目全集一致（OOM 失败隔离）");
+    assert_eq!(stats.entries, expect.len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_scanner_enobufs_sink_out_of_memory_does_not_panic() {
+    let _serial = SERIAL.lock().await;
+    let _fp = FailpointGuard::new();
+
+    // sink 在首批 apply 报 OOM → fail-fast 透传 Err， 不 panic
+    let (src, _expect) = wide_tree(0);
+    let sink = Arc::new(CollectSink::default());
+    let oom_sink = OomSink::new(sink.clone(), 1);
+    let err = ScanScheduler::with_opts(
+        src,
+        oom_sink,
+        ScanOpts {
+            concurrency: 1,
+            ..ScanOpts::default()
+        },
+    )
+    .run("")
+    .await
+    .expect_err("sink OOM 应 fail-fast 透 Err");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("enobufs") || msg.contains("WouldBlock") || msg.contains("Fatal"),
+        "sink OOM 错误应保留错误源信息： got {msg}"
+    );
+}
