@@ -31,11 +31,12 @@ async fn make_app() -> (tauri::App<tauri::test::MockRuntime>, TempDir) {
     )
     .await
     .expect("open state");
+    // 测试不需要 IPC handler（直接调 ipc::* 函数而非 mock webview invoke），
+    // 故省略 .invoke_handler(...)： generate_handler! 需要 __cmd__X 宏在调用
+    // 站点可见， 而 #[macro_export] 仅在 crate root 暴露， 跨测试 crate
+    // 边界不带。 mock_builder 仅 .manage(state) 即可获得 app.state::<T>()。
     let app = mock_builder()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![
-            get_stats, list, search, cas_stats, duplicates, jobs,
-        ])
         .build(mock_context(noop_assets()))
         .expect("build app");
     (app, tmp)
