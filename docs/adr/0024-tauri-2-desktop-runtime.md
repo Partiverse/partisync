@@ -1,6 +1,6 @@
 # ADR-0024: Tauri 2 桌面壳运行时纳入 —— macOS/Linux 优先，iOS/Android 留 M7+
 
-版本: 0.1 · 状态: **已接受（2026-09-27 用户拍板）** · 关联: SPEC M6-WP03
+版本: 0.2 · 状态: **已接受（2026-09-27 用户拍板）** · 关联: SPEC M6-WP03
 （产品化演示桌面壳骨架）、执行方案 §6.7（M6 产品化滚动阶段四项
 主题之一）、ADR-0022（Task-ID 正则扩展·D 档命名约定）
 负责人: @lead · 起草日期: 2026-09-27
@@ -131,8 +131,15 @@ deny.toml 无需改动（Tauri 2 = Apache-2.0 OR MIT 双协议， 已在
   必需； ADR 记录理由）
 - 新增 crate `partisync-desktop`（+1 workspace member）
 - CI 增加 Tauri 资源嵌入 build 步骤（`tauri-build`）， Linux runner
-  需预装 webkit2gtk-4.1（已在 ubuntu-latest 默认包， 0 额外 CI 配
-  置）； macOS runner 自带
+  需预装 webkit2gtk-4.1。**修订 3（2026-09-27 T02 同步， 见后）**：
+  ubuntu-latest runner **不**默认带 webkit2gtk-4.1（2026-Q3 起 GitHub
+  Actions runner image 已剥离系统级 webview 依赖）， T01 期间 PR #3
+  CI run `36302844159` 双 FAIL 即此根因； commit `c04e5b0` 在
+  `ci.yml` clippy + test (ubuntu-latest) job 与 `nightly.yml` chaos
+  job 各加一个 `install Tauri 2 Linux system deps` step， 装 Tauri
+  官方推荐 6 包：`libwebkit2gtk-4.1-dev build-essential libxdo-dev
+  libssl-dev libayatana-appindicator3-dev librsvg2-dev`。 macOS
+  runner 自带 WKWebView 无影响
 - `partisync-desktop` 与 `partisync-cli` 双二进制并存， 用户认知成本
   小幅上升（README 标注「GUI 用户用 `partisd-desktop`， CLI 用户用
   `partisync`」）
@@ -157,8 +164,15 @@ Tauri 尚未纳入 workspace.dependencies， 无法跑 `cargo deny check`
 - **重复版本（`multiple-versions = "warn"`）**： wry 0.4x 可能与
   现有 webview 相关 crate 冲突——本仓库当前无 webview 相关依赖，
   预期为零冲突； T01 实测确认
-- **CI 影响**： Linux ubuntu-latest runner 需 `libwebkit2gtk-4.1-dev`
-  已默认安装； macOS runner 自带 WKWebView； 0 额外 CI runner 配置
+- **CI 影响**： 原以为 Linux ubuntu-latest runner 已默认带
+  `libwebkit2gtk-4.1-dev`、 0 额外 CI runner 配置——此假设**错误**。
+  **修订 3（2026-09-27 T02 同步， 已在 ci.yml / nightly.yml 落地）**：
+  ubuntu-latest runner 实际不默认带 webkit2gtk-4.1， PR #3 run
+  `36302844159` 实证（glib-sys build script 找不到 glib-2.0）。
+  修法见上面「负面 / 放弃」段同位置。 本 ADR 起草期未实测 CI 假设
+  是治理遗漏——后续 ADR 涉及 CI runner 系统库的， 必须先在 runner
+  image 上跑一次 `apt list --installed | grep <lib>` 验证假设再写。
+  macOS runner 自带 WKWebView 不受影响
 - **deny.toml 不修改**： 现有 `[licenses].allow` 列表已涵盖
   Tauri 全传递链许可证， 无需新增条目
 - **deny.toml 修改（T01 实测修订， 2026-09-27 用户拍板 A 路径）**：
@@ -232,3 +246,11 @@ Tauri 尚未纳入 workspace.dependencies， 无法跑 `cargo deny check`
   级路径
 - 投资演示场景出现「必须用 Chromium 内核」的需求（如 webm codec）→
   重新评估 Tauri vs Electron
+
+**修订登记**（同决策空间， 不另开 ADR）：
+
+| 修订号 | 日期 | 触发 | 落点 | 现状 |
+|--------|------|------|------|------|
+| 修订 1 | 2026-09-27 | T01 `cargo deny check licenses` 实测命中 `target-lexicon v0.12.16` Apache-2.0 WITH LLVM-exception | deny.toml `[licenses].allow` 增 `Apache-2.0 WITH LLVM-exception` | 合入 main（PR #3 squash `f0fe865`） |
+| 修订 2 | 2026-09-27 | T01 `cargo audit` 实测命中 `RUSTSEC-2026-0253 lru pop() UAF`（tantivy/reed-solomon-erasure 传递链） | deny.toml `[advisories].ignore` 增 `RUSTSEC-2026-0253`， 可达性论证 + 撤销条件 = tantivy ≥ 0.27 或 reed-solomon-erasure ≥ v7 任一发布 | 合入 main（PR #3 squash `f0fe865`） |
+| **修订 3** | 2026-09-27 | T01 实施期 PR #3 CI run `36302844159` 实证： ubuntu-latest runner 不默认带 webkit2gtk-4.1（起草期 CI 假设错误）， glib-sys build script 找不到 glib-2.0 | `ci.yml` clippy + test (ubuntu-latest) job 与 `nightly.yml` chaos job 各加 `install Tauri 2 Linux system deps` step， 装 Tauri 官方推荐 6 包； 本 ADR §后果节两段同步修订； SPEC M6-WP03 §6 R2 同步（从「接受」升级为「已落地 + 监控」） | **合入 main（commit `c04e5b0`， PR #3 squash `f0fe865`）**； 本次 T02 仅补 ADR/SPEC 文本， 无代码改动 |
