@@ -38,3 +38,8 @@ path = "src/main.rs"
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true } # #[tokio::test]
+# `tauri::test` 模块仅在测试期可用（mock_builder / mock_context /
+# noop_assets）， 生产构建不加 test feature 避免污染 release
+# 二进制。 tests/commands.rs 用其注入 AppState + 验证 6 个 IPC
+# command happy path。
+tauri = { workspace = true, features = ["test"] }
