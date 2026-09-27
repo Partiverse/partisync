@@ -814,10 +814,7 @@ impl ListSource for OomSource {
     async fn list_dir(&self, dir: &str) -> Result<Vec<ListedNode>, PartisyError> {
         if self.oom_dirs.lock().unwrap().contains(dir) {
             let io_err = io::Error::new(io::ErrorKind::OutOfMemory, "scanner enobufs probe");
-            return Err(PartisyError::with_source(
-                Severity::Fatal,
-                Box::new(io_err),
-            ));
+            return Err(PartisyError::with_source(Severity::Fatal, Box::new(io_err)));
         }
         self.inner.list_dir(dir).await
     }
@@ -847,10 +844,7 @@ impl EntrySink for OomSink {
         self.inner.apply(dir, entries).await?;
         if n >= self.fail_after {
             let io_err = io::Error::new(io::ErrorKind::WouldBlock, "scanner enobufs probe");
-            return Err(PartisyError::with_source(
-                Severity::Fatal,
-                Box::new(io_err),
-            ));
+            return Err(PartisyError::with_source(Severity::Fatal, Box::new(io_err)));
         }
         Ok(())
     }
@@ -884,11 +878,7 @@ async fn t03_scanner_enobufs_source_out_of_memory_counts_as_failed() {
         stats.shards_failed, 1,
         "OOM 分片计入 failed、 不向 run 传播"
     );
-    assert_eq!(
-        sink.seen(),
-        expect,
-        "其余条目全集一致（OOM 失败隔离）"
-    );
+    assert_eq!(sink.seen(), expect, "其余条目全集一致（OOM 失败隔离）");
     assert_eq!(stats.entries, expect.len() as u64);
 }
 
