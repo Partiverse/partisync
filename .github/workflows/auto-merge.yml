@@ -1,0 +1,136 @@
+# 自动合并工作流（M6-D68-T01）
+#
+# 决策： 用户拍板 CI 全绿即合并； 本工作流实现 opt-in 标签 + R2 豁免 +
+# CI 7 jobs 全绿门禁。 保留铁律 6（双通道审查） / 铁律 7（地基人工）的
+# 边界 —— R2 钉子清单 PR 永不自动合并， 必须人工终审。
+#
+# 启用方式（PR 作者）： 在 PR 上加 `auto-merge` 标签 → CI 7 jobs
+#（fmt / clippy / test ubuntu / test macos / deny / interop / task-ids）
+# 全 SUCCESS 后 60s 内触发 squash merge 并删远端分支。
+#
+# 退出 / 跳过条件：
+# - PR 无 `auto-merge` 标签 → 跳过（默认行为， 保护人工终审）
+# - PR 含 `r2` / `no-auto-merge` / `rfc` / `wip` 标签 → 跳过
+# - PR 为 draft → 跳过
+# - PR base ref 非 main → 跳过（为 release branch 留口）
+# - 任一 CI job 未绿 → 跳过（check_run 完成后再次评估）
+#
+# 设计原则：
+# - 与现有 PR 历史一致： squash merge + delete branch（PR #3 #4 #5 #6）
+# - 与现有 CI 7 jobs 一致： fmt / clippy / test ubuntu / test macos / deny
+#   / interop / task-ids（取自 ci.yml job names）
+# - 复用 GitHub Actions 自带 GITHUB_TOKEN（无需 PAT）
+# - 触发事件覆盖 labeled / check_run， 保证 CI 完成后 60s 内合并
+
+name: auto-merge
+
+on:
+  pull_request:
+    types:
+      - labeled
+      - unlabeled
+      - synchronize
+      - reopened
+      - opened
+      - ready_for_review
+  check_run:
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+# 避免两个 PR 互相 label 触发循环： 仅在 PR 真实变化时跑（labeled /
+# unlabeled 改 labels， synchronize 改 commits， check_run 改 CI 状态）。
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number || github.event.check_run.pull_requests[0].number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR + gate logic
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 1. 解析 PR
+            let pr;
+            if (context.payload.pull_request) {
+              pr = context.payload.pull_request;
+            } else if (context.payload.check_run) {
+              const { data: prs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+              });
+              pr = prs.find(p => p.head.sha === context.payload.check_run.head_sha);
+            }
+            if (!pr) {
+              core.info('无关联 PR， 跳过');
+              return;
+            }
+            core.info(`评估 PR #${pr.number} (${pr.head.ref} → ${pr.base.ref})`);
+
+            // 2. 标签门禁
+            const labels = pr.labels.map(l => l.name);
+            const skipLabels = ['r2', 'no-auto-merge', 'rfc', 'wip'];
+            const hasSkip = skipLabels.some(s => labels.includes(s));
+            if (!labels.includes('auto-merge')) {
+              core.info(`无 auto-merge 标签， 跳过`);
+              return;
+            }
+            if (hasSkip) {
+              const hit = skipLabels.find(s => labels.includes(s));
+              core.info(`含跳过标签 ${hit}， 拒绝合并`);
+              return;
+            }
+
+            // 3. draft + base ref 门禁
+            if (pr.draft) {
+              core.info('PR 为 draft， 跳过');
+              return;
+            }
+            if (pr.base.ref !== 'main') {
+              core.info(`base ref 为 ${pr.base.ref}， 非 main， 跳过`);
+              return;
+            }
+
+            // 4. CI 门禁： 取 PR head SHA 的所有 check runs
+            const { data: checks } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: pr.head.sha,
+              per_page: 100,
+            });
+            const requiredJobs = ['fmt', 'clippy', 'test', 'deny', 'interop', 'task-ids'];
+            const seen = new Set(checks.check_runs.map(c => c.name));
+            const missing = requiredJobs.filter(j => !seen.has(j));
+            if (missing.length > 0) {
+              core.info(`CI 缺失 job: ${missing.join(', ')}， 跳过`);
+              return;
+            }
+            const failed = checks.check_runs.filter(c =>
+              requiredJobs.includes(c.name) &&
+              (c.status !== 'completed' || c.conclusion !== 'success')
+            );
+            if (failed.length > 0) {
+              const detail = failed.map(f => `${f.name}=${f.status}/${f.conclusion}`).join(', ');
+              core.info(`CI 未全绿: ${detail}， 跳过`);
+              return;
+            }
+
+            // 5. 全部门禁通过， 输出 PR number
+            core.setOutput('pr_number', String(pr.number));
+            core.info(`✅ 全部门禁通过， PR #${pr.number} 准备自动合并`);
+
+      - name: Auto-merge squash + delete branch
+        if: steps.gate.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.gate.outputs.pr_number }}
+        run: |
+          echo "::notice::Auto-merging PR #${PR_NUMBER} (squash + delete branch)"
+          gh pr merge "${PR_NUMBER}" --squash --delete-branch --yes
