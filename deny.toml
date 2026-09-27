@@ -7,6 +7,7 @@ all-features = true
 [licenses]
 allow = [
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception", # ADR-0024 amend（Tauri 传递链 target-lexicon → cfg-expr → system-deps； GTK 链纯 Rust 间接依赖）
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
@@ -45,12 +46,19 @@ yanked = "deny"
 # ADR-0020（2026-09-22）：RUSTSEC-2023-0071 rsa Marvin Attack（PKCS#1 v1.5 解密
 # 时序侧信道，私钥运算）——本仓库经 c2pa 仅做签名**验证**（公钥运算），不可达；
 # 上游 RustCrypto #626 立场：无修复版本。撤销条件 = rsa 发布修复版或 c2pa 弃用 rsa。
+# ADR-0024 amend（2026-09-27）：RUSTSEC-2026-0253 lru `LruCache::pop()` UAF——
+# 两条传递链（lru 0.7.8 → reed-solomon-erasure 6.0.0 → partisync-cas； lru 0.16.4 →
+# tantivy 0.26.2 → partisync-index）。可达性论证：触发需复合失败（pop 期间 panic
+# + 引用生命周期重叠），本仓库 cas 修复路径走 error 返回非 panic， tantivy 只读
+# 查询路径不暴露 panic 输入面。撤销条件 = tantivy ≥ 0.27 或 reed-solomon-erasure
+# ≥ v7（携带 lru 0.18.2+）任一发布。
 ignore = [
     "RUSTSEC-2024-0384", # ADR-0014
     "RUSTSEC-2023-0089", # ADR-0016
     "RUSTSEC-2024-0436", # ADR-0016
     "RUSTSEC-2024-0370", # ADR-0016
     "RUSTSEC-2023-0071", # ADR-0020
+    "RUSTSEC-2026-0253", # ADR-0024 amend（lru pop() UAF； 复合失败路径， tantivy/reed-solomon-erasure 跟进后撤销）
     "RUSTSEC-2026-0258", # ADR-0021（h2 0.3 双栈，见上注）
     "RUSTSEC-2026-0098", # ADR-0021（webpki 0.101 双栈）
     "RUSTSEC-2026-0099", # ADR-0021（webpki 0.101 双栈）

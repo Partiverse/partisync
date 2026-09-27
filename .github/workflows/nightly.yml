@@ -22,6 +22,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # 全量常规套件（与 ci 同口径，双重确认）
+      - name: install Tauri 2 Linux system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
       - name: cargo test --workspace
         run: cargo test --workspace 2>&1 | tee nightly_test.log
 

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PartiSync Desktop",
+  "version": "0.1.0",
+  "identifier": "dev.partisync.desktop",
+  "build": {
+    "frontendDist": "./ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "PartiSync · 资产图谱",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "PartiSync desktop shell (M6-WP03 T01 scaffold)",
+    "longDescription": "Tauri 2 桌面壳骨架：SPEC M6-WP03 / ADR-0024。M6-WP03-T01 仅交付最小 buildable scaffold，IPC 与 MCP 侧车后续任务。"
+  }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "partisync-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PartiSync 桌面壳（Tauri 2， SPEC M6-WP03 / ADR-0024）"
+publish = false
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+tauri = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+# 默认仅启用最小 webview； 后续 task 再开 protocol / devtools / updater 等
+default = ["tauri/default"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "partisd-desktop"
+path = "src/main.rs"

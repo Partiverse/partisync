@@ -29,6 +29,22 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Tauri 2 Linux 系统库（ADR-0024 amend， 修订 3）：
+      # ubuntu-latest runner 不默认带 webkit2gtk-4.1（2026-Q3 起 GitHub Actions
+      # runner image 已剥离系统级 webview 依赖）， glib-sys / gtk-rs build script
+      # 会因 pkg-config 找不到 glib-2.0 失败。装上 Tauri 官方推荐全套后，
+      # desktop crate 编译通过； macOS runner 不需要（自带 WKWebView）。
+      - name: install Tauri 2 Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -41,6 +57,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
+      # 同 clippy job， ubuntu runner 上 desktop crate 编译需 Tauri 2 Linux
+      # 系统库（ADR-0024 amend 修订 3）； macOS runner 自带 WKWebView 无影响。
+      - name: install Tauri 2 Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
       - run: cargo test --workspace
 
   deny:

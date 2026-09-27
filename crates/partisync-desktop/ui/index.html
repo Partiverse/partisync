@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PartiSync Desktop · M6-WP03-T01 Scaffold</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #21262d;
+    --fg: #e6edf3;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px 40px;
+    max-width: 560px;
+    text-align: center;
+  }
+  h1 { margin: 0 0 8px; font-size: 22px; color: var(--accent); }
+  p { margin: 8px 0; color: var(--dim); }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--fg); }
+  .meta { font-size: 11px; margin-top: 16px; opacity: 0.6; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h1>PartiSync Desktop</h1>
+    <p>M6-WP03 · Tauri 2 桌面壳骨架</p>
+    <p>本窗口仅证明最小 buildable scaffold（M6-WP03-T01）。</p>
+    <p>IPC commands / MCP 侧车 / 窗口状态记忆将在后续任务逐步接入。</p>
+    <p class="meta">SPEC M6-WP03 · ADR-0024 · 2026-09-27</p>
+  </div>
+</body>
+</html>
