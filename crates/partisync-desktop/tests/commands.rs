@@ -172,3 +172,36 @@ async fn mcp_call_on_stub_sidecar_returns_result() {
     assert_eq!(result["ok"], json!(true));
     assert_eq!(result["echo"], json!("stub"));
 }
+
+/// T06： 窗口状态持久化层在 mock 窗口上的冒烟（SPEC §3 T06）。
+///
+/// MockRuntime 的窗口 getter 恒返 0×0 几何、setter 是 no-op， 因此：
+/// 1. `capture` 命中「退化尺寸不保存」守卫 → `None`（真窗口的全屏/
+///    拖动行为归 macOS 手动验收）
+/// 2. `apply(Some(state))` 不报错（setter no-op）
+/// 3. 文件层 save→load 往返正确（逻辑坐标契约见 src/window_state.rs）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn window_state_capture_guard_and_apply_smoke() {
+    use partisync_desktop::window_state::{
+        self, WindowState, WindowStateStore, DEFAULT_HEIGHT, DEFAULT_WIDTH,
+    };
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let (app, tmp) = make_app().await;
+    let win = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+        .build()
+        .expect("mock window");
+    let store = WindowStateStore::new(tmp.path().join("window-state.json"));
+
+    // mock 窗口几何为 0×0 → 守卫跳过， 不产生可持久化状态。
+    assert_eq!(window_state::capture_webview(&win), None);
+    // 保存过的状态 apply 回窗口（mock setter no-op）→ Ok。
+    let state = WindowState {
+        x: 100.0,
+        y: 50.0,
+        width: DEFAULT_WIDTH,
+        height: DEFAULT_HEIGHT,
+    };
+    store.save(&state).expect("save");
+    window_state::apply(&win, store.load()).expect("apply");
+}
