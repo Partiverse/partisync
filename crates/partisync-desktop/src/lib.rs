@@ -23,6 +23,7 @@ pub mod ipc;
 pub mod state;
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::state::AppState;
 
@@ -31,6 +32,10 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
 }
 
 fn default_data_dir() -> PathBuf {
@@ -55,6 +60,12 @@ fn default_index() -> PathBuf {
 ///
 /// # Errors
 /// `AppState::open` 失败 → 返回 `crate::error::DesktopError::Internal`。
+///
+/// # Bench 模式
+/// `--bench-cold-start` 启用冷启动基准（SPEC M6-WP03 §3 T04）： `run()`
+/// 入口记 `Instant::now()`， `on_page_load` 回调里把 elapsed_ms 打
+/// stderr 一行 `__BENCH_READY__ <ms>` 后 `process::exit(0)`。 外部
+/// `cargo xtask bench desktop-cold-start` 解析该行取统计。
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let db = flag_value(&args, "--db")
@@ -66,6 +77,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let index_root = flag_value(&args, "--index")
         .map(PathBuf::from)
         .unwrap_or_else(default_index);
+    let bench_mode = has_flag(&args, "--bench-cold-start");
 
     let app_state = tauri::async_runtime::block_on(AppState::open(
         db.clone(),
@@ -73,7 +85,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         index_root.clone(),
     ))?;
 
-    tauri::Builder::default()
+    let t0 = Instant::now();
+    let mut builder = tauri::Builder::default()
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             ipc::get_stats,
@@ -83,7 +96,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             ipc::duplicates,
             ipc::jobs,
         ])
-        .setup(|_app| Ok(()))
-        .run(tauri::generate_context!())?;
+        .setup(|_app| Ok(()));
+    if bench_mode {
+        // bench 模式: on_page_load 触发后打 ready 时间戳 + 自动退出,
+        // 让 xtask bench desktop-cold-start 能 parse stderr 取冷启动耗时。
+        builder = builder.on_page_load(move |_window, _payload| {
+            eprintln!("__BENCH_READY__ {}", t0.elapsed().as_millis());
+            std::process::exit(0);
+        });
+    }
+    builder.run(tauri::generate_context!())?;
     Ok(())
 }

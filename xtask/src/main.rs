@@ -1,10 +1,14 @@
-//! xtask — 开发自动化：追溯、里程碑报告、夹具生成（SPEC M-1-WP05 / M0-WP02）。
+//! xtask — 开发自动化：追溯、里程碑报告、夹具生成、桌面壳基准（SPEC M-1-WP05 / M0-WP02 / M6-WP03 §3 T04）。
 //!
 //! 用法：
 //!   cargo xtask trace <TASK-ID>                  打印挂接该任务的全部提交
 //!   cargo xtask report <MILESTONE>               里程碑报告骨架 + 自动统计
 //!   cargo xtask gen-fixture --root <dir> --files N [--dup-rate 0.3]
 //!                                                合成测试树（含可控重复内容）
+//!   cargo xtask bench desktop-cold-start [--runs N]
+//!                                                桌面壳冷启动基准（SPEC M6-WP03 T04）
+
+mod bench;
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -30,8 +34,18 @@ fn main() {
         rest if rest.first() == Some(&"gen-fixture".to_string()) => {
             exit_with(gen_fixture(&rest[1..]))
         }
+        rest if rest.first() == Some(&"bench".to_string()) => {
+            // `cargo xtask bench <name> [--flag ...]`： name 后所有 arg 透传。
+            if rest.len() < 2 {
+                eprintln!("usage: cargo xtask bench <name> [--flag ...]");
+                std::process::exit(2);
+            }
+            exit_with(bench::dispatch(&rest[1], &rest[2..]))
+        }
         _ => {
-            eprintln!("usage: cargo xtask <trace <TASK-ID> | report <M> | gen-fixture --root <dir> --files N>");
+            eprintln!(
+                "usage: cargo xtask <trace <TASK-ID> | report <M> | gen-fixture --root <dir> --files N | bench <name>>"
+            );
             std::process::exit(2);
         }
     }
