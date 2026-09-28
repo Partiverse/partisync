@@ -20,6 +20,7 @@
 
 pub mod error;
 pub mod ipc;
+pub mod mcp_sidecar;
 pub mod state;
 
 use std::path::PathBuf;
@@ -95,6 +96,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             ipc::cas_stats,
             ipc::duplicates,
             ipc::jobs,
+            ipc::mcp_call,
         ])
         .setup(|_app| Ok(()));
     if bench_mode {

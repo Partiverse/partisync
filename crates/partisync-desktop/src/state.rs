@@ -16,8 +16,9 @@ use partisync_graph::store::Store;
 use partisync_index::{IndexEngine, IndexEngineConfig};
 
 use crate::error::DesktopError;
+use crate::mcp_sidecar::McpSidecar;
 
-/// 应用状态： 仓储句柄 + 块库 + 索引（懒加载）。
+/// 应用状态： 仓储句柄 + 块库 + 索引（懒加载）+ MCP 侧车。
 #[derive(Clone)]
 pub struct AppState {
     /// PartiGraph 仓储（持久化的资产图谱 + 作业列表）。
@@ -26,12 +27,14 @@ pub struct AppState {
     pub cas: Arc<ChunkStore>,
     /// 索引根目录（`IndexEngine` 懒加载的输入）。
     pub index_root: PathBuf,
+    /// MCP 侧车（懒 spawn `partisync-mcp` stdio JSON-RPC 子进程）。
+    pub mcp_sidecar: Arc<McpSidecar>,
     /// 索引引擎（仅在首次 `search` IPC 时 `get_or_try_init`）。
     index: tokio::sync::OnceCell<Arc<IndexEngine>>,
 }
 
 impl AppState {
-    /// 打开仓储 + 块库； 索引留空， 首次 search IPC 时再懒加载。
+    /// 打开仓储 + 块库 + MCP 侧车； 索引留空， 首次 search IPC 时再懒加载。
     ///
     /// # Errors
     /// `Store::open` 或 `ChunkStore::open` 失败 → 返回 `DesktopError::Internal`。
@@ -42,10 +45,19 @@ impl AppState {
     ) -> Result<Self, DesktopError> {
         let store = Store::open(&db_path).await?;
         let cas = ChunkStore::open(&cas_dir).await?;
+        let mcp_sidecar = Arc::new(
+            McpSidecar::for_app_state(db_path.clone(), index_root.clone()).map_err(
+                |e| match e {
+                    DesktopError::Sidecar(msg) => DesktopError::Sidecar(msg),
+                    other => other,
+                },
+            )?,
+        );
         Ok(Self {
             store: Arc::new(store),
             cas: Arc::new(cas),
             index_root,
+            mcp_sidecar,
             index: tokio::sync::OnceCell::new(),
         })
     }
@@ -77,6 +89,7 @@ impl std::fmt::Debug for AppState {
             .field("store", &"<Store>")
             .field("cas", &"<ChunkStore>")
             .field("index_root", &self.index_root)
+            .field("mcp_sidecar", &"<McpSidecar>")
             .field("index_loaded", &self.index.initialized())
             .finish()
     }

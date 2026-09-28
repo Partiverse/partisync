@@ -23,6 +23,10 @@ partisync-core = { path = "../partisync-core", version = "0.1.0" }
 partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
 partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
 partisync-index = { path = "../partisync-index", version = "0.1.0" }
+# M6-WP03-T05（mcp_call 侧车连通）： path-only deps， 仅触发 cargo 构建
+# `partisync-mcp` bin target + 拿 `env!("CARGO_BIN_EXE-partisync-mcp")` 绝对路径。
+# 不链接 gateway lib。 ADR-0024 修订 5 登记。
+partisync-gateway = { path = "../partisync-gateway", version = "0.1.0" }
 
 [features]
 # 默认仅启用最小 webview； 后续 task 再开 protocol / devtools / updater 等
