@@ -1,0 +1,37 @@
+# WASM 扩展选型 spike（SPEC M6-WP04 T02）。
+# 独立 workspace：不列于根 members、不进产品依赖图（SPEC §3 T02 / §4 非目标）。
+# 依赖（wasmtime 等）只存在于本 crate 的独立 Cargo.lock 中；deny/audit 在本目录单独试算。
+[package]
+name = "partisync-wasm-spike"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+serde_json = "1"
+# wasmtime 47.0.4：47.x 线 MSRV=1.94.0 与 rust-toolchain pin 匹配（SPEC §2.3「MSRV 兼容」实测项）；
+# 49.x 需 rustc 1.96、48.x 需 1.95，均不满足 pin——版本矩阵登记进 ADR-0025 重新评估条件。
+# 47.0.0-47.0.3 有 RUSTSEC-2026-0269（deny 拒绝），故下限 47.0.4。
+# 精确线位防 caret 漂移到不兼容 minor；升级须重测六项基准。
+wasmtime = { version = ">=47.0.4, <48", default-features = false, features = [
+    "cranelift",
+    "component-model",
+    "runtime",
+    "wat",
+    "demangle",
+    "cache", # 编译产物磁盘缓存：同 component 重复加载跳过 Cranelift（报告矩阵含开/关对比）
+] }
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "cold_start"
+harness = false
+
+[[bench]]
+name = "call_rtt"
+harness = false

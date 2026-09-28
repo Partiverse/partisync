@@ -17,6 +17,7 @@
 | P10 | 路径映射 | Unicode/非法字符在每 provider 编码方案下 round-trip 无损 | 表驱动 + 随机 Unicode | M1-WP01 |
 | P11 | 冲突策略 | 同名双改 → 两者皆可寻址，血缘可查 | 模型测试 | M2-WP02 |
 | P12 | 传输完整性 | 任意丢块/乱序/重传 → 重组后 BLAKE3 必验；验败必拒 | 注入测试 | M1-WP03 / M2-WP05 |
+| P13 | 扩展沙箱 | 未授予能力（capability）的 wasm component 调用 FS/网络/时钟 API 必须失败（默认拒权），且失败信息不泄露宿主路径/环境变量 | spike 探针：缺权 component 实例化/调用必败 + 错误文本对宿主路径与 env 的否定断言（SPEC M6-WP04 §2.4） | M6-WP04（spike 探针）→ M7+（实施全量：per-call 拒绝 + 注权白名单） |
 
 ## 本地类型级不变量（不属于 P 序列，随 crate 登记）
 
