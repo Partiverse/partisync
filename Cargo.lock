@@ -7265,6 +7265,7 @@ dependencies = [
  "dirs 5.0.1",
  "partisync-cas",
  "partisync-core",
+ "partisync-gateway",
  "partisync-graph",
  "partisync-index",
  "serde",

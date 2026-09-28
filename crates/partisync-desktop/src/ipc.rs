@@ -1,4 +1,4 @@
-//! IPC commands（T03 期 6 个， T05 期扩 `mcp_call`）。
+//! IPC commands（T03 期 6 个 + T05 期 1 个 `mcp_call`）。
 //!
 //! 由前端 `window.__TAURI__.invoke(cmd, args)` 调用； 所有命令接收
 //! `tauri::State<AppState>` 句柄， 返回 [`crate::error::DesktopResult`]。
@@ -10,11 +10,13 @@
 //! - `cas_stats` → [`CasStats`] 块库统计
 //! - `duplicates` → `Vec<DupGroup>` 内容级去重组
 //! - `jobs` → `Vec<JobRow>` 作业列表
+//! - `mcp_call` (T05) → `serde_json::Value` 转发到 `partisync-mcp` 侧车
 //!
 //! [`Stats`]: partisync_graph::store::Stats
 //! [`CasStats`]: partisync_cas::CasStats
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::State;
 
 use partisync_cas::CasStats;
@@ -48,6 +50,14 @@ pub struct SearchArgs {
 #[derive(Debug, Deserialize)]
 pub struct DuplicatesArgs {
     pub top: u32,
+}
+
+/// `mcp_call` IPC 入参（SPEC §2.3 第 7 命令）。 `tool` 为 MCP 工具名
+/// （如 `asset_search`）， `args` 为工具参数 JSON 对象。
+#[derive(Debug, Deserialize)]
+pub struct McpCallArgs {
+    pub tool: String,
+    pub args: Value,
 }
 
 /// 全局统计（图谱 / 去重节省 / 重复组数）。
@@ -108,4 +118,19 @@ pub async fn duplicates(
 #[tauri::command]
 pub async fn jobs(state: State<'_, AppState>) -> DesktopResult<Vec<JobRow>> {
     Ok(jobs::list(&state.store).await?)
+}
+
+/// 转发到 `partisync-mcp` 侧车进程（SPEC §2.3 第 7 命令）。
+///
+/// 懒 spawn 机制在 [`crate::mcp_sidecar::McpSidecar::call`] 内：
+/// 首次调用时拉起 `partisync-mcp --db <db> --index-root <index>` 子进程，
+/// stdio JSON-RPC 2.0 传输， 后续调用复用同进程。 子进程崩溃由 reader
+/// task EOF 检测 → 下次 call 自动重启（`child.is_none()` 重 spawn）。
+///
+/// # Errors
+/// 侧车 spawn / stdin 写 / JSON-RPC `error` 字段 / reader 异常退出 →
+/// `DesktopError::Sidecar`（对应 SPEC §2.6 `SidecarSpawnFailed`）。
+#[tauri::command]
+pub async fn mcp_call(state: State<'_, AppState>, args: McpCallArgs) -> DesktopResult<Value> {
+    state.mcp_sidecar.call(&args.tool, args.args).await
 }
