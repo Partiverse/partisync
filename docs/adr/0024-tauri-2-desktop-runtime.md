@@ -249,8 +249,9 @@ Tauri 尚未纳入 workspace.dependencies， 无法跑 `cargo deny check`
 
 **修订登记**（同决策空间， 不另开 ADR）：
 
-| 修订号 | 日期 | 触发 | 落点 | 现状 |
-|--------|------|------|------|------|
-| 修订 1 | 2026-09-27 | T01 `cargo deny check licenses` 实测命中 `target-lexicon v0.12.16` Apache-2.0 WITH LLVM-exception | deny.toml `[licenses].allow` 增 `Apache-2.0 WITH LLVM-exception` | 合入 main（PR #3 squash `f0fe865`） |
-| 修订 2 | 2026-09-27 | T01 `cargo audit` 实测命中 `RUSTSEC-2026-0253 lru pop() UAF`（tantivy/reed-solomon-erasure 传递链） | deny.toml `[advisories].ignore` 增 `RUSTSEC-2026-0253`， 可达性论证 + 撤销条件 = tantivy ≥ 0.27 或 reed-solomon-erasure ≥ v7 任一发布 | 合入 main（PR #3 squash `f0fe865`） |
-| **修订 3** | 2026-09-27 | T01 实施期 PR #3 CI run `36302844159` 实证： ubuntu-latest runner 不默认带 webkit2gtk-4.1（起草期 CI 假设错误）， glib-sys build script 找不到 glib-2.0 | `ci.yml` clippy + test (ubuntu-latest) job 与 `nightly.yml` chaos job 各加 `install Tauri 2 Linux system deps` step， 装 Tauri 官方推荐 6 包； 本 ADR §后果节两段同步修订； SPEC M6-WP03 §6 R2 同步（从「接受」升级为「已落地 + 监控」） | **合入 main（commit `c04e5b0`， PR #3 squash `f0fe865`）**； 本次 T02 仅补 ADR/SPEC 文本， 无代码改动 |
+| 修订 | 触发任务 | 修订内容 | 关联 commit / SPEC 章节 |
+|------|---------|---------|------------------------|
+| 修订 1 | M6-WP03-T01 | deny.toml license 白名单新增 `Apache-2.0 WITH LLVM-exception`（target-lexicon 传递链） | commit `f0fe865` / SPEC §2 |
+| 修订 2 | M6-WP03-T01 | deny.toml advisories ignore 新增 `RUSTSEC-2026-0253`（lru pop() UAF， 复合失败路径可达性论证） | commit `f0fe865` / SPEC §2 |
+| 修订 3 | M6-WP03-T02 | ci.yml clippy + test + nightly.yml chaos 三处装 Tauri 2 Linux 6 系统包（ubuntu-latest runner 不默认带 webkit2gtk-4.1） | commit `c04e5b0` / SPEC §6 R2 |
+| 修订 4 | M6-WP03-T03 | `crates/partisync-desktop/Cargo.toml` 新增 3 个 path-only workspace 内部依赖（`partisync-graph` / `partisync-cas` / `partisync-index`）以承载 6 个 IPC command 处理器。 **非顶层 crates.io 新依赖** ， 仅 workspace 内部 crate 接线； T01 起草期 ADR 后果节 diff 段已预留位置， 本修订落实之 | 即将 commit / SPEC §2.3 + §5 |
