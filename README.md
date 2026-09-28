@@ -14,7 +14,7 @@
 ### 1. 一键 demo
 
 ```bash
-git clone https://github.com/<owner>/partisync
+git clone https://github.com/Partiverse/partisync
 cd partisync
 scripts/demo.sh
 ```
