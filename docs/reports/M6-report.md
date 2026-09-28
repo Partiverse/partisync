@@ -17,6 +17,19 @@
 ## 5. ADR 清单与债务登记
 <!-- -->
 
+### 5.1 安全扫描 advisory 人工终审登记
+
+- Mimosa deep 静态扫描 `scan-2026-09-28T10-20-22.082Z-055c6f969933`
+  （seal `sha256:e1ee766c12d2…`，2026-09-28，产物于
+  `~/.mimosa/security-scans/project-513f89be40964bf2db88da7e/`）：
+  唯一 HIGH advisory 指向 `xtask/src/main.rs:338` `fn git()`——
+  命令行参数流入 `Command::new("git")` 的静态污点链（启发式，
+  proof gap 自述需人工确认）。
+- **人工终审（用户签收，2026-09-28）：接受/误报**。理由：xtask 为
+  dev-only 开发工具不入产品依赖图，全部调用点参数为硬编码字面量，
+  无外部可控数据可达该 sink；不改代码。扫描 run status=inconclusive
+  （调用图部分不完整），本登记不构成里程碑放行结论。
+
 ## 6. AI 使用披露（自动统计）
 - 挂接 M6-* 任务的提交数：31
 - 任务数：14
