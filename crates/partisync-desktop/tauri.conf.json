@@ -20,7 +20,15 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "capabilities": [
+        {
+          "identifier": "default",
+          "description": "T03 默认能力集： main 窗口可调用 6 个 IPC command（get_stats / list / search / cas_stats / duplicates / jobs， src/ipc.rs）。 Tauri 2 的 process command（#[tauri::command]）注册后默认对声明 capability 的窗口可调用， 此处仅显式声明窗口范围与所需核心权限（core:default）。 mcp_call 侧车连通属 T05 范畴， 本期不暴露。",
+          "windows": ["main"],
+          "permissions": ["core:default"]
+        }
+      ]
     }
   },
   "bundle": {

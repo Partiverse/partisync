@@ -13,6 +13,16 @@ tauri-build = { workspace = true }
 tauri = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+dirs = { workspace = true }
+tokio = { workspace = true } # OnceCell 懒加载（state.rs）
+# M6-WP03-T03（IPC 命令面）：4 个 path-only workspace 内部依赖，承载 6 个
+# Tauri command 处理器（get_stats / list / search / cas_stats / duplicates /
+# jobs）+ PartisyError 类型转换（error.rs）。 ADR-0024 修订 4 登记， 非顶层
+# crates.io 新依赖。
+partisync-core = { path = "../partisync-core", version = "0.1.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
+partisync-index = { path = "../partisync-index", version = "0.1.0" }
 
 [features]
 # 默认仅启用最小 webview； 后续 task 再开 protocol / devtools / updater 等
@@ -24,3 +34,12 @@ workspace = true
 [[bin]]
 name = "partisd-desktop"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true } # #[tokio::test]
+# `tauri::test` 模块仅在测试期可用（mock_builder / mock_context /
+# noop_assets）， 生产构建不加 test feature 避免污染 release
+# 二进制。 tests/commands.rs 用其注入 AppState + 验证 6 个 IPC
+# command happy path。
+tauri = { workspace = true, features = ["test"] }
