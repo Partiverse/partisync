@@ -60,6 +60,25 @@ scripts/demo.sh
 详见 [scripts/demo-narratives.md §C](scripts/demo-narratives.md) 与
 [MCP SPEC](docs/specs/M4-WP03.md)。
 
+### 4. 桌面壳（Tauri 2，macOS + Linux）
+
+原生窗口形态的同一套检索面（SPEC [M6-WP03](docs/specs/M6-WP03.md)）：
+
+```bash
+cargo run -p partisync-desktop                    # 开发运行
+cargo install --path crates/partisync-desktop     # 安装为 partisd-desktop
+```
+
+- **macOS**： 系统自带 WKWebView， 零额外依赖
+- **Linux**： 需 `libwebkit2gtk-4.1-dev` 等 6 包（Tauri 2 官方清单，
+  见 ADR-0024 修订 3）； 缺失时启动报可读错误而非 panic
+- 窗口位置/尺寸自动记忆（`<data-dir>/window-state.json`， 关闭时写盘，
+  重启恢复； 全屏态不记忆）
+- IPC 直链底层 crate（graph/cas/index）， 无 HTTP 中转； MCP 工具经
+  `partisync-mcp` 侧车 stdio 调用（与 §3 同一二进制， 构建时自动产出）
+
+![PartiSync 桌面壳](docs/screenshots/M6-WP03-launch.png)
+
 ---
 
 ## 真实评估（M6-D67）
