@@ -22,11 +22,15 @@ pub mod error;
 pub mod ipc;
 pub mod mcp_sidecar;
 pub mod state;
+pub mod window_state;
 
 use std::path::PathBuf;
 use std::time::Instant;
 
+use tauri::{Manager, WindowEvent};
+
 use crate::state::AppState;
+use crate::window_state::WindowStateStore;
 
 /// CLI 参数解析（手写， 避免 clap 引入新顶层依赖）。
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -45,18 +49,6 @@ fn default_data_dir() -> PathBuf {
         .join("partisync-desktop")
 }
 
-fn default_db() -> PathBuf {
-    default_data_dir().join("partisync.db")
-}
-
-fn default_cas() -> PathBuf {
-    default_data_dir().join("partisync.cas")
-}
-
-fn default_index() -> PathBuf {
-    default_data_dir().join("index")
-}
-
 /// 启动 Tauri 桌面壳。
 ///
 /// # Errors
@@ -69,26 +61,35 @@ fn default_index() -> PathBuf {
 /// `cargo xtask bench desktop-cold-start` 解析该行取统计。
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // SPEC §2.1： `--data-dir` 覆盖默认数据目录； db/cas/index 未显式给参时
+    // 以 data-dir 为基（无 --data-dir 时与 T01 行为逐字节一致）。
+    let data_dir = flag_value(&args, "--data-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_data_dir);
     let db = flag_value(&args, "--db")
         .map(PathBuf::from)
-        .unwrap_or_else(default_db);
+        .unwrap_or_else(|| data_dir.join("partisync.db"));
     let cas = flag_value(&args, "--cas")
         .map(PathBuf::from)
-        .unwrap_or_else(default_cas);
+        .unwrap_or_else(|| data_dir.join("partisync.cas"));
     let index_root = flag_value(&args, "--index")
         .map(PathBuf::from)
-        .unwrap_or_else(default_index);
+        .unwrap_or_else(|| data_dir.join("index"));
     let bench_mode = has_flag(&args, "--bench-cold-start");
+    let window_state_store = WindowStateStore::new(data_dir.join("window-state.json"));
 
     let app_state = tauri::async_runtime::block_on(AppState::open(
         db.clone(),
         cas.clone(),
         index_root.clone(),
     ))?;
+    // run() 返回后的侧车兜底清理用（CloseRequested 钩子已杀则幂等 no-op）。
+    let sidecar = app_state.mcp_sidecar.clone();
 
     let t0 = Instant::now();
     let mut builder = tauri::Builder::default()
         .manage(app_state)
+        .manage(window_state_store)
         .invoke_handler(tauri::generate_handler![
             ipc::get_stats,
             ipc::list,
@@ -98,7 +99,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             ipc::jobs,
             ipc::mcp_call,
         ])
-        .setup(|_app| Ok(()));
+        .setup(|app| {
+            // T06： 启动恢复上次窗口位置/尺寸（无状态文件 → 回落
+            // tauri.conf.json 默认 1200×800 + center: true）。
+            let saved = app.state::<WindowStateStore>().load();
+            if let Some(win) = app.get_webview_window("main") {
+                window_state::apply(&win, saved)?;
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if !matches!(event, WindowEvent::CloseRequested { .. }) {
+                return;
+            }
+            // T06： 关闭时持久化位置/尺寸（全屏/退化几何由 capture 层跳过，
+            // 不落盘 —— macOS 全屏关闭后重启恢复为非全屏）。
+            if let Some(state) = window_state::capture(window) {
+                let app = window.app_handle();
+                if let Err(e) = app.state::<WindowStateStore>().save(&state) {
+                    eprintln!("warn: save window state: {e}");
+                }
+            }
+            // T05 遗留债（SPEC §3 T06 范围）： 窗口关闭时优雅终止
+            // `partisync-mcp` 侧车子进程。
+            let sidecar = window.app_handle().state::<AppState>().mcp_sidecar.clone();
+            tauri::async_runtime::spawn(async move { sidecar.shutdown().await });
+        });
     if bench_mode {
         // bench 模式: on_page_load 触发后打 ready 时间戳 + 自动退出,
         // 让 xtask bench desktop-cold-start 能 parse stderr 取冷启动耗时。
@@ -108,5 +134,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     builder.run(tauri::generate_context!())?;
+    // 兜底： Cmd+Q 等 app 级退出可能不逐窗触发 CloseRequested，
+    // run 返回后再清一次侧车（幂等）。
+    tauri::async_runtime::block_on(sidecar.shutdown());
     Ok(())
 }
