@@ -1,0 +1,30 @@
+# cargo-deny 试算配置（SPEC M6-WP04 §2.3「依赖卫生」）。
+# 从根 deny.toml 派生但独立：spike 是独立 workspace，依赖面只含 wasmtime 链。
+# 豁免策略 = 零豁免起步（advisories ignore 为空）；试算输出粘贴进 ADR-0025 后果节（T03）。
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []

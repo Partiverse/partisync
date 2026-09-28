@@ -1,0 +1,7 @@
+package partisync:demo@0.1.0;
+
+// SPEC M6-WP04 §2.1 窄核心形态：wasm component 实现既有 MCP 工具语义
+// （JSON 入参 → JSON 出参），由宿主以 Component Model 直接导出函数承载。
+world demo-tool {
+    export call: func(input: string) -> string;
+}
