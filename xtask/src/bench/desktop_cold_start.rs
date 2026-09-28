@@ -11,39 +11,41 @@
 //! stdout 末尾输出 markdown 表（min / P50 / P95 / max + 目标阈值），可直接
 //! 贴入 `docs/reports/bench/M6-WP03-cold-start.md`。
 //!
+//! ## 安全说明（Mimosa L2 hardening）
+//! - Binary 路径是字符串字面量（const BINARY_PATH）， 零用户输入流入 argv
+//! - Rust std::process::Command 走 execve syscall 不经 shell， 永远不存在
+//!   shell 元字符解释； 等价 Python `subprocess.run([...], shell=False)`
+//! - 不暴露 `--workspace` flag： xtask 始终从仓库根目录调用
+//!
 //! ## CI 集成
 //! 本期不挂 CI job（webkit2gtk 在 ubuntu-latest runner 上需要 Xvfb +
-//! headless webview profile，复杂度高，留 M7+）。Linux x86_64 数字由用户
-//! 在本地或 CI-Xvfb 环境下运行本命令后填入报告。
+//! headless webview profile，复杂度高，留 M7+）。
 
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// 启动 `partisd-desktop --bench-cold-start` N 次，parse stderr 中
 /// `__BENCH_READY__ <ms>` 行，输出 min/P50/P95/max + markdown 表。
-///
-/// 返回 true = 所有 run 都拿到 ready 时间戳；false = 至少一次失败。
 pub fn run(args: &[String]) -> bool {
-    let workspace = arg_value(args, "--workspace")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let runs: usize = arg_value(args, "--runs")
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
-    let binary = workspace.join("target/release/partisd-desktop");
-    if !binary.exists() {
-        eprintln!(
-            "[bench] binary 不存在: {}\n[bench] 提示: cargo build --release -p partisync-desktop",
-            binary.display()
-        );
-        return false;
-    }
+    // 字面量 binary 路径 + 当前工作目录限定搜索范围。 std::process::Command
+    // 走 execve 不经 shell; Rust 没有 shell 选项; 零用户输入流入 argv.
+    let binary = "target/release/partisd-desktop";
 
     let mut times_ms: Vec<u128> = Vec::with_capacity(runs);
     for i in 1..=runs {
         eprintln!("[bench] run {i}/{runs}");
-        let output = match Command::new(&binary)
+        let cwd = match std::env::current_dir() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[bench] 无法获取当前工作目录: {e}");
+                return false;
+            }
+        };
+        let output = match std::process::Command::new(binary)
+            .current_dir(&cwd)
             .arg("--bench-cold-start")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -53,6 +55,7 @@ pub fn run(args: &[String]) -> bool {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("[bench] 启动 binary 失败: {e}");
+                eprintln!("[bench] 提示: cargo build --release -p partisync-desktop");
                 return false;
             }
         };
