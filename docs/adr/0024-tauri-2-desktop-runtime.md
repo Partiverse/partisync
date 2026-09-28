@@ -254,4 +254,5 @@ Tauri 尚未纳入 workspace.dependencies， 无法跑 `cargo deny check`
 | 修订 1 | M6-WP03-T01 | deny.toml license 白名单新增 `Apache-2.0 WITH LLVM-exception`（target-lexicon 传递链） | commit `f0fe865` / SPEC §2 |
 | 修订 2 | M6-WP03-T01 | deny.toml advisories ignore 新增 `RUSTSEC-2026-0253`（lru pop() UAF， 复合失败路径可达性论证） | commit `f0fe865` / SPEC §2 |
 | 修订 3 | M6-WP03-T02 | ci.yml clippy + test + nightly.yml chaos 三处装 Tauri 2 Linux 6 系统包（ubuntu-latest runner 不默认带 webkit2gtk-4.1） | commit `c04e5b0` / SPEC §6 R2 |
-| 修订 4 | M6-WP03-T03 | `crates/partisync-desktop/Cargo.toml` 新增 3 个 path-only workspace 内部依赖（`partisync-graph` / `partisync-cas` / `partisync-index`）以承载 6 个 IPC command 处理器。 **非顶层 crates.io 新依赖** ， 仅 workspace 内部 crate 接线； T01 起草期 ADR 后果节 diff 段已预留位置， 本修订落实之 | 即将 commit / SPEC §2.3 + §5 |
+| 修订 4 | M6-WP03-T03 | `crates/partisync-desktop/Cargo.toml` 新增 3 个 path-only workspace 内部依赖（`partisync-graph` / `partisync-cas` / `partisync-index`）以承载 6 个 IPC command 处理器。 **非顶层 crates.io 新依赖** ， 仅 workspace 内部 crate 接线； T01 起草期 ADR 后果节 diff 段已预留位置， 本修订落实之 | commit `e3c062a` / SPEC §2.3 + §5 |
+| 修订 5 | M6-WP03-T05 | `crates/partisync-desktop/Cargo.toml` 新增 1 个 path-only workspace 内部依赖（`partisync-gateway`）， 仅触发 cargo 构建 `partisync-mcp` bin target + 编译期 `CARGO_BIN_EXE-partisync-mcp` env 拿绝对路径， 不链接 gateway lib | commit `fa7193c` / SPEC §2.3 + §5 |
