@@ -127,6 +127,40 @@ advisories ok, bans ok, licenses ok, sources ok
   patch 线内无修复 → 评估提前升 toolchain 或临时处置（新 ADR）
 - **范式漂移**：Spacedrive 扩展系统落地并给出可复制的生产范式
 - **指标超标回溯**：M7+ 实施期六项基准任一复测超标且 C2 可达标
+
+### 重新评估条件触发记录：RUSTSEC-2026-0315 / 0316（2026-09-29）
+
+**触发**：上列第 3 条（wasmtime 47.x 线安全公告，patch 线内无修复）。
+wasmtime 47.0.4 命中两条新公告：0315 修复版本为 `>=48.0.3, <49.0.0` 或
+`>=49.0.1`；0316 另含 `>=36.0.16, <37.0.0`。两者在 **47.x patch 线内均
+无修复**，且 48.x 需先升 rust-toolchain（`rust-toolchain.toml` 钉 1.94，
+治理表面需独立决策）。
+
+| ID | 摘要 | 本仓库可达性 |
+|----|------|-------------|
+| RUSTSEC-2026-0315 | `call_ref` 与 exception `catch` 可丢 fuel 记账，导致指数级 fuel amplification | **不可达**。①宿主 `Config::default()` + 磁盘 cache，**未启用** `consume_fuel`——fuel 是该公告危害向量的唯一载体（危害是「相对 fuel 预算的指数级放大」，本仓库无 fuel 预算则该向量不成立）；②exception handling 未启用——`WasmFeatures::EXCEPTIONS` 由 `cfg!(feature = "gc")` 决定（wasmtime `config.rs`：`features.set(WasmFeatures::EXCEPTIONS, cfg!(feature = "gc"))`），本仓库 wasmtime feature 集为 `[cranelift, component-model, runtime, wat, demangle, cache]`，**不含 `gc`**；`Config::new` 亦对「无 `gc` 却开启 EXCEPTIONS」直接 `bail!`，故 `Engine::new` 成功本身即反证其关闭。 |
+| RUSTSEC-2026-0316 | 动态 record lifting 可超出 hostcall fuel limit 分配 | **不可达**。①同样未启用 fuel（无 fuel limit 即无「超出 fuel limit 分配」的度量基准）；②已 link 的宿主 interface（`partisync:ext/clock@0.1.0` 的 `now-millis`、`partisync:ext/index@0.1.0` 的 `search`）**签名中不含任何 resource/record 类型**；未满足的 import 在实例化期即失败（[P13] 探针已覆盖），guest 无法凭空取得 record-returning hostcall。 |
+
+**处置**：`deny.toml` `[advisories] ignore` 增两条（治理表面，随本
+修订登记），取 ADR-0024 amend 判例的登记格式（可达性论证 + 撤销
+条件）。
+
+**为何不按本 ADR 第 3 条字面「新 ADR」处置**：`docs/specs/M7-WP01.md`
+§3 验收项 4 明确授权「deny.toml 若需改动，走 ADR-0025 修订登记，不开新
+ADR」——SPEC（后于 ADR 定稿，2026-09-29 批准）对同一触发条件给出了
+更具体的处置路径，本修订登记即按该授权执行。决策节线位**不变**（升
+48.x 须先升 rust-toolchain，属独立治理决策，不在本次范围）。
+
+**撤销条件**（任一即撤销豁免并重开处置）：
+1. `rust-toolchain.toml` 升 1.95+ → wasmtime 切 `>=48.0.3` 线位
+2. **根 `[workspace.dependencies] wasmtime.features` 增开 `gc`** ——
+   `EXCEPTIONS` 随之自动开启，0315 前提②失效
+3. 宿主 `Config` 启用 `consume_fuel`（或任何 fuel 计量）——两条公告的
+   共同前提失效
+4. 宿主 `Config` 启用 async / `component-model-async` feature
+5. 宿主 WIT 面引入 resource / record 类型，或 link 新的宿主 interface
+   含 record 签名
+6. wasmtime 47.x 线发布含修复的 patch 版本
   → 重开本 ADR
 
 ## 签字登记（铁律 7：新增顶层依赖属地基级决策，架构双签）
@@ -146,3 +180,4 @@ advisories ok, bans ok, licenses ok, sources ok
 | 初稿 0.1 | M6-WP04-T01 | 选型框架 + 候选否决理由模板 + 决策规则预注册 | commit `4260208` / PR #20 |
 | 定稿 1.0 | M6-WP04-T03 | 状态草稿→已接受；决策节 C1 落定 + 版本线位；后果节填实测数字 + deny/audit 复跑输出；签字登记 + 修订登记表建立 | commit `8196fb0` / PR #22 |
 | 签收回填 | M6-WP04-T03 | 签字表两待签位签收（用户拍板 2026-09-29）；状态行同步；内容零变更 | 本 commit |
+| 修订 6 | M7-WP01-T04 | **触发「重新评估条件」第 3 条**（wasmtime 47.x 线安全公告，patch 线内无修复）：RUSTSEC-2026-0315 / 0316 两条新公告的可达性论证（宿主未启用 fuel / exception handling，WIT 面无 resource）+ `deny.toml` 豁免 + 六条撤销条件。决策节线位**不变**（仍 `>=47.0.4, <48`）——升 48.x 须先升 rust-toolchain，属独立治理决策。处置路径按 SPEC M7-WP01 §3 验收项 4 授权（不开新 ADR） | 本 commit / PR #32（hash 随 amend 变动，以 PR 号为稳定锚点） |

@@ -63,4 +63,14 @@ ignore = [
     "RUSTSEC-2026-0098", # ADR-0021（webpki 0.101 双栈）
     "RUSTSEC-2026-0099", # ADR-0021（webpki 0.101 双栈）
     "RUSTSEC-2026-0104", # ADR-0021（webpki 0.101 双栈）
+    # ADR-0025 修订 6（2026-09-29，wasmtime 47.0.4 两条新公告，patch 线内
+    # 无修复——修复版需 ≥48.0.3，而 48.x 须先升 rust-toolchain，属独立治理
+    # 决策）。两条均以 fuel 为前提，本仓库宿主 Config::default() + 磁盘
+    # cache，**未启用** consume_fuel / exception handling / async：
+    # 0315（call_ref + catch 丢 fuel 记账 → 指数级 fuel amplification）与
+    # 0316（dynamic record lifting 超 fuel limit 分配）皆不可达；宿主 WIT
+    # 面（partisync:ext/clock、partisync:ext/index）不含 resource/record
+    # 声明。撤销条件见 ADR-0025「重新评估条件触发记录」四条。
+    "RUSTSEC-2026-0315", # ADR-0025 修订 6（wasmtime 47.0.4；fuel 未启用）
+    "RUSTSEC-2026-0316", # ADR-0025 修订 6（wasmtime 47.0.4；无 resource/record）
 ]
