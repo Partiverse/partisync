@@ -19,7 +19,9 @@ use std::process::{Command, Output};
 struct CommitRecord {
     hash: String,
     subject: String,
-    task_id: Option<String>,
+    /// 挂接的全部任务：squash merge 会在 body 保留多个原始 commit 的
+    /// Task-ID trailer（M6-report §5.3-2），单值提取会让非末位任务失明。
+    task_ids: Vec<String>,
     spec: Option<String>,
     ai_assist: Option<String>,
     ai_review: Option<String>,
@@ -213,7 +215,7 @@ fn trace(task_id: &str) -> bool {
     };
     let hits: Vec<&CommitRecord> = records
         .iter()
-        .filter(|r| r.task_id.as_deref() == Some(task_id))
+        .filter(|r| r.task_ids.iter().any(|t| t == task_id))
         .collect();
     if hits.is_empty() {
         eprintln!("no commits traced to {task_id}");
@@ -251,10 +253,13 @@ fn report(milestone: &str) -> bool {
     let prefix = format!("{milestone}-");
     let scope: Vec<&CommitRecord> = records
         .iter()
-        .filter(|r| r.task_id.as_deref().is_some_and(|t| t.starts_with(&prefix)))
+        .filter(|r| r.task_ids.iter().any(|t| t.starts_with(&prefix)))
         .collect();
     let total = scope.len();
-    let mut tasks: Vec<&str> = scope.iter().filter_map(|r| r.task_id.as_deref()).collect();
+    let mut tasks: Vec<&str> = scope
+        .iter()
+        .flat_map(|r| r.task_ids.iter().map(String::as_str))
+        .collect();
     tasks.sort_unstable();
     tasks.dedup();
     let mut wps: Vec<String> = tasks
@@ -275,7 +280,7 @@ fn report(milestone: &str) -> bool {
     for t in &tasks {
         let n = scope
             .iter()
-            .filter(|r| r.task_id.as_deref() == Some(t))
+            .filter(|r| r.task_ids.iter().any(|tid| tid == t))
             .count();
         let _ = writeln!(stats, "  - {t}: {n} commit(s)");
     }
@@ -371,8 +376,8 @@ fn parse_commits(raw: &str) -> Vec<CommitRecord> {
             let body = fields.next().unwrap_or_default().to_string();
             CommitRecord {
                 hash,
+                task_ids: task_ids_of(&subject, &body),
                 subject,
-                task_id: trailer(&body, "Task-ID"),
                 spec: trailer(&body, "Spec"),
                 ai_assist: trailer(&body, "AI-Assist"),
                 ai_review: trailer(&body, "AI-Review"),
@@ -380,6 +385,30 @@ fn parse_commits(raw: &str) -> Vec<CommitRecord> {
             }
         })
         .collect()
+}
+
+/// 全量提取挂接任务：body 的每行 `Task-ID:` trailer（squash merge 逐条
+/// 保留，可能缩进），body 无 trailer 时回退 subject 的 `[M…-…-T…]`
+/// 括号（早期提交形态）。去重保序。
+fn task_ids_of(subject: &str, body: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for l in body.lines() {
+        if let Some(v) = l.trim().strip_prefix("Task-ID:") {
+            let v = v.trim();
+            if !v.is_empty() && !ids.iter().any(|id| id == v) {
+                ids.push(v.to_string());
+            }
+        }
+    }
+    if ids.is_empty() {
+        for seg in subject.split(['[', ']']).skip(1).step_by(2) {
+            let seg = seg.trim();
+            if seg.starts_with('M') && seg.contains("-T") && !ids.iter().any(|id| id == seg) {
+                ids.push(seg.to_string());
+            }
+        }
+    }
+    ids
 }
 
 fn trailer(body: &str, key: &str) -> Option<String> {
@@ -405,11 +434,36 @@ mod tests {
         assert_eq!(rs.len(), 2);
         assert_eq!(rs[0].hash, "abc123");
         assert_eq!(rs[0].subject, "chore(repo): bootstrap [M-1-WP01-T01]");
-        assert_eq!(rs[0].task_id.as_deref(), Some("M-1-WP01-T01"));
+        assert_eq!(rs[0].task_ids, ["M-1-WP01-T01"]);
         assert_eq!(rs[0].spec.as_deref(), Some("docs/specs/M-1-WP01.md"));
         assert_eq!(rs[0].ai_assist.as_deref(), Some("zcode/GLM-5.3 (scaffold)"));
-        assert_eq!(rs[1].task_id.as_deref(), Some("M-1-WP07-T01"));
+        assert_eq!(rs[1].task_ids, ["M-1-WP07-T01"]);
         assert_eq!(rs[1].spec, None);
+    }
+
+    #[test]
+    fn squash_body_multi_trailer() {
+        // M6-report §5.3-2：GitHub squash merge 在 body 逐条保留原始
+        // commit 的 trailer；修复前 find_map 只取最后一个，非末位任务失明
+        let raw = "squash01\x1fM6-WP04 T03/T04：定稿 + 骨架 (#22)\x1f\n\n* docs(adr): ADR-0025 定稿 [M6-WP04-T03]\n\nTask-ID: M6-WP04-T03\nSpec: docs/specs/M6-WP04.md\n\n* docs(specs): 骨架草案 [M6-WP04-T04]\n\nTask-ID: M6-WP04-T04\nSpec: docs/specs/M6-WP04.md\n\x1e";
+        let rs = parse_commits(raw);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].task_ids, ["M6-WP04-T03", "M6-WP04-T04"]);
+        let trace_hit = |id: &str| rs[0].task_ids.iter().any(|t| t == id);
+        assert!(trace_hit("M6-WP04-T03"));
+        assert!(trace_hit("M6-WP04-T04"));
+    }
+
+    #[test]
+    fn subject_bracket_fallback_and_dedup() {
+        // body 无 trailer → subject 括号 fallback；重复 trailer 去重保序
+        let subject_only = "h1\x1ffix: edge [M2-WP03-T07]\x1fbody without trailers\n\x1e";
+        assert_eq!(parse_commits(subject_only)[0].task_ids, ["M2-WP03-T07"]);
+        let dup = "h2\x1fs: x (#3)\x1fTask-ID: M6-D67-T02\n  Task-ID: M6-D67-T02\nTask-ID: M6-WP02-T01\n\x1e";
+        assert_eq!(
+            parse_commits(dup)[0].task_ids,
+            ["M6-D67-T02", "M6-WP02-T01"]
+        );
     }
 
     #[test]
@@ -417,7 +471,7 @@ mod tests {
         let rs = parse_commits(SAMPLE);
         let n = rs
             .iter()
-            .filter(|r| r.task_id.as_deref().is_some_and(|t| t.starts_with("M-1-")))
+            .filter(|r| r.task_ids.iter().any(|t| t.starts_with("M-1-")))
             .count();
         assert_eq!(n, 2);
     }
