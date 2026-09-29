@@ -108,7 +108,7 @@ async fn mcp_stdio_full_chain() {
     let db = prepare_db().await;
     let client = spawn_server(&db).await;
 
-    // tools/list：五大工具全部注册
+    // tools/list：五大内建工具 + ext_list（M7-WP01-T04 扩展列举）
     let tools = client.peer().list_all_tools().await.expect("tools/list");
     let mut names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
@@ -119,6 +119,7 @@ async fn mcp_stdio_full_chain() {
             "asset_read",
             "asset_search",
             "dataset_export",
+            "ext_list",
             "job_status"
         ]
     );
