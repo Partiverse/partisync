@@ -17,7 +17,7 @@
 | P10 | 路径映射 | Unicode/非法字符在每 provider 编码方案下 round-trip 无损 | 表驱动 + 随机 Unicode | M1-WP01 |
 | P11 | 冲突策略 | 同名双改 → 两者皆可寻址，血缘可查 | 模型测试 | M2-WP02 |
 | P12 | 传输完整性 | 任意丢块/乱序/重传 → 重组后 BLAKE3 必验；验败必拒 | 注入测试 | M1-WP03 / M2-WP05 |
-| P13 | 扩展沙箱 | 未授予能力（capability）的 wasm component 调用 FS/网络/时钟 API 必须失败（默认拒权；M7 实施全量 = **per-call 拒绝**：未注权 component 对宿主函数的每次调用必败，非仅实例化期），且失败信息不泄露宿主路径/环境变量 | spike 探针：缺权 component 实例化/调用必败 + 错误文本对宿主路径与 env 的否定断言（SPEC M6-WP04 §2.4）；M7-WP01 实施全量探针：per-call 拒绝 ×3 类（FS/网络/时钟）+ 注权 `clock.read` 后可达（双向验证）（SPEC M7-WP01 §3） | M6-WP04（spike 探针）→ M7-WP01（实施全量） |
+| P13 | 扩展沙箱 | 未授予能力（capability）的 wasm component 调用 FS/网络/时钟 API 必须失败（默认拒权；M7 实施全量 = **per-call 拒绝**：未注权 component 对宿主函数的每次调用必败，非仅实例化期），且失败信息不泄露宿主路径/环境变量 | spike 探针：缺权 component 实例化/调用必败 + 错误文本对宿主路径与 env 的否定断言（SPEC M6-WP04 §2.4）；M7-WP01-T03 实施探针：注权时钟调用可达（反向验证）+ 未注权 interface 不可解析 + 零注权拒绝不泄露（SPEC M7-WP01 §3）。**实施面以更强形式满足**（2026-09-29 登记）：Component Model 注权是实例化期语义——import 静态解析，宿主无对应 interface 实例时 component 无法实例化、guest 代码零执行，拒绝先于任何潜在调用，严格强于 per-call | M6-WP04（spike 探针）→ M7-WP01（实施全量） |
 | P14 | 注权 manifest | capability manifest 校验失败（非法声明 / 缺失 manifest / 扩展工具与内建撞名）→ 加载即拒，拒绝先于任何宿主函数暴露；注入面 = 声明面 ∩ 宿主白名单，未声明的 capability 一律不注入 | 加载拒绝探针：manifest 篡改 / 缺失 / 撞名用例断言加载错误先于实例化（SPEC M7-WP01 §2.2 白名单冻结表） | M7-WP01 |
 
 ## 本地类型级不变量（不属于 P 序列，随 crate 登记）
