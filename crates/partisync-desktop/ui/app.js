@@ -7,7 +7,18 @@
 // 错误形状： IPC 返回 `{kind: string, msg: string}`（见 error.rs）
 // → 捕获 invoke 抛错， 按 kind 分支处理（toast / 降级 / 重试）。
 
-const { invoke } = window.__TAURI__.core;
+// Tauri 全局注入（tauri.conf.json app.withGlobalTauri = true）。
+// 显式守卫：未注入时给出可读提示而非整页 JS 静默失效（此前
+// `window.__TAURI__.core` 解构在首行抛错，表现与静态 HTML 无异）。
+const __tauriCore = window.__TAURI__?.core;
+if (!__tauriCore) {
+  document.body.innerHTML =
+    '<div style="padding:40px;font-family:system-ui;color:#f85149">' +
+    "Tauri API 未注入：桌面壳 IPC 不可用（请确认以桌面壳方式启动，" +
+    "且 tauri.conf.json 的 app.withGlobalTauri 为 true）。</div>";
+  throw new Error("Tauri IPC bridge unavailable");
+}
+const { invoke } = __tauriCore;
 
 let curPath = "/";
 const $ = (id) => document.getElementById(id);
