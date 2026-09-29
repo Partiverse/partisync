@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 pub mod host_state;
 pub mod inject;
 pub mod manifest;
-pub use host_state::{HostState, IndexRead};
+pub use host_state::{HostState, IndexError, IndexRead, MAX_QUERY_BYTES};
 pub use inject::linker_for;
 pub use manifest::{Capability, Manifest, ManifestError, ValidateError};
 

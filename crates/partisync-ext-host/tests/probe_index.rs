@@ -11,15 +11,25 @@
 
 use std::sync::Arc;
 
-use partisync_ext_host::{Capability, HostState, IndexRead, Manifest};
+use partisync_ext_host::{Capability, HostState, IndexError, IndexRead, Manifest, MAX_QUERY_BYTES};
 use wasmtime::Store;
 
 /// 测试替身：把查询原样回显，包在 JSON 里（模拟真实索引实现的形状）。
 struct EchoIndex;
 
 impl IndexRead for EchoIndex {
-    fn search(&self, query: &str) -> String {
-        format!(r#"{{"echo":{query},"backend":"echo"}}"#)
+    fn search(&self, query: &str) -> Result<String, IndexError> {
+        Ok(format!(r#"{{"echo":{query},"backend":"echo"}}"#))
+    }
+}
+
+/// 恒失败替身：模拟「索引后端不可用」——F-2 的核心场景（实现方必须
+/// 返回 `Err`，绝不 panic）。
+struct FailingIndex;
+
+impl IndexRead for FailingIndex {
+    fn search(&self, _query: &str) -> Result<String, IndexError> {
+        Err(IndexError::Backend("index engine offline".into()))
     }
 }
 
@@ -113,4 +123,147 @@ fn t04a_index_granted_but_unwired_returns_error_json() {
         out.contains(r#""error""#) && out.contains("index.read unavailable"),
         "未接线时必须返回可归因的错误 JSON，得到：{out}"
     );
+}
+
+/// **F-2 核心探针**：实现方返回 `Err` 时，扩展拿到的是**错误 JSON**，
+/// Store 未被毒化——同一实例可继续成功调用。若实现方 panic，wasmtime
+/// 会转 trap 并毒化 Store，本测试会在第二次调用时失败于
+/// `cannot access a poisoned store`。
+#[test]
+fn t04b_backend_error_returns_json_and_keeps_store_usable() {
+    let component = index_probe_component();
+    let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &index_manifest())
+        .expect("注权 index.read 的 linker 构造成功");
+    let mut store = Store::new(
+        partisync_ext_host::engine(),
+        HostState::with_index(Arc::new(FailingIndex)),
+    );
+    let instance = match linker.instantiate(&mut store, &component) {
+        Ok(i) => i,
+        Err(e) => panic!("实例化必须成功：{e}"),
+    };
+    let search = instance
+        .get_typed_func::<(String,), (String,)>(&mut store, "search")
+        .expect("index_probe 导出 search(query)");
+
+    // 第一次调用：后端失败 → 错误 JSON，不是 trap
+    let (out,) = search
+        .call(&mut store, ("q".to_owned(),))
+        .expect("后端失败必须以错误 JSON 返回，不得 trap（否则 Store 被毒化）");
+    assert!(
+        out.contains(r#""error""#) && out.contains("index engine offline"),
+        "后端错误必须可归因，得到：{out}"
+    );
+
+    // 第二次调用：Store 仍可用（未被毒化）
+    let (out2,) = search
+        .call(&mut store, ("q2".to_owned(),))
+        .expect("Store 未被毒化，第二次调用必须仍可执行");
+    assert!(
+        out2.contains("index engine offline"),
+        "第二次调用结果：{out2}"
+    );
+}
+
+/// **F-4 探针**：`preflight` 把「声明了 `index.read` 但组装期未接线」
+/// 从运行期静默降级变为**加载期拒**。
+#[test]
+fn t04b_preflight_rejects_index_read_without_wiring() {
+    let unwired = HostState::without_index();
+    let err = unwired
+        .preflight(&index_manifest())
+        .expect_err("声明 index.read 而宿主未接线必须被 preflight 拒");
+    assert_eq!(err, IndexError::NotWired);
+
+    // 对照：未声明 index.read 的 manifest 不受影响
+    let clock_only = Manifest {
+        tool_name: "clock_only".into(),
+        capabilities: vec![Capability::ClockRead],
+    };
+    assert_eq!(unwired.preflight(&clock_only), Ok(()));
+
+    // 对照：已接线则通过
+    let wired = HostState::with_index(Arc::new(EchoIndex));
+    assert_eq!(wired.preflight(&index_manifest()), Ok(()));
+}
+
+/// **F-12 探针**：超长查询串被宿主侧拦截，返回可归因错误 JSON。
+#[test]
+fn t04b_oversized_query_rejected_by_host_side_limit() {
+    let component = index_probe_component();
+    let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &index_manifest())
+        .expect("注权 index.read 的 linker 构造成功");
+    let mut store = Store::new(
+        partisync_ext_host::engine(),
+        HostState::with_index(Arc::new(EchoIndex)),
+    );
+    let instance = match linker.instantiate(&mut store, &component) {
+        Ok(i) => i,
+        Err(e) => panic!("实例化必须成功：{e}"),
+    };
+    let search = instance
+        .get_typed_func::<(String,), (String,)>(&mut store, "search")
+        .expect("index_probe 导出 search(query)");
+
+    // 上限之下：正常通过
+    let ok_query = "q".repeat(MAX_QUERY_BYTES);
+    let (out,) = search
+        .call(&mut store, (ok_query,))
+        .expect("上限内的查询必须正常执行");
+    assert!(
+        out.contains(r#""backend":"echo""#),
+        "上限内应正常返回：{out}"
+    );
+
+    // 超出上限：被拒
+    let too_long = "q".repeat(MAX_QUERY_BYTES + 1);
+    let (out2,) = search
+        .call(&mut store, (too_long,))
+        .expect("超长查询应以错误 JSON 返回，不得 trap");
+    assert!(
+        out2.contains(r#""error""#) && out2.contains("query too long"),
+        "超长查询必须被限额拦截并可归因，得到：{out2}"
+    );
+}
+
+/// JSON 错误消息的转义：后端错误含引号 / 反斜杠 / 换行时不得破坏
+/// wire 格式（`inject::json_string` 的行为面）。
+#[test]
+fn t04b_backend_error_message_is_json_escaped() {
+    let component = index_probe_component();
+    let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &index_manifest())
+        .expect("注权 index.read 的 linker 构造成功");
+    let mut store = Store::new(
+        partisync_ext_host::engine(),
+        HostState::with_index(Arc::new(QuoteIndex)),
+    );
+    let instance = match linker.instantiate(&mut store, &component) {
+        Ok(i) => i,
+        Err(e) => panic!("实例化必须成功：{e}"),
+    };
+    let search = instance
+        .get_typed_func::<(String,), (String,)>(&mut store, "search")
+        .expect("index_probe 导出 search(query)");
+    let (out,) = search
+        .call(&mut store, ("q".to_owned(),))
+        .expect("错误路径必须返回 JSON 而非 trap");
+    // out 必须是合法 JSON 且能解出 error 字段
+    let parsed: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("错误 JSON 不合法：{e}\n原文：{out}"));
+    // `IndexError::Backend` 的 Display 带 `index backend error: ` 前缀
+    let msg = parsed["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("error 字段必须是字符串：{out}"));
+    assert_eq!(msg, "index backend error: he said \"hi\" \\ then\nnewline");
+}
+
+/// 含需转义字符的后端错误消息。
+struct QuoteIndex;
+
+impl IndexRead for QuoteIndex {
+    fn search(&self, _query: &str) -> Result<String, IndexError> {
+        Err(IndexError::Backend(
+            "he said \"hi\" \\ then\nnewline".into(),
+        ))
+    }
 }
