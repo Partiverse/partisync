@@ -114,10 +114,15 @@ M6 期新接受 ADR：**0022**（Task-ID 正则扩展·D 档）· **0023**
   spike 内独立 deny 试算全绿零豁免（T03 定稿日复跑复核）
 - M7+ 实施骨架草案 `docs/specs/M7-WASM-impl-draft.md` 入仓
   （未批准，T04 交付物；Wassette 式注权 manifest 为 R6 处置方向）
-- **债务登记**：commit `42bc485`（spike crate）提交期 Mimosa 扫描器
-  scanner_enobufs 未获完整扫描结论，§5.1 扫描早于该 commit 不覆盖
-  之；M6 收官放行前须重跑完整 deep 扫描并登记新 seal（待用户点名
-  发起）。
+- **Mimosa 完整重扫登记（2026-09-29 用户点名发起，scanner_enobufs
+  债务清偿，§5.3-1）**：deep 重扫
+  `scan-2026-09-29T01-54-20.844Z-5549d3e6e852`
+  （seal `sha256:8747abf861971c78…`，1209 包，覆盖面含 spike/WASM
+  代码）：唯一 HIGH finding 与 §5.1 同源（`xtask/src/main.rs:338`
+  git() 静态污点链，2026-09-28 已人工终审判误报/接受，本登记引用
+  该签收），**零新增 advisory**；run status 仍 inconclusive（调用图
+  部分不完整——与 §5.1 扫描同一工具级覆盖缺口，非本期回归），本
+  登记不构成里程碑放行结论。
 
 ### 5.3 债务总表（按偿还窗口排序）
 
