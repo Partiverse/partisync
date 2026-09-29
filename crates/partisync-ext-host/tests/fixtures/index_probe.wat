@@ -17,6 +17,14 @@
 ;;
 ;; 语义：注权 `index.read` 后可调用宿主注入的 `IndexRead::search`
 ;; （JSON 进 JSON 出）；未注权则 import 不可解析、实例化必拒。
+;;
+;; 复现注意（对抗审查 F-5 实测）：`search(ptr,len) -> retptr` 里 query 串
+;; 的取用有两种语义等价写法——本文件用**调用方传入的 ptr**
+;; （`local.get 0`），按上文配方重新生成会得到 realloc 后的 bump 指针
+;; （`global.get 0`）。两者都产出合法 core module 且测试行为一致（retarea
+;; 固定于 16，入参串由 wasmtime 经 `cabi_realloc` bump 到其之后，不重叠），
+;; 但不能逐字节复现本文件——审查员已实测确认语义等价。
+;; 另：`realloc` 导出冗余（仅 `cabi_realloc` 即足够，审查实测），保留无害。
 (component
   (type $ty-partisync:ext/index@0.1.0 (;0;)
     (instance

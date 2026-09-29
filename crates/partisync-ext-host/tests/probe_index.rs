@@ -84,6 +84,10 @@ fn t04a_index_read_ungranted_rejects_instantiation() {
         text.contains("partisync:ext/index@0.1.0") && text.contains("not found in the linker"),
         "错误未归因到未注权 index interface：\n{text}"
     );
+    // [P13]：拒绝信息不泄露宿主路径 / 环境变量（与既有 P13 探针同构）
+    for leak in ["/Users/", "/home/", "TMPDIR", "HOME=", "PARTISYNC"] {
+        assert!(!text.contains(leak), "错误泄露宿主信息 {leak}：\n{text}");
+    }
 }
 
 /// 注权但**组装期未注入**（`HostState::index = None`）→ 注入面由
@@ -106,7 +110,7 @@ fn t04a_index_granted_but_unwired_returns_error_json() {
         .call(&mut store, ("probe".to_owned(),))
         .expect("search 必须可调用（返回错误 JSON 而非 trap）");
     assert!(
-        out.contains(r#""error""#) && out.contains("no IndexRead implementation"),
+        out.contains(r#""error""#) && out.contains("index.read unavailable"),
         "未接线时必须返回可归因的错误 JSON，得到：{out}"
     );
 }

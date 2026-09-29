@@ -86,7 +86,7 @@ fn p13_index_read_declared_but_not_wired_rejects_clock_import() {
     };
     m.validate().expect("index.read 在白名单内，manifest 合法");
     let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &m)
-        .expect("index.read 占位注入不报错（尚未接线）");
+        .expect("index.read 注权构造不报错（T04-A 已实装该 interface）");
     let mut store = Store::new(partisync_ext_host::engine(), HostState::without_index());
     let err = match linker.instantiate(&mut store, &component) {
         Ok(_) => panic!("只注权 index.read 时，clock_probe 的 clock import 必须无法解析"),

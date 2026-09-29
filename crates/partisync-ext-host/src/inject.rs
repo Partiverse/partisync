@@ -108,12 +108,14 @@ fn inject_index(linker: &mut Linker<HostState>) -> Result<()> {
         INDEX_FN_SEARCH,
         |store: StoreContextMut<'_, HostState>, (query,): (String,)| {
             let state = store.data();
-            Ok((
-                match &state.index {
-                    Some(idx) => idx.search(&query),
-                    None => r#"{"error":"index.read capability declared but host has no IndexRead implementation (assembly-time wiring missing)"}"#.to_owned(),
-                },
-            ))
+            Ok((match &state.index {
+                Some(idx) => idx.search(&query),
+                // 错误文案中性化（对抗审查 F-8）：不向不可信 guest 暴露
+                // 宿主内部接线状态的实现细节 oracle；宿主侧可观测性
+                // 随 T04-B 的 preflight 自检一并补（fail-open 登记见
+                // T04-B 任务卡）。
+                None => r#"{"error":"index.read unavailable"}"#.to_owned(),
+            },))
         },
     )
 }
@@ -173,16 +175,18 @@ mod tests {
         let _ = linker.root();
     }
 
+    /// T04-A：`index.read` 已实装（本测试从「占位不注入」改为「真实注册
+    /// interface 实例」的语义迁移）。真实可达性由
+    /// `tests/probe_index.rs` 的三个 fixture 探针覆盖——本 unit 测试
+    /// 只验构造路径不报错。
     #[test]
-    fn linker_for_index_read_stub_injects_nothing_but_succeeds() {
+    fn linker_for_index_read_registers_index_interface() {
         let engine = crate::engine();
         let m = Manifest {
-            tool_name: "future_index".into(),
+            tool_name: "index_user".into(),
             capabilities: vec![Capability::IndexRead],
         };
-        let mut linker = linker_for(engine, &m).expect("index.read 占位注入合法");
-        // 声明 index.read 但不注入 interface 实例 → 需该接口的
-        // component 必拒（真实断言见 tests/probes_p13_p14.rs）。
+        let mut linker = linker_for(engine, &m).expect("index.read 注权构造成功");
         let _ = linker.root();
     }
 }
