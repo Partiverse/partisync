@@ -12,9 +12,11 @@ use std::sync::OnceLock;
 pub mod host_state;
 pub mod inject;
 pub mod manifest;
+pub mod registry;
 pub use host_state::{HostState, IndexError, IndexRead, MAX_QUERY_BYTES};
 pub use inject::linker_for;
 pub use manifest::{Capability, Manifest, ManifestError, ValidateError};
+pub use registry::{CallError, ExtRegistry, ExtTool, LoadError};
 
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Cache, CacheConfig, Config, Engine};
