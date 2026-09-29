@@ -35,10 +35,18 @@ function timeFmt(ns) {
   return d.toLocaleString("zh-CN", { hour12: false });
 }
 
-/** 包装 invoke： 统一捕获 IPC 错误并显示在 #error-region。 */
+/** 包装 invoke： 统一捕获 IPC 错误并显示在 #error-region。
+ *
+ * Tauri 2 参数绑定：command 的 Rust 参数名 = invoke 键。本项目所有
+ * 带参 command 的参数名统一为 `args`（ListArgs/SearchArgs/DuplicatesArgs/
+ * McpCallArgs），故此处统一包一层 `{ args }`——调用方保持平铺语义
+ * （`call("list", { prefix })`）。此前平铺直传触发
+ * 「missing required key args」（UI 修复前 IPC 从未真正执行过，
+ * 该绑定错误潜伏至 withGlobalTauri 修复后才暴露）。
+ */
 async function call(cmd, args) {
   try {
-    return await invoke(cmd, args);
+    return await invoke(cmd, args === undefined ? {} : { args });
   } catch (e) {
     // IPC 错误形状： {kind, msg}（src/error.rs DesktopError Serialize）
     const kind = e?.kind ?? "Internal";
@@ -80,7 +88,7 @@ function breadcrumbFor(path) {
     acc += "/" + p;
     out.push({ name: p, path: acc });
   }
-  return out;
+  return out.slice(1); // 尾段由 browse() 加粗显示，避免「根 › 根」重复
 }
 
 async function browse(path) {
