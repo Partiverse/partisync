@@ -126,9 +126,13 @@ fn t04a_index_granted_but_unwired_returns_error_json() {
 }
 
 /// **F-2 核心探针**：实现方返回 `Err` 时，扩展拿到的是**错误 JSON**，
-/// Store 未被毒化——同一实例可继续成功调用。若实现方 panic，wasmtime
-/// 会转 trap 并毒化 Store，本测试会在第二次调用时失败于
-/// `cannot access a poisoned store`。
+/// 且同一实例可继续成功调用（验证失败路径不污染调用状态）。
+///
+/// **对照（审查实证更正）**：若实现方 panic，wasmtime 同步路径下 panic
+/// 以 Rust panic 形态**直接传播出本测试的 `search.call(...)`**（第一次
+/// 调用即失败于 panic，而非 trap 或「第二次失败于 poisoned store」——
+/// 「毒化」仅存在于 concurrent API，本 crate 未使用）。`Result` 化把
+/// 这条不可控的传播路径收敛为可归因的错误值。
 #[test]
 fn t04b_backend_error_returns_json_and_keeps_store_usable() {
     let component = index_probe_component();
@@ -149,16 +153,16 @@ fn t04b_backend_error_returns_json_and_keeps_store_usable() {
     // 第一次调用：后端失败 → 错误 JSON，不是 trap
     let (out,) = search
         .call(&mut store, ("q".to_owned(),))
-        .expect("后端失败必须以错误 JSON 返回，不得 trap（否则 Store 被毒化）");
+        .expect("后端失败必须以错误 JSON 返回，不得 panic 越界传播");
     assert!(
         out.contains(r#""error""#) && out.contains("index engine offline"),
         "后端错误必须可归因，得到：{out}"
     );
 
-    // 第二次调用：Store 仍可用（未被毒化）
+    // 第二次调用：调用状态无残留（Err 值路径不携带任何污染）
     let (out2,) = search
         .call(&mut store, ("q2".to_owned(),))
-        .expect("Store 未被毒化，第二次调用必须仍可执行");
+        .expect("错误路径后第二次调用必须仍可执行");
     assert!(
         out2.contains("index engine offline"),
         "第二次调用结果：{out2}"
@@ -185,6 +189,15 @@ fn t04b_preflight_rejects_index_read_without_wiring() {
     // 对照：已接线则通过
     let wired = HostState::with_index(Arc::new(EchoIndex));
     assert_eq!(wired.preflight(&index_manifest()), Ok(()));
+
+    // 组合态（审查 P2-6）：index.read + clock.read 并声明，已接线 → 过
+    let combo = Manifest {
+        tool_name: "combo".into(),
+        capabilities: vec![Capability::IndexRead, Capability::ClockRead],
+    };
+    assert_eq!(wired.preflight(&combo), Ok(()));
+    // 组合态未接线 → 仍拒（index.read 是唯一需接线项）
+    assert_eq!(unwired.preflight(&combo), Err(IndexError::NotWired));
 }
 
 /// **F-12 探针**：超长查询串被宿主侧拦截，返回可归因错误 JSON。

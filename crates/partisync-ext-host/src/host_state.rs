@@ -24,10 +24,14 @@ pub const MAX_QUERY_BYTES: usize = 8 * 1024;
 /// 索引查询失败（映射到 wire 层的 `{"error": "..."}` JSON）。
 ///
 /// **F-2 的存在理由**：`IndexRead` 早期签名为 `-> String`，真实实现遇
-/// 索引不可用只能 panic；而 wasmtime 会把 guest 调用中的 panic 转成
-/// trap 并**毒化 Store**——该扩展实例此后所有调用都失败于
-/// `cannot access a poisoned store`，既不是可呈现的错误也不是可用实例。
-/// `Result` 化让失败成为可归因的普通值。
+/// 索引不可用只能 panic。而 wasmtime **同步**路径下，宿主函数内的
+/// panic 不会被转成 trap——它以 **Rust panic 形态越过 wasm 边界直接
+/// 传播进 gateway 调用方线程**（wasmtime `traphandlers.rs` 对宿主
+/// panic 执行 `resume_unwind`）；`panic = "abort"` 构建下更是直接中止
+/// 整个宿主进程。两种形态都把实现方的内部失败变成了不可控的宿主侧
+/// 事故。`Result` 化让失败成为可归因的普通值，在 wasm 边界处消化。
+/// （注：真正的「Store 毒化」仅存在于 wasmtime 的 concurrent component
+/// API——本 crate 未使用；若未来迁移该 API，此处契约需重审。）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexError {
     /// 查询串超过 [`MAX_QUERY_BYTES`]。
@@ -57,7 +61,15 @@ impl std::error::Error for IndexError {}
 /// JSON 语义：入参与出参均为 JSON 字符串，与 MCP 工具面同口径
 /// （「wasm component 即 MCP tool」的核心是 JSON 进 JSON 出）。失败以
 /// [`IndexError`] 返回，宿主层映射为 `{"error": "..."}` JSON——**不得
-/// panic**：panic 会被 wasmtime 在 wasm 边界转成 trap 并毒化 Store。
+/// panic**：同步路径下宿主函数内的 panic 会以 Rust panic 形态越过
+/// wasm 边界直接传播进 gateway 调用方线程（`panic = "abort"` 构建下
+/// 直接中止宿主进程），详见 [`IndexError`] 文档。
+///
+/// # 实现方消息契约（T04-B 冻结）
+///
+/// [`IndexError::Backend`] 的消息会**原样进入 guest 可见的错误 JSON**——
+/// 不得包含内部路径 / 接线细节等不可信 guest 不应获得的实现信息
+/// （T04-A 审查 F-8 教训的延伸）；此类诊断信息应由实现方自行记日志。
 pub trait IndexRead: Send + Sync + 'static {
     /// 按查询串检索索引，返回 JSON 结果串。
     ///

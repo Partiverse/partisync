@@ -99,10 +99,10 @@ const INDEX_FN_SEARCH: &str = "search";
 /// `search: func(query: string) -> string`——转发到组装期注入的
 /// [`IndexRead`](crate::host_state::IndexRead) 实现。
 ///
-/// **失败通道**（F-2）：`IndexError` 映射为 `{"error": "..."}` JSON 而非
-/// trap——trait 契约要求实现方返回 `Err` 而非 panic，因为 panic 会被
-/// wasmtime 在 wasm 边界转成 trap 并**毒化 Store**，该扩展实例此后所有
-/// 调用都失败于 `cannot access a poisoned store`。
+/// **失败通道**（F-2）：`IndexError` 映射为 `{"error": "..."}` JSON——
+/// trait 契约要求实现方返回 `Err` 而非 panic：同步路径下 panic 会以
+/// Rust panic 形态越过 wasm 边界直接传播进 gateway 调用方线程（而非
+/// 变成 trap），`panic = "abort"` 构建下直接中止宿主进程。
 fn inject_index(linker: &mut Linker<HostState>) -> Result<()> {
     let mut index = linker.instance(INDEX_INTERFACE)?;
     index.func_wrap::<_, (String,), (String,)>(
@@ -162,6 +162,18 @@ mod tests {
         // 简单 sanity：返回的毫秒时间戳在合理范围（>2020-01-01 = 1.5e12 ms）
         let t = now_millis();
         assert!(t > 1_577_836_800_000, "now_millis 异常小: {t}");
+    }
+
+    /// `json_string` 控制字符转义（PR #34 审查 P2-5）：NUL / 0x1F /
+    /// DEL（不需转义）按 RFC 8259 §7 处理。
+    #[test]
+    fn json_string_escapes_control_chars() {
+        assert_eq!(json_string("\0"), "\"\\u0000\"");
+        assert_eq!(json_string("\u{1f}"), "\"\\u001f\"");
+        // DEL U+007F 不在 RFC 8259 强制转义集合（U+0000..U+001F），放行
+        assert_eq!(json_string("\u{7f}"), "\"\u{7f}\"");
+        // 短转义与普通字符混合
+        assert_eq!(json_string("a\tb\nc\\d\"e"), "\"a\\tb\\nc\\\\d\\\"e\"");
     }
 
     #[test]
