@@ -146,11 +146,16 @@ impl McpSidecar {
 
             // 构造 JSON-RPC 请求。 serde_json 不接受运行时注入（tool/args
             // 来自前端 IPC args， 经 SPEC §2.3 形状校验； 不是 shell 拼字符串）。
+            // _meta： 2026-07-28 draft 每请求必带（SEP-2575）。
             let req = json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "method": "tools/call",
-                "params": { "name": tool, "arguments": args },
+                "params": {
+                    "name": tool,
+                    "arguments": args,
+                    "_meta": Self::request_meta(),
+                },
             });
             let line = format!("{}\n", req);
             let stdin = g
@@ -228,7 +233,74 @@ impl McpSidecar {
         });
         g.child = Some(child);
         g.reader = Some(reader);
+
+        // MCP handshake（rmcp 3.4.0 server 契约， 2026-07-28 draft）：
+        // ① initialize（含 _meta 必填字段）→ 等响应；② notifications/initialized。
+        // 此前缺整个 handshake + 每请求 _meta——server 报
+        // 「request _meta is missing … protocolVersion / clientCapabilities」
+        // 且未初始化连接拒绝 tools/call。手写 client 落后 spec 演进
+        // （M6-WP03-T05 交付时 server 版本容忍； M7-WP01-T04 实测暴露）。
+        let init_id = 0u64; // 业务 id 从 1 起（next_id 初始 1）， 0 专用于 handshake
+        let (tx0, rx0) = tokio::sync::oneshot::channel();
+        g.pending.lock().await.insert(init_id, tx0);
+        let init_req = json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "partisync-desktop", "version": "0.1.0" },
+                "_meta": Self::request_meta(),
+            }
+        });
+        {
+            let stdin = g
+                .child
+                .as_mut()
+                .and_then(|c| c.stdin.as_mut())
+                .ok_or_else(|| DesktopError::Sidecar("child stdin unavailable".into()))?;
+            stdin
+                .write_all(format!("{init_req}\n").as_bytes())
+                .await
+                .map_err(|e| DesktopError::Sidecar(format!("handshake write: {e}")))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| DesktopError::Sidecar(format!("handshake flush: {e}")))?;
+        } // 借用释放，等响应
+          // initialize 响应超时 = 侧车起但协议不通（5s 足够本地 stdio）
+        if tokio::time::timeout(std::time::Duration::from_secs(5), rx0)
+            .await
+            .map_err(|_| DesktopError::Sidecar("handshake timed out (5s)".into()))?
+            .is_err()
+        {
+            return Err(DesktopError::Sidecar(
+                "handshake response channel dropped".into(),
+            ));
+        }
+        let initialized = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": { "_meta": Self::request_meta() },
+        });
+        let stdin = g
+            .child
+            .as_mut()
+            .and_then(|c| c.stdin.as_mut())
+            .ok_or_else(|| DesktopError::Sidecar("child stdin unavailable".into()))?;
+        let _ = stdin.write_all(format!("{initialized}\n").as_bytes()).await; // notification 无应答， 写失败留给后续 call 报
+        let _ = stdin.flush().await;
         Ok(())
+    }
+
+    /// 每个请求必带的 `_meta`（rmcp 3.4.0 / 2026-07-28 draft：SEP-2575 的
+    /// protocolVersion 与 clientCapabilities 两键必填， clientInfo 可选）。
+    fn request_meta() -> Value {
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2025-11-25",
+            "io.modelcontextprotocol/clientCapabilities": {},
+        })
     }
 
     /// 优雅关闭（窗口关闭时调）。 先 kill 子进程再等 reader。

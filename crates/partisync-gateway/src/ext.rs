@@ -98,19 +98,25 @@ pub fn default_extensions_dir() -> PathBuf {
 /// 目录不存在 → 空注册表（扩展是可选增强，不阻塞主服务）；扫描 /
 /// 装载失败 → `Err`（fail-closed，由调用方决定降级策略——`run_mcp_server`
 /// 降级为空注册表 + stderr 告警，扩展目录损坏不拖垮 MCP 主服务）。
+/// 返回 (注册表, 实际扫描目录)——目录随 `ext_list` 载荷回带（可诊断性：
+/// 桌面壳端直接核对 partisync-mcp 视角的路径，T04 端到端实测曾因
+/// data_local_dir vs home_dir 不一致装错目录）。
 pub fn load_registry(
     dir: &PathBuf,
     index: Option<Arc<IndexEngine>>,
-) -> Result<ExtRegistry, String> {
+) -> Result<(ExtRegistry, PathBuf), String> {
     if !dir.exists() {
-        return Ok(ExtRegistry::empty());
+        return Ok((ExtRegistry::empty(), dir.clone()));
     }
     let state = match index {
         Some(engine) => HostState::with_index(Arc::new(build_index_reader(engine))),
         None => HostState::without_index(),
     };
-    ExtRegistry::scan(dir, &state).map_err(|e| e.to_string())
+    ExtRegistry::scan(dir, &state)
+        .map(|r| (r, dir.clone()))
+        .map_err(|e| e.to_string())
 }
 
-/// 组装期工具：供 `McpServerState::install_ext_registry` 使用的共享形态。
-pub type SharedRegistry = Arc<RwLock<Option<Arc<ExtRegistry>>>>;
+/// 组装期工具：供 `McpServerState::install_ext_registry` 使用的共享形态
+/// （注册表 + 实际扫描目录，后者随 `ext_list` 载荷回带）。
+pub type SharedRegistry = Arc<RwLock<Option<(Arc<ExtRegistry>, PathBuf)>>>;

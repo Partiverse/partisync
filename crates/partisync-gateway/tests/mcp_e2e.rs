@@ -108,21 +108,22 @@ async fn mcp_stdio_full_chain() {
     let db = prepare_db().await;
     let client = spawn_server(&db).await;
 
-    // tools/list：五大内建工具 + ext_list（M7-WP01-T04 扩展列举）
+    // tools/list：五大内建工具 + ext_list 必在；已安装的扩展工具
+    // （如 ext_demo_echo）取决于运行环境 ~/.partisync/extensions，
+    // 不做精确清单断言（环境依赖）
     let tools = client.peer().list_all_tools().await.expect("tools/list");
     let mut names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
-    assert_eq!(
-        names,
-        vec![
-            "asset_organize",
-            "asset_read",
-            "asset_search",
-            "dataset_export",
-            "ext_list",
-            "job_status"
-        ]
-    );
+    for required in [
+        "asset_organize",
+        "asset_read",
+        "asset_search",
+        "dataset_export",
+        "ext_list",
+        "job_status",
+    ] {
+        assert!(names.contains(&required.to_string()), "missing {required}");
+    }
 
     // asset_read：协议往返 + 元数据断言
     let v = call_ok(&client, "asset_read", json!({"content_id": "c-e2e"})).await;

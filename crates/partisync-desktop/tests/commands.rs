@@ -124,11 +124,20 @@ async fn jobs_on_empty_db_returns_empty() {
 async fn mcp_call_on_stub_sidecar_returns_result() {
     let tmp = TempDir::new().expect("tempdir");
 
-    // 写 bash stub： 读一行 stdin（JSON-RPC 请求）， 立即打印一行 JSON 响应。
+    // 写 bash stub： 循环读 stdin， 按 method 应答——
+    // initialize(id=0) → 协议握手响应； tools/call → 回显 result。
+    // （McpSidecar 自 #37 后带 initialize handshake + 每请求 _meta，
+    // stub 需模拟 MCP server 的最小生命周期。）
     let stub_path = tmp.path().join("stub.sh");
     std::fs::write(
         &stub_path,
-        "#!/bin/sh\nread line\necho '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"echo\":\"stub\"}}'\n",
+        "#!/bin/sh\n\
+         while read line; do\n\
+         case \"$line\" in\n\
+         *'\"method\":\"initialize\"'*) echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"stub\",\"version\":\"0\"}}}' ;;\n\
+         *'\"method\":\"tools/call\"'*) echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"echo\":\"stub\"}}' ;;\n\
+         esac\n\
+         done\n",
     )
     .expect("write stub");
     let mut perms = std::fs::metadata(&stub_path).expect("stat").permissions();
@@ -171,6 +180,67 @@ async fn mcp_call_on_stub_sidecar_returns_result() {
     .expect("mcp_call");
     assert_eq!(result["ok"], json!(true));
     assert_eq!(result["echo"], json!("stub"));
+}
+
+/// M7-WP01-T04：真 `partisync-mcp` 二进制的侧车全链路（desktop → 侧车 →
+/// 扩展工具面）。要求 `target/../partisync-mcp` 已构建且
+/// `~/.partisync/extensions/` 已装示例扩展（`scripts/install-demo-ext.sh`）；
+/// 二者缺任一 → 跳过（e2e 性质，不阻塞离线单测）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_call_real_sidecar_ext_list() {
+    let exe = std::env::current_exe().expect("current_exe");
+    let bin = exe.parent().unwrap().join("../partisync-mcp");
+    let ext_json = dirs::home_dir()
+        .unwrap()
+        .join(".partisync/extensions/demo_ext.json");
+    if !bin.exists() || !ext_json.exists() {
+        eprintln!("skip: sidecar binary or demo extension missing");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("sidecar-e2e.db");
+    std::fs::write(&db, b"").expect("touch empty db (sqlite open needs the file)");
+
+    let mut state = AppState::open(
+        tmp.path().join("test.db"),
+        tmp.path().join("cas"),
+        tmp.path().join("index"),
+    )
+    .await
+    .expect("open state");
+    state.mcp_sidecar = std::sync::Arc::new(McpSidecar::new(
+        bin.canonicalize().expect("canonicalize"),
+        db,
+        tmp.path().join("index"),
+    ));
+
+    let r = {
+        let app = mock_builder()
+            .manage(state)
+            .build(mock_context(noop_assets()))
+            .expect("build app");
+        mcp_call(
+            app.state::<AppState>(),
+            McpCallArgs {
+                tool: "ext_list".into(),
+                args: json!({}),
+            },
+        )
+        .await
+        .expect("ext_list 经侧车成功")
+    };
+
+    let tools = r
+        .get("structuredContent")
+        .and_then(|sc| sc.get("tools"))
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        tools.iter().any(|t| t["name"] == "ext_demo_echo"),
+        "ext_list 应列出 ext_demo_echo，得到：{r}"
+    );
 }
 
 /// T06： 窗口状态持久化层在 mock 窗口上的冒烟（SPEC §3 T06）。
