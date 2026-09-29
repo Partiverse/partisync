@@ -1,0 +1,47 @@
+//! PartiSync WASM 扩展宿主（SPEC M7-WP01 / ADR-0025）。
+//!
+//! 宿主形态「wasm component 即 MCP tool」：扩展实现既有 MCP 工具语义
+//! （JSON 入参 → JSON 出参），经宿主加载后被 `partisync-mcp` 工具面与
+//! 桌面壳 `mcp_call` 无差别调用（T04 接线）。
+//!
+//! T01 骨架面：进程级 `Engine` 单例（磁盘编译缓存，ADR-0025 冷启动
+//! 预算前提）+ 默认拒权 linker（capability 全拒，[P13]）+ component
+//! 加载。注权 manifest（[P14]，SPEC M7-WP01 §2.2）与 host function
+//! 注入 = T02。
+
+use std::path::Path;
+use std::sync::OnceLock;
+
+use wasmtime::component::{Component, Linker};
+use wasmtime::{Cache, CacheConfig, Config, Engine};
+
+static ENGINE: OnceLock<Engine> = OnceLock::new();
+
+/// 进程级 Engine 单例：Cranelift 默认 opt + wasmtime 磁盘编译缓存
+/// （同 component 重复加载跳过编译；缓存未命中路径 p95 超冷启动预算
+/// 是已知行为，ADR-0025 后果节）。
+///
+/// 缓存盘不可写时退化为无缓存运行——冷启动预算前提失效但正确性不受
+/// 影响；Engine 本体初始化失败视为不可恢复环境错误。
+pub fn engine() -> &'static Engine {
+    ENGINE.get_or_init(|| {
+        let mut cfg = Config::default();
+        if let Ok(cache) = Cache::new(CacheConfig::default()) {
+            cfg.cache(Some(cache));
+        }
+        Engine::new(&cfg).expect("wasmtime Engine 初始化失败（不可恢复）")
+    })
+}
+
+/// 默认拒权 linker：未注册任何宿主函数/接口——未注权 component 缺
+/// import 时实例化即拒（[P13]，错误文本不含宿主路径/env）。per-call
+/// 细粒度拒绝与白名单注入随 T02 manifest 机制落地。
+pub fn deny_linker() -> Linker<()> {
+    Linker::new(engine())
+}
+
+/// 从文件加载 component。扩展发现约定 `<data_root>/extensions/*.wasm`
+/// （SPEC M7-WP01 §2.2；manifest 校验在 T02 于实例化前前置）。
+pub fn load_component(path: impl AsRef<Path>) -> wasmtime::Result<Component> {
+    Component::from_file(engine(), path)
+}
