@@ -12,7 +12,7 @@
 //! linker，无注入点；[P13] 已被 spec spike 与 T01 smoke 冒烟覆盖（缺
 //! 权 component 实例化即拒，错误不泄露宿主路径/env）。
 
-use crate::host_state::HostState;
+use crate::host_state::{HostState, IndexError, MAX_QUERY_BYTES};
 use crate::manifest::{Capability, Manifest};
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,25 +99,58 @@ const INDEX_FN_SEARCH: &str = "search";
 /// `search: func(query: string) -> string`——转发到组装期注入的
 /// [`IndexRead`](crate::host_state::IndexRead) 实现。
 ///
-/// **未接线语义**：`HostState::index` 为 `None`（组装期未注入）时
-/// 返回 `{"error": ...}` JSON 而非让调用失败——注权面由 manifest 声明
-/// 决定，组装期是否真接线是宿主实现事实，两者分离（SPEC §2.1）。
+/// **失败通道**（F-2）：`IndexError` 映射为 `{"error": "..."}` JSON——
+/// trait 契约要求实现方返回 `Err` 而非 panic：同步路径下 panic 会以
+/// Rust panic 形态越过 wasm 边界直接传播进 gateway 调用方线程（而非
+/// 变成 trap），`panic = "abort"` 构建下直接中止宿主进程。
 fn inject_index(linker: &mut Linker<HostState>) -> Result<()> {
     let mut index = linker.instance(INDEX_INTERFACE)?;
     index.func_wrap::<_, (String,), (String,)>(
         INDEX_FN_SEARCH,
         |store: StoreContextMut<'_, HostState>, (query,): (String,)| {
             let state = store.data();
-            Ok((match &state.index {
+            let outcome = match &state.index {
+                // F-12 宿主侧兜底（实现方亦应自检）：guest 可自由构造超长
+                // 查询串，无上限即宿主侧大串解析 + 扫描的放大面。
+                Some(_) if query.len() > MAX_QUERY_BYTES => Err(IndexError::QueryTooLong {
+                    len: query.len(),
+                    max: MAX_QUERY_BYTES,
+                }),
                 Some(idx) => idx.search(&query),
-                // 错误文案中性化（对抗审查 F-8）：不向不可信 guest 暴露
-                // 宿主内部接线状态的实现细节 oracle；宿主侧可观测性
-                // 随 T04-B 的 preflight 自检一并补（fail-open 登记见
-                // T04-B 任务卡）。
-                None => r#"{"error":"index.read unavailable"}"#.to_owned(),
-            },))
+                // 错误文案中性化（F-8）：不向不可信 guest 暴露宿主内部
+                // 接线状态的实现细节 oracle。加载期的未接线检测由
+                // `HostState::preflight`（F-4）承担。
+                None => Err(IndexError::NotWired),
+            };
+            let out = match outcome {
+                Ok(json) => json,
+                Err(e) => format!(r#"{{"error":{}}}"#, json_string(&e.to_string())),
+            };
+            Ok((out,))
         },
     )
+}
+
+/// JSON 字符串字面量转义（RFC 8259 §7）。用于把错误消息安全嵌入
+/// `{"error": "..."}`——后端错误消息常含引号 / 反斜杠 / 换行。
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -129,6 +162,18 @@ mod tests {
         // 简单 sanity：返回的毫秒时间戳在合理范围（>2020-01-01 = 1.5e12 ms）
         let t = now_millis();
         assert!(t > 1_577_836_800_000, "now_millis 异常小: {t}");
+    }
+
+    /// `json_string` 控制字符转义（PR #34 审查 P2-5）：NUL / 0x1F /
+    /// DEL（不需转义）按 RFC 8259 §7 处理。
+    #[test]
+    fn json_string_escapes_control_chars() {
+        assert_eq!(json_string("\0"), "\"\\u0000\"");
+        assert_eq!(json_string("\u{1f}"), "\"\\u001f\"");
+        // DEL U+007F 不在 RFC 8259 强制转义集合（U+0000..U+001F），放行
+        assert_eq!(json_string("\u{7f}"), "\"\u{7f}\"");
+        // 短转义与普通字符混合
+        assert_eq!(json_string("a\tb\nc\\d\"e"), "\"a\\tb\\nc\\\\d\\\"e\"");
     }
 
     #[test]
