@@ -9,7 +9,9 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+pub mod inject;
 pub mod manifest;
+pub use inject::linker_for;
 pub use manifest::{Capability, Manifest, ManifestError, ValidateError};
 
 use wasmtime::component::{Component, Linker};
@@ -44,4 +46,28 @@ pub fn deny_linker() -> Linker<()> {
 /// （SPEC M7-WP01 §2.2；manifest 校验在 T02 于实例化前前置）。
 pub fn load_component(path: impl AsRef<Path>) -> wasmtime::Result<Component> {
     Component::from_file(engine(), path)
+}
+
+/// 整合加载路径（PR-B 新增）：manifest 校验 → component 加载 →
+/// linker 注入。三阶段任一失败 = 加载拒，调用方不得实例化。
+///
+/// `<wasm_path>` 与 `<manifest_path>` 由调用方解析（SPEC §2.2 发现约定：
+/// 同目录同名 `<name>.wasm` + `<name>.json`；命名约定由 T04 PR-A 在
+/// `partisync-ext-host::discovery` 模块落地，本函数不耦合命名）。
+pub fn load_with_manifest(
+    wasm_path: impl AsRef<Path>,
+    manifest_path: impl AsRef<Path>,
+) -> Result<(Component, Linker<()>), ManifestError> {
+    let manifest = Manifest::load(manifest_path)?;
+    // 阶段 2/3 失败归 `ManifestError::Parse` 桶位：wasmtime 错误为
+    // `anyhow::Error`，无法塞进 `Io(std::io::Error)` 类型槽；借用
+    // 「parse 阶段失败」桶位承载，语义上属于「加载期失败」（PR-A
+    // ManifestError 三变体口径不变）。T04 若需细分（component 编译
+    // 错 vs linker 注入错），新增 `ManifestError::Component(String)`
+    // 与 `Linker(String)` 变体；当前 PR 借桶登记偏差。
+    let component = load_component(&wasm_path)
+        .map_err(|e| ManifestError::Parse(format!("component load failed: {e}")))?;
+    let linker = linker_for(engine(), &manifest)
+        .map_err(|e| ManifestError::Parse(format!("linker inject failed: {e}")))?;
+    Ok((component, linker))
 }
