@@ -77,8 +77,6 @@ cargo install --path crates/partisync-desktop     # 安装为 partisd-desktop
 - IPC 直链底层 crate（graph/cas/index）， 无 HTTP 中转； MCP 工具经
   `partisync-mcp` 侧车 stdio 调用（与 §3 同一二进制， 构建时自动产出）
 
-![PartiSync 桌面壳](docs/screenshots/M6-WP03-launch.png)
-
 ---
 
 ## 真实评估（M6-D67）
