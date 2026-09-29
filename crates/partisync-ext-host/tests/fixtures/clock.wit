@@ -1,0 +1,23 @@
+// clock.read 的 WIT 接口定义（SPEC M7-WP01 §2.2 白名单冻结表）。
+//
+// 与 `clock_probe.wat` 配对：该 WAT component 即由本 WIT 经
+// `wasm-tools component embed --world clock-probe wit <core.wasm>` +
+// `wasm-tools component new` 生成（工具链 wasm-tools 1.259.0 /
+// wit-component 0.259.0 —— ADR-0025 锁定同线）。
+//
+// interface 全名 `partisync:ext/clock@0.1.0` 必须与
+// `src/inject.rs` 的 `CLOCK_INTERFACE` 常量逐字一致——宿主侧
+// `linker.instance(全名)` 按整串匹配 component 的 import name。
+
+package partisync:ext@0.1.0;
+
+interface clock {
+    /// 当前时间戳（UTC 毫秒 since UNIX epoch）。
+    now-millis: func() -> u64;
+}
+
+/// 探针 world：导入 clock 接口，导出 `now()` 供宿主调用面读取。
+world clock-probe {
+    import clock;
+    export now: func() -> u64;
+}
