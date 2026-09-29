@@ -4,13 +4,13 @@
 //! （JSON 入参 → JSON 出参），经宿主加载后被 `partisync-mcp` 工具面与
 //! 桌面壳 `mcp_call` 无差别调用（T04 接线）。
 //!
-//! T01 骨架面：进程级 `Engine` 单例（磁盘编译缓存，ADR-0025 冷启动
-//! 预算前提）+ 默认拒权 linker（capability 全拒，[P13]）+ component
-//! 加载。注权 manifest（[P14]，SPEC M7-WP01 §2.2）与 host function
-//! 注入 = T02。
+//! `load_component()` + 拒绝路径见 [`manifest::Manifest::load`]。
 
 use std::path::Path;
 use std::sync::OnceLock;
+
+pub mod manifest;
+pub use manifest::{Capability, Manifest, ManifestError, ValidateError};
 
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Cache, CacheConfig, Config, Engine};

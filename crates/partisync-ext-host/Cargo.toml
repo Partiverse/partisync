@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 wasmtime = { workspace = true }
+serde = { workspace = true } # manifest 模块：Manifest 类型序列化
+serde_json = { workspace = true } # manifest 模块：load() JSON 解析
 # SPEC M7-WP01 §2.1：宿主 crate 仅依赖 core；索引只读经 IndexRead trait
 # 由 gateway 注入（T04 接线时引入），T01 骨架暂无内部依赖。
 
@@ -16,3 +18,4 @@ workspace = true
 
 [dev-dependencies]
 serde_json = { workspace = true } # smoke：demo tool 输出解析式断言
+tempfile = "3" # manifest_p14：临时目录创建 + 写 fixture
