@@ -295,6 +295,8 @@ pub struct McpServerState {
     index_engine: RwLock<Option<Arc<partisync_index::search::engine::IndexEngine>>>,
     /// Graph SQLite 连接池（读写）。
     graph_pool: SqlitePool,
+    /// WASM 扩展注册表（M7-WP01-T04 第 3 步；`None` = 未装载）。
+    ext_registry: crate::ext::SharedRegistry,
 }
 
 impl McpServerState {
@@ -319,12 +321,19 @@ impl McpServerState {
         Self {
             index_engine: RwLock::new(None),
             graph_pool: pool,
+            ext_registry: Arc::new(RwLock::new(None)),
         }
     }
 
     /// 注入索引引擎（WP02 IndexEngine）。
     pub async fn install_index_engine(&self, engine: partisync_index::search::engine::IndexEngine) {
         *self.index_engine.write().await = Some(Arc::new(engine));
+    }
+
+    /// 注入扩展注册表（M7-WP01-T04 第 3 步）。装载失败由调用方降级
+    /// （stderr 告警 + 不注入），扩展目录损坏不拖垮 MCP 主服务。
+    pub async fn install_ext_registry(&self, registry: partisync_ext_host::ExtRegistry) {
+        *self.ext_registry.write().await = Some(Arc::new(registry));
     }
 
     /// 返回 Graph 连接池引用。
@@ -423,6 +432,16 @@ fn all_tools() -> Vec<Tool> {
                 }
             })),
         ),
+        // M7-WP01-T04：扩展列举工具（内建）。桌面壳 UI 经 mcp_call("ext_list")
+        // 拿到扩展工具清单——零 IPC 扩口（SPEC §2.3 约定）。
+        Tool::new(
+            "ext_list",
+            "List registered WASM extension tools (JSON in / JSON out tools loaded from the extensions directory)",
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })),
+        ),
     ]
 }
 
@@ -446,7 +465,30 @@ impl ServerHandler for McpServerState {
         // SEP-2549（2026-07-28 spec）：ttlMs/cacheScope 为必填字段，严格 client
         //（ZCode 宿主 zod schema）会对省略值报 invalid_type/invalid_value——
         // rmcp 对 None 做 skip_serializing_if，必须显式带上。
-        let result = ListToolsResult::with_all_items(all_tools())
+        // M7-WP01-T04：内建工具 + 已注册扩展工具（`ext_` 前缀）合并列举。
+        let mut tools = all_tools();
+        let registry = self.ext_registry.read().await;
+        if let Some(reg) = registry.as_ref() {
+            for m in reg.manifests() {
+                let caps = m
+                    .capabilities
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                tools.push(Tool::new(
+                    format!("ext_{}", m.tool_name),
+                    format!("WASM extension tool (capabilities: {})", caps),
+                    schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "input": {"type": "string", "description": "JSON string passed to the extension"}
+                        }
+                    })),
+                ));
+            }
+        }
+        let result = ListToolsResult::with_all_items(tools)
             .with_ttl_ms(300_000)
             .with_cache_scope(rmcp::model::CacheScope::Private);
         Ok(result)
@@ -468,6 +510,8 @@ impl ServerHandler for McpServerState {
             "asset_organize" => self.asset_organize(&args).await,
             "dataset_export" => self.dataset_export(&args).await,
             "job_status" => self.job_status(&args).await,
+            "ext_list" => self.ext_list().await,
+            name if name.starts_with("ext_") => self.call_extension(name, &args).await,
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown tool: {other}"),
@@ -482,6 +526,100 @@ impl ServerHandler for McpServerState {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 扩展工具面（M7-WP01-T04 第 3 步）
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl McpServerState {
+    /// `ext_list`：列已注册扩展工具（名 + capability 声明面）。
+    async fn ext_list(&self) -> Result<CallToolResult, ErrorData> {
+        let registry = self.ext_registry.read().await;
+        let tools: Vec<serde_json::Value> = match registry.as_ref() {
+            Some(reg) => reg
+                .manifests()
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "name": format!("ext_{}", m.tool_name),
+                        "capabilities": m.capabilities.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+                    })
+                })
+                .collect(),
+            None => vec![],
+        };
+        ok_json(&serde_json::json!({ "tools": tools, "count": tools.len() }))
+    }
+
+    /// `ext_<name>`：调用扩展工具。
+    ///
+    /// **超时兜底**（PR #35 审查 P1-1 处置，选项 b+c）：guest 无终止
+    /// 保障（同步 wasmtime 调用无 epoch/fuel deadline，无限循环 guest
+    /// 会钉死 worker + 永久持锁）——gateway 侧 `spawn_blocking` +
+    /// [`EXT_CALL_TIMEOUT`] 包装，超时返回工具级错误 JSON，UI/客户端
+    /// 立即恢复；被超时的扩展实例仍持有锁（后续调用超时），不拖垮
+    /// 其余工具面。epoch interruption 正解登记 SPEC §6，T05 后立项。
+    async fn call_extension(
+        &self,
+        mcp_name: &str,
+        args: &JsonValue,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tool_name = mcp_name.strip_prefix("ext_").unwrap_or(mcp_name);
+        let input = match args.get("input") {
+            Some(JsonValue::String(s)) => s.clone(),
+            // 顶层对象即入参（桌面壳直传 JSON 对象时自动序列化）
+            Some(other) => other.to_string(),
+            None => "{}".to_owned(),
+        };
+        let registry = self.ext_registry.read().await;
+        let Some(reg) = registry.as_ref() else {
+            return Err(ErrorData::invalid_params(
+                "extension registry not loaded",
+                None,
+            ));
+        };
+        let Some(call) = reg.call(tool_name, &input) else {
+            return Err(ErrorData::invalid_params(
+                format!("unknown extension tool: {mcp_name}"),
+                None,
+            ));
+        };
+        drop(registry); // 调用期间不持 registry 读锁（实例锁独立）
+
+        let joined = tokio::task::spawn_blocking(move || call);
+        match tokio::time::timeout(EXT_CALL_TIMEOUT, joined).await {
+            Ok(Ok(Ok(out))) => {
+                // source 标注（SPEC §2.3）：扩展结果不隐式获得内建工具信任
+                let parsed: JsonValue = serde_json::from_str(&out).unwrap_or_else(|_| {
+                    serde_json::json!({ "raw": out })
+                });
+                ok_json(&serde_json::json!({
+                    "source": "extension",
+                    "tool": mcp_name,
+                    "result": parsed,
+                }))
+            }
+            Ok(Ok(Err(e))) => Err(ErrorData::internal_error(
+                format!("extension call failed: {e}"),
+                None,
+            )),
+            Ok(Err(e)) => Err(ErrorData::internal_error(
+                format!("extension task join failed: {e}"),
+                None,
+            )),
+            Err(_) => Err(ErrorData::internal_error(
+                format!(
+                    "extension call timed out after {}s (guest has no termination guarantee; the tool instance stays busy)",
+                    EXT_CALL_TIMEOUT.as_secs()
+                ),
+                None,
+            )),
+        }
+    }
+}
+
+/// 扩展调用超时（PR #35 审查 P1-1 处置）。
+const EXT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 工具结果辅助
@@ -1182,6 +1320,28 @@ pub async fn run_mcp_server(
         Err(e) => eprintln!("partisync-mcp: index engine unavailable, asset_search disabled: {e}"),
     }
 
+    // M7-WP01-T04 第 3 步：装载扩展注册表（SPEC §2.2 发现约定目录）。
+    // 扩展是可选增强：目录不存在 → 空；装载失败 → 告警 + 不注入
+    // （扩展目录损坏不拖垮 MCP 主服务；fail-closed 语义保留在
+    // `ExtRegistry::scan` 层面——要么全量装载成功要么不装载）。
+    let ext_dir = crate::ext::default_extensions_dir();
+    let index_reader = state.index_engine.read().await.clone();
+    match crate::ext::load_registry(&ext_dir, index_reader) {
+        Ok(registry) if !registry.is_empty() => {
+            println!(
+                "partisync-mcp: loaded {} extension tool(s) from {}",
+                registry.len(),
+                ext_dir.display()
+            );
+            state.install_ext_registry(registry).await;
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "partisync-mcp: extension registry load failed ({}), extensions disabled: {e}",
+            ext_dir.display()
+        ),
+    }
+
     // RunningService drop 即 shutdown——必须 waiting 到客户端断开（stdio EOF）
     let service = rmcp::service::serve_server(state, stdio()).await?;
     service.waiting().await?;
@@ -1424,9 +1584,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_tools_returns_five() {
+    async fn list_tools_returns_six() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
         let names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
         for n in [
             "asset_search",
@@ -1434,8 +1594,87 @@ mod tests {
             "asset_organize",
             "dataset_export",
             "job_status",
+            "ext_list",
         ] {
             assert!(names.contains(&n.to_string()), "missing tool {n}");
         }
+    }
+
+    // ── 扩展接线（M7-WP01-T04 第 3 步）─────────────────────────────
+
+    /// 示例扩展 fixture（复制到临时目录装载）。
+    async fn state_with_demo_ext() -> McpServerState {
+        let state = test_state().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../partisync-ext-host/tests/fixtures/demo_tool.wasm"),
+            dir.path().join("demo_ext.wasm"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("demo_ext.json"),
+            r#"{"tool_name":"demo_echo","capabilities":[]}"#,
+        )
+        .unwrap();
+        let registry =
+            crate::ext::load_registry(&dir.path().to_path_buf(), None).expect("demo 扩展装载成功");
+        state.install_ext_registry(registry).await;
+        state
+    }
+
+    #[tokio::test]
+    async fn ext_list_lists_registered_extensions() {
+        let state = state_with_demo_ext().await;
+        let r = state.ext_list().await.expect("ext_list 成功");
+        let v = r.structured_content.expect("structured 输出");
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["tools"][0]["name"], "ext_demo_echo");
+        assert_eq!(v["tools"][0]["capabilities"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn ext_list_empty_registry() {
+        let state = test_state().await;
+        let r = state.ext_list().await.expect("ext_list 成功");
+        let v = r.structured_content.expect("structured 输出");
+        assert_eq!(v["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn call_extension_demo_echo_round_trip() {
+        let state = state_with_demo_ext().await;
+        let r = state
+            .call_extension(
+                "ext_demo_echo",
+                &serde_json::json!({ "input": r#"{"k":"v"}"# }),
+            )
+            .await
+            .expect("扩展调用成功");
+        let v = r.structured_content.expect("structured 输出");
+        assert_eq!(v["source"], "extension", "SPEC §2.3 来源标注");
+        assert_eq!(v["tool"], "ext_demo_echo");
+        assert_eq!(v["result"]["input_bytes"], 9);
+    }
+
+    #[tokio::test]
+    async fn call_extension_unknown_tool_rejected() {
+        let state = state_with_demo_ext().await;
+        let err = state
+            .call_extension("ext_nonexistent", &serde_json::json!({}))
+            .await
+            .expect_err("未知扩展工具必须拒");
+        assert!(err.to_string().contains("unknown extension tool"));
+    }
+
+    /// `ext_` 前缀但 registry 未装载 → 明确错误（非 unknown tool 混淆）。
+    #[tokio::test]
+    async fn call_extension_without_registry_rejected() {
+        let state = test_state().await;
+        let err = state
+            .call_extension("ext_demo_echo", &serde_json::json!({}))
+            .await
+            .expect_err("registry 未装载必须拒");
+        assert!(err.to_string().contains("registry not loaded"));
     }
 }

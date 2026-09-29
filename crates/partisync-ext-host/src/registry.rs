@@ -40,14 +40,19 @@ pub enum LoadError {
     Preflight(IndexError),
     /// component 加载 / 编译失败。
     Component(String),
-    /// component 未导出 `call(input) -> output`——不是 MCP 工具语义。
-    MissingToolExport,
+    /// component 未导出 `call(input) -> output`——不是 MCP 工具语义
+    /// （携带 get_typed_func 的原始错误，区分「无导出」与「签名不匹配」；
+    /// PR #35 审查 P2-4）。
+    MissingToolExport(String),
     /// linker 构造失败。
     Linker(String),
     /// 实例化失败（import 无法解析等）。
     Instantiate(String),
     /// 扩展目录扫描失败（IO / 命名）。
     Scan(String),
+    /// 同批扩展工具名撞名（PR #35 审查 P2-3：语义独立于 Instantiate，
+    /// gateway 按变体匹配时不会误报实例化失败）。
+    Duplicate(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -56,12 +61,14 @@ impl std::fmt::Display for LoadError {
             Self::Manifest(e) => write!(f, "manifest: {e}"),
             Self::Preflight(e) => write!(f, "preflight: {e}"),
             Self::Component(e) => write!(f, "component: {e}"),
-            Self::MissingToolExport => {
-                f.write_str("component 未导出 call(input: string) -> string（MCP 工具语义约定）")
-            }
+            Self::MissingToolExport(e) => write!(
+                f,
+                "component 未导出 call(input: string) -> string（MCP 工具语义约定）：{e}"
+            ),
             Self::Linker(e) => write!(f, "linker: {e}"),
             Self::Instantiate(e) => write!(f, "instantiate: {e}"),
             Self::Scan(m) => write!(f, "scan: {m}"),
+            Self::Duplicate(m) => write!(f, "duplicate: {m}"),
         }
     }
 }
@@ -95,27 +102,26 @@ impl std::fmt::Debug for ExtTool {
 /// 工具调用失败（运行期；与装载期 [`LoadError`] 分离）。
 #[derive(Debug)]
 pub enum CallError {
-    /// 内部互斥锁中毒（持锁线程 panic；Store 毒化即此路径）。
+    /// 内部互斥锁中毒（持锁线程 panic——IndexRead 实现违约 panic 或
+    /// wasmtime 内部 panic；可达路径，防御性保留。PR #34 审查更正：
+    /// 同步路径 guest trap 不产生 panic，与 Store「毒化」无关）。
     Poisoned,
-    /// guest 调用失败（trap）。
-    Trap(wasmtime::Error),
+    /// guest 调用失败（trap；存 Display 消息——`wasmtime::Error` 为
+    /// anyhow 别名不实现 StdError，且避免 wasmtime 类型泄漏进公共 API，
+    /// PR #35 审查 P2-5）。
+    Trap(String),
 }
 
 impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Poisoned => f.write_str("ext tool lock poisoned"),
-            Self::Trap(e) => write!(f, "guest trap: {e}"),
+            Self::Trap(e) => write!(f, "guest call failed: {e}"),
         }
     }
 }
 
-impl std::error::Error for CallError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        // `wasmtime::Error`（anyhow 别名）不实现 StdError，Trap 不挂 source
-        None
-    }
-}
+impl std::error::Error for CallError {}
 
 impl ExtTool {
     /// 装载并实例化一个扩展工具。
@@ -140,7 +146,7 @@ impl ExtTool {
             .map_err(|e| LoadError::Instantiate(e.to_string()))?;
         let func = instance
             .get_typed_func::<(String,), (String,)>(&mut store, TOOL_EXPORT)
-            .map_err(|_| LoadError::MissingToolExport)?;
+            .map_err(|e| LoadError::MissingToolExport(e.to_string()))?;
         Ok(Self {
             manifest,
             store: std::sync::Mutex::new(store),
@@ -163,7 +169,7 @@ impl ExtTool {
         let (out,) = self
             .func
             .call(&mut *store, (input_json.to_owned(),))
-            .map_err(CallError::Trap)?;
+            .map_err(|e| CallError::Trap(e.to_string()))?;
         Ok(out)
     }
 }
@@ -207,8 +213,8 @@ impl ExtRegistry {
         let name = tool.manifest().tool_name.clone();
         if self.tools.contains_key(&name) {
             // BTreeMap::insert 会静默覆盖——撞名必须显式拒
-            return Err(LoadError::Instantiate(format!(
-                "duplicate extension tool name: {name}"
+            return Err(LoadError::Duplicate(format!(
+                "extension tool name `{name}` already registered"
             )));
         }
         self.tools.insert(name, tool);
@@ -221,9 +227,28 @@ impl ExtRegistry {
     pub fn scan(dir: impl AsRef<Path>, state: &HostState) -> Result<Self, LoadError> {
         let dir = dir.as_ref();
         let mut registry = Self::empty();
-        let mut manifests: Vec<_> = std::fs::read_dir(dir)
+        // P2-2：read_dir 迭代中的 IO 错误不吞（与 fail-closed 文档一致）
+        let entries: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| LoadError::Scan(format!("read {}: {e}", dir.display())))?
-            .filter_map(|e| e.ok())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| LoadError::Scan(format!("iterate {}: {e}", dir.display())))?;
+        // P2-1：孤儿 `.wasm`（无同名 `.json`）显式拒——与「manifest 缺失
+        // 的 component 加载即拒」（SPEC §2.3）对齐，坏扩展静默消失会让
+        // 工具面呈现不可预期的半态。
+        for entry in &entries {
+            let p = entry.path();
+            if p.extension().is_some_and(|x| x == "wasm") {
+                let has_manifest = p.with_extension("json").exists();
+                if !has_manifest {
+                    return Err(LoadError::Scan(format!(
+                        "orphan component (no manifest): {}",
+                        p.display()
+                    )));
+                }
+            }
+        }
+        let mut manifests: Vec<_> = entries
+            .into_iter()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
             .collect();

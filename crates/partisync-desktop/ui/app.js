@@ -126,14 +126,53 @@ async function loadDups() {
     </div>`).join("") : `<div class="empty">没有发现重复内容</div>`;
 }
 
+// ── 扩展面板（M7-WP01-T04）：经 mcp_call 消费 ext_list / ext_<name> ──
+
+async function loadExtTools() {
+  const r = await call("mcp_call", { tool: "ext_list", args: {} });
+  const tools = r.tools || [];
+  $("ext-list").innerHTML = tools.length ? `
+    <table><thead><tr><th>工具</th><th style="width:220px">capabilities</th><th style="width:90px"></th></tr></thead>
+    <tbody>${tools.map(t => `
+      <tr><td class="hash">${t.name}</td>
+      <td>${(t.capabilities || []).join(", ") || "（无宿主能力，纯计算）"}</td>
+      <td><button onclick="openExtCall('${t.name}')">调用</button></td></tr>`).join("")}</tbody></table>`
+    : `<div class="empty">暂无扩展。放置 &lt;name&gt;.wasm + &lt;name&gt;.json 到 ~/.partisync/extensions 后重启。</div>`;
+}
+
+function openExtCall(name) {
+  $("ext-call").style.display = "";
+  $("ext-call-name").textContent = name;
+  $("ext-input").value = "";
+  $("ext-output").textContent = "（结果）";
+}
+
+async function doExtCall() {
+  const tool = $("ext-call-name").textContent;
+  let args = {};
+  const raw = $("ext-input").value.trim();
+  if (raw) {
+    try { args = { input: JSON.stringify(JSON.parse(raw)) }; }
+    catch { $("ext-output").textContent = "入参不是合法 JSON"; return; }
+  }
+  $("ext-output").textContent = "…调用中（沙箱执行，10s 超时兜底）";
+  try {
+    const r = await call("mcp_call", { tool, args });
+    $("ext-output").textContent = JSON.stringify(r, null, 2);
+  } catch (e) {
+    $("ext-output").textContent = "调用失败：" + (e?.msg ?? String(e));
+  }
+}
+
 document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav.tabs button").forEach(x => x.classList.remove("active"));
   b.classList.add("active");
   const t = b.dataset.tab;
-  ["browse", "search", "dups", "jobs"].forEach(v => $(`view-${v}`).style.display = v === t ? "" : "none");
+  ["browse", "search", "dups", "jobs", "ext"].forEach(v => $(`view-${v}`).style.display = v === t ? "" : "none");
   if (t === "browse") browse(curPath);
   if (t === "dups") loadDups();
   if (t === "jobs") loadJobs();
+  if (t === "ext") loadExtTools();
 });
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
 

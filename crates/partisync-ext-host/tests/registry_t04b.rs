@@ -145,10 +145,7 @@ fn scan_rejects_duplicate_tool_names() {
 
     let err =
         ExtRegistry::scan(dir.path(), &HostState::without_index()).expect_err("撞名必须装载期拒绝");
-    assert!(
-        err.to_string().contains("duplicate extension tool name"),
-        "撞名错误：{err}"
-    );
+    assert!(matches!(err, LoadError::Duplicate(_)), "撞名错误：{err}");
 }
 
 /// scan 目录不存在 → fail-closed（不静默返回空注册表）。
