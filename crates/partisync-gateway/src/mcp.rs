@@ -332,8 +332,12 @@ impl McpServerState {
 
     /// 注入扩展注册表（M7-WP01-T04 第 3 步）。装载失败由调用方降级
     /// （stderr 告警 + 不注入），扩展目录损坏不拖垮 MCP 主服务。
-    pub async fn install_ext_registry(&self, registry: partisync_ext_host::ExtRegistry) {
-        *self.ext_registry.write().await = Some(Arc::new(registry));
+    pub async fn install_ext_registry(
+        &self,
+        registry: partisync_ext_host::ExtRegistry,
+        scan_dir: PathBuf,
+    ) {
+        *self.ext_registry.write().await = Some((Arc::new(registry), scan_dir));
     }
 
     /// 返回 Graph 连接池引用。
@@ -468,7 +472,7 @@ impl ServerHandler for McpServerState {
         // M7-WP01-T04：内建工具 + 已注册扩展工具（`ext_` 前缀）合并列举。
         let mut tools = all_tools();
         let registry = self.ext_registry.read().await;
-        if let Some(reg) = registry.as_ref() {
+        if let Some((reg, _dir)) = registry.as_ref() {
             for m in reg.manifests() {
                 let caps = m
                     .capabilities
@@ -535,7 +539,8 @@ impl McpServerState {
     /// `ext_list`：列已注册扩展工具（名 + capability 声明面）。
     async fn ext_list(&self) -> Result<CallToolResult, ErrorData> {
         let registry = self.ext_registry.read().await;
-        let tools: Vec<serde_json::Value> = match registry.as_ref() {
+        let scan_dir = registry.as_ref().map(|(_, d)| d.display().to_string());
+        let tools: Vec<serde_json::Value> = match registry.as_ref().map(|(reg, _)| reg) {
             Some(reg) => reg
                 .manifests()
                 .iter()
@@ -548,7 +553,11 @@ impl McpServerState {
                 .collect(),
             None => vec![],
         };
-        ok_json(&serde_json::json!({ "tools": tools, "count": tools.len() }))
+        ok_json(&serde_json::json!({
+            "tools": tools,
+            "count": tools.len(),
+            "dir": scan_dir,
+        }))
     }
 
     /// `ext_<name>`：调用扩展工具。
@@ -572,7 +581,7 @@ impl McpServerState {
             None => "{}".to_owned(),
         };
         let registry = self.ext_registry.read().await;
-        let Some(reg) = registry.as_ref() else {
+        let Some((reg, _dir)) = registry.as_ref() else {
             return Err(ErrorData::invalid_params(
                 "extension registry not loaded",
                 None,
@@ -1327,13 +1336,13 @@ pub async fn run_mcp_server(
     let ext_dir = crate::ext::default_extensions_dir();
     let index_reader = state.index_engine.read().await.clone();
     match crate::ext::load_registry(&ext_dir, index_reader) {
-        Ok(registry) if !registry.is_empty() => {
+        Ok((registry, scanned_dir)) if !registry.is_empty() => {
             println!(
                 "partisync-mcp: loaded {} extension tool(s) from {}",
                 registry.len(),
-                ext_dir.display()
+                scanned_dir.display()
             );
-            state.install_ext_registry(registry).await;
+            state.install_ext_registry(registry, scanned_dir).await;
         }
         Ok(_) => {}
         Err(e) => eprintln!(
@@ -1617,9 +1626,9 @@ mod tests {
             r#"{"tool_name":"demo_echo","capabilities":[]}"#,
         )
         .unwrap();
-        let registry =
+        let (registry, scanned_dir) =
             crate::ext::load_registry(&dir.path().to_path_buf(), None).expect("demo 扩展装载成功");
-        state.install_ext_registry(registry).await;
+        state.install_ext_registry(registry, scanned_dir).await;
         state
     }
 
