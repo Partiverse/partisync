@@ -94,20 +94,27 @@ async function browse(path) {
   curPath = path || "/";
   const rows = await call("list", { prefix: curPath });
   const crumbs = breadcrumbFor(curPath);
-  $("crumbs").innerHTML = crumbs.map((e, i) =>
-    `<a onclick="browse('${e.path.replace(/'/g,"\\'")}')">${e.name}</a>`
+  $("crumbs").innerHTML = crumbs.map(e =>
+    `<a href="#" data-path="${e.path}">${e.name}</a>`
   ).join(`<span class="sep">›</span>`) +
     `<span class="sep">›</span><b>${curPath === "/" ? "根" : curPath.split("/").pop()}</b>`;
+  // CSP（script-src 'self'）禁 inline onclick 属性——交互一律 JS 绑定
+  $("crumbs").querySelectorAll("a[data-path]").forEach(a => {
+    a.onclick = () => browse(a.dataset.path);
+  });
   $("rows").innerHTML = rows.length ? rows.map(e => {
     const dir = e.kind === 1;
     const icon = dir ? "▸" : "·";
     const cls = dir ? "row-dir" : "row-file";
-    return `<tr class="${cls}"${dir ? `onclick="browse('${e.path.replace(/'/g,"\\'")}')"` : ""}>
+    return `<tr class="${cls}"${dir ? ` data-path="${e.path}" style="cursor:pointer"` : ""}>
       <td class="${dir ? "icon-dir" : "icon-file"}">${icon}</td>
       <td>${e.name}</td><td>${dir ? "—" : sizeFmt(e.size)}</td>
       <td>${timeFmt(e.mtime_ns)}</td>
       <td class="hash">${e.content_id ? e.content_id.slice(0, 8) + "…" : ""}</td></tr>`;
   }).join("") : `<tr><td colspan="5" class="empty">空目录</td></tr>`;
+  $("rows").querySelectorAll("tr[data-path]").forEach(tr => {
+    tr.onclick = () => browse(tr.dataset.path);
+  });
 }
 
 async function doSearch() {
@@ -147,16 +154,37 @@ async function loadDups() {
 // ── 扩展面板（M7-WP01-T04）：经 mcp_call 消费 ext_list / ext_<name> ──
 
 async function loadExtTools() {
-  const r = await call("mcp_call", { tool: "ext_list", args: {} });
-  // mcp_call 返回 CallToolResult 全对象——工具载荷在 structuredContent
-  const tools = r?.structuredContent?.tools ?? r?.tools ?? [];
-  $("ext-list").innerHTML = tools.length ? `
+  const dbg = (m) => { const d = $("ext-debug"); if (d) d.textContent = `[${new Date().toLocaleTimeString()}] ${m}\n` + (d.textContent || ""); };
+  try {
+    dbg("loadExtTools: start");
+    const r = await call("mcp_call", { tool: "ext_list", args: {} });
+    // mcp_call 返回 CallToolResult 全对象——工具载荷在 structuredContent
+    const tools = r?.structuredContent?.tools ?? r?.tools ?? [];
+    dbg(`loadExtTools: got ${tools.length} tool(s)`);
+    $("ext-list").innerHTML = tools.length ? `
     <table><thead><tr><th>工具</th><th style="width:220px">capabilities</th><th style="width:90px"></th></tr></thead>
     <tbody>${tools.map(t => `
-      <tr style="cursor:pointer" onclick="openExtCall('${t.name}')"><td class="hash">${t.name}</td>
+      <tr data-tool="${t.name}" style="cursor:pointer"><td class="hash">${t.name}</td>
       <td>${(t.capabilities || []).join(", ") || "（无宿主能力，纯计算）"}</td>
-      <td><button onclick="event.stopPropagation(); openExtCall('${t.name}')">调用</button></td></tr>`).join("")}</tbody></table>`
+      <td><button class="ext-call-btn" data-tool="${t.name}">调用</button></td></tr>`).join("")}</tbody></table>`
     : `<div class="empty">暂无扩展。放置 &lt;name&gt;.wasm + &lt;name&gt;.json 到 ~/.partisync/extensions 后重启。</div>`;
+    // CSP 禁 inline onclick——渲染后 JS 绑定
+    const trs = $("ext-list").querySelectorAll("tr[data-tool]");
+    trs.forEach(tr => {
+      tr.onclick = (ev) => {
+        dbg(`row clicked: ${tr.dataset.tool} @ client(${ev.clientX},${ev.clientY})`);
+        openExtCall(tr.dataset.tool);
+      };
+    });
+    let btns = 0;
+    $("ext-list").querySelectorAll("button.ext-call-btn").forEach(b => {
+      b.onclick = (ev) => { ev.stopPropagation(); openExtCall(b.dataset.tool); };
+      btns++;
+    });
+    dbg(`loadExtTools: bound ${trs.length} row(s), ${btns} button(s)`);
+  } catch (e) {
+    dbg(`loadExtTools ERROR: ${e?.msg ?? e}`);
+  }
 }
 
 function openExtCall(name) {
@@ -196,6 +224,10 @@ document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
   if (t === "ext") loadExtTools();
 });
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+// CSP（script-src 'self'）禁 inline onclick——静态按钮一律 JS 绑定
+$("btn-search").onclick = doSearch;
+$("btn-ext-refresh").onclick = loadExtTools;
+$("btn-ext-call").onclick = doExtCall;
 
 // 自动刷新： 统计与浏览视图每 5s 轮询
 setInterval(async () => {

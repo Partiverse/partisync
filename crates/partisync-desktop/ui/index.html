@@ -35,7 +35,7 @@
   <div id="view-search" style="display:none">
     <div class="searchbar">
       <input id="q" placeholder="BM25 全文检索（如 png、report、f3…）">
-      <button onclick="doSearch()">搜索</button>
+      <button id="btn-search">搜索</button>
     </div>
     <table><thead><tr><th style="width:90px">内容</th><th>命中片段</th><th style="width:90px">分数</th></tr></thead>
       <tbody id="srows"></tbody></table>
@@ -47,7 +47,7 @@
   <div id="view-ext" style="display:none">
     <div class="ext-head">
       <span class="sub">WASM 扩展工具（沙箱内运行，JSON 进 / JSON 出）· 来源目录 ~/.partisync/extensions</span>
-      <button onclick="loadExtTools()">刷新</button>
+      <button id="btn-ext-refresh">刷新</button>
     </div>
     <div id="ext-list"></div>
     <div id="ext-call" style="display:none">
@@ -55,10 +55,11 @@
         <span class="badge">source: extension</span></div>
       <div class="searchbar">
         <input id="ext-input" placeholder='JSON 入参，如 {"k":"v"}'>
-        <button onclick="doExtCall()">调用</button>
+        <button id="btn-ext-call">调用</button>
       </div>
       <pre id="ext-output" class="ext-out">（结果）</pre>
     </div>
+    <div id="ext-debug" style="font-size:11px;color:#8b949e;white-space:pre-wrap;font-family:monospace"></div>
   </div>
 
   <footer>PartiSync Desktop · M6-WP03 · 内容身份 = BLAKE3 · IPC 7 commands（T03）+ 扩展面板（M7-WP01-T04）</footer>
