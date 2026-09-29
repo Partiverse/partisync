@@ -13,7 +13,7 @@
 
 use std::io::Write;
 
-use partisync_ext_host::{load_with_manifest, Manifest, ManifestError};
+use partisync_ext_host::{load_with_manifest, HostState, Manifest, ManifestError};
 use wasmtime::Store;
 
 fn fixture_dir() -> std::path::PathBuf {
@@ -54,7 +54,7 @@ fn p14_clock_granted_clock_probe_calls_host_function() {
     let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &m)
         .expect("注权 clock.read 的 linker 构造成功");
 
-    let mut store = Store::new(partisync_ext_host::engine(), ());
+    let mut store = Store::new(partisync_ext_host::engine(), HostState::without_index());
     let instance = match linker.instantiate(&mut store, &component) {
         Ok(i) => i,
         Err(e) => panic!("注权 clock.read 后 clock_probe 必须可实例化：{e}"),
@@ -86,8 +86,8 @@ fn p13_index_read_declared_but_not_wired_rejects_clock_import() {
     };
     m.validate().expect("index.read 在白名单内，manifest 合法");
     let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &m)
-        .expect("index.read 占位注入不报错（尚未接线）");
-    let mut store = Store::new(partisync_ext_host::engine(), ());
+        .expect("index.read 注权构造不报错（T04-A 已实装该 interface）");
+    let mut store = Store::new(partisync_ext_host::engine(), HostState::without_index());
     let err = match linker.instantiate(&mut store, &component) {
         Ok(_) => panic!("只注权 index.read 时，clock_probe 的 clock import 必须无法解析"),
         Err(e) => e,
@@ -112,7 +112,7 @@ fn p13_zero_grant_deny_probe_rejected_without_host_leak() {
     };
     let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &m)
         .expect("零注权 linker 构造成功（零注入）");
-    let mut store = Store::new(partisync_ext_host::engine(), ());
+    let mut store = Store::new(partisync_ext_host::engine(), HostState::without_index());
     let err = match linker.instantiate(&mut store, &component) {
         Ok(_) => panic!("零注权下 clock_probe 必须实例化失败"),
         Err(e) => e,
@@ -149,7 +149,7 @@ fn p13_wasi_gated_component_denied_under_zero_grant() {
         Ok(p) => p,
         Err(e) => panic!("零注权 manifest 应通过校验：{e}"),
     };
-    let mut store = Store::new(partisync_ext_host::engine(), ());
+    let mut store = Store::new(partisync_ext_host::engine(), HostState::without_index());
     let err = match linker.instantiate(&mut store, &component) {
         Ok(_) => panic!("零注权下 wasip2 std component 必须实例化失败（FS/网络/时钟全拒）"),
         Err(e) => e,

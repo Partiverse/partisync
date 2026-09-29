@@ -4,18 +4,20 @@
 //! 不变量：拒绝先于任何 host function 暴露）。
 //!
 //! 第一版白名单（SPEC §2.2 批准即冻结）：
-//! - `index.read` — 索引只读查询（T04 + \`IndexRead\` trait 注入时接线）
-//! - `clock.read` — 当前时间戳（\`now_millis()\`，本 PR 落地）
+//! - `index.read` — 索引只读查询（经 [`IndexRead`](crate::host_state::IndexRead)
+//!   trait 由组装期注入，T04 接线落地）
+//! - `clock.read` — 当前时间戳（`now_millis()`，T02b 落地）
 //!
 //! FS / 网络 / 环境不在白名单——相应 host function 根本不存在于
 //! linker，无注入点；[P13] 已被 spec spike 与 T01 smoke 冒烟覆盖（缺
 //! 权 component 实例化即拒，错误不泄露宿主路径/env）。
 
+use crate::host_state::HostState;
 use crate::manifest::{Capability, Manifest};
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use wasmtime::component::Linker;
-use wasmtime::Result;
+use wasmtime::{Result, StoreContextMut};
 
 /// 当前时间戳毫秒（`clock.read` 能力语义）。注入到 linker 的 host
 /// function 直接调用本函数——避免宿主路径/环境进 wasmtime 上下文
@@ -53,7 +55,7 @@ const CLOCK_FN_NOW_MILLIS: &str = "now-millis";
 /// 调用方（`load_with_manifest`）必须保证 manifest 已 `validate()`
 /// 通过。本函数不做二次校验——重复校验等于「在校验后再校验」，语义
 /// 冗余且易漂移；调用面契约写明。
-pub fn linker_for(engine: &wasmtime::Engine, manifest: &Manifest) -> Result<Linker<()>> {
+pub fn linker_for(engine: &wasmtime::Engine, manifest: &Manifest) -> Result<Linker<HostState>> {
     let mut linker = Linker::new(engine);
     // T03 修正：manifest 容忍同一 capability 重复声明（`validate` 去重
     // 视为同一项，见 manifest.rs），但 `Linker` 以 `allow_shadowing: false`
@@ -71,30 +73,51 @@ pub fn linker_for(engine: &wasmtime::Engine, manifest: &Manifest) -> Result<Link
 
 /// 单一 capability 注入。每个 capability 对应一个 WIT interface，
 /// 注入 = 在该 interface 实例下注册其 host function。
-fn inject(linker: &mut Linker<()>, cap: Capability) -> Result<()> {
+fn inject(linker: &mut Linker<HostState>, cap: Capability) -> Result<()> {
     match cap {
         Capability::ClockRead => inject_clock(linker),
-        // `index.read` 由 T04 + `IndexRead` trait 注入时接线（PARTISYNC
-        // 索引只读接口的 wasm host function）；T03 暂不引 trait 依赖
-        // ——保留注入点签名，后续 PR 仅加 match 分支即可。
-        Capability::IndexRead => inject_index_stub(linker),
+        Capability::IndexRead => inject_index(linker),
     }
 }
 
 /// `clock.read` 实装：在 `partisync:ext/clock@0.1.0` interface 实例下
 /// 注册 `now-millis: func() -> u64`。
-fn inject_clock(linker: &mut Linker<()>) -> Result<()> {
+fn inject_clock(linker: &mut Linker<HostState>) -> Result<()> {
     let mut clock = linker.instance(CLOCK_INTERFACE)?;
     clock.func_wrap::<_, (), (u64,)>(CLOCK_FN_NOW_MILLIS, |_store, ()| Ok((now_millis(),)))
 }
 
-/// `index.read` 第一版占位（SPEC §2.2 注入点保留 + §2.1 预案）：
-/// 不暴露任何 host function。T04 接线由 gateway 注入 `IndexRead`
-/// trait 实现；本 PR 显式登记「本 capability 当前未注入 host
-/// function」——声明 `index.read` 的 component 因缺 interface 实例而
-/// 实例化必拒（[P13] 默认拒权），T04 接入后可达。
-fn inject_index_stub(_linker: &mut Linker<()>) -> Result<()> {
-    Ok(())
+/// index.read 的 WIT interface 全名（`package:interface@version`），
+/// 与 `tests/fixtures/ext.wit` 的 `interface index` 声明逐字对应。
+const INDEX_INTERFACE: &str = "partisync:ext/index@0.1.0";
+
+/// index interface 内 host function 名。
+const INDEX_FN_SEARCH: &str = "search";
+
+/// `index.read` 实装（T04 接线，替换 T02/T03 的占位）：在
+/// `partisync:ext/index@0.1.0` interface 实例下注册
+/// `search: func(query: string) -> string`——转发到组装期注入的
+/// [`IndexRead`](crate::host_state::IndexRead) 实现。
+///
+/// **未接线语义**：`HostState::index` 为 `None`（组装期未注入）时
+/// 返回 `{"error": ...}` JSON 而非让调用失败——注权面由 manifest 声明
+/// 决定，组装期是否真接线是宿主实现事实，两者分离（SPEC §2.1）。
+fn inject_index(linker: &mut Linker<HostState>) -> Result<()> {
+    let mut index = linker.instance(INDEX_INTERFACE)?;
+    index.func_wrap::<_, (String,), (String,)>(
+        INDEX_FN_SEARCH,
+        |store: StoreContextMut<'_, HostState>, (query,): (String,)| {
+            let state = store.data();
+            Ok((match &state.index {
+                Some(idx) => idx.search(&query),
+                // 错误文案中性化（对抗审查 F-8）：不向不可信 guest 暴露
+                // 宿主内部接线状态的实现细节 oracle；宿主侧可观测性
+                // 随 T04-B 的 preflight 自检一并补（fail-open 登记见
+                // T04-B 任务卡）。
+                None => r#"{"error":"index.read unavailable"}"#.to_owned(),
+            },))
+        },
+    )
 }
 
 #[cfg(test)]
@@ -152,16 +175,18 @@ mod tests {
         let _ = linker.root();
     }
 
+    /// T04-A：`index.read` 已实装（本测试从「占位不注入」改为「真实注册
+    /// interface 实例」的语义迁移）。真实可达性由
+    /// `tests/probe_index.rs` 的三个 fixture 探针覆盖——本 unit 测试
+    /// 只验构造路径不报错。
     #[test]
-    fn linker_for_index_read_stub_injects_nothing_but_succeeds() {
+    fn linker_for_index_read_registers_index_interface() {
         let engine = crate::engine();
         let m = Manifest {
-            tool_name: "future_index".into(),
+            tool_name: "index_user".into(),
             capabilities: vec![Capability::IndexRead],
         };
-        let mut linker = linker_for(engine, &m).expect("index.read 占位注入合法");
-        // 声明 index.read 但不注入 interface 实例 → 需该接口的
-        // component 必拒（真实断言见 tests/probes_p13_p14.rs）。
+        let mut linker = linker_for(engine, &m).expect("index.read 注权构造成功");
         let _ = linker.root();
     }
 }

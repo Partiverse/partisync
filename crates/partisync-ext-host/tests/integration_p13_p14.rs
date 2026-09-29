@@ -7,7 +7,7 @@
 
 use std::io::Write;
 
-use partisync_ext_host::{load_with_manifest, ManifestError};
+use partisync_ext_host::{load_with_manifest, HostState, ManifestError};
 
 fn fixture_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,7 +56,7 @@ fn load_with_manifest_valid_clock_then_instantiate_succeeds() {
         Err(e) => panic!("合法 manifest + 组件应通过：{e}"),
     };
     // linker 根 instance 可取；该 component 零 import 时实例化必然成功
-    let mut store = wasmtime::Store::new(partisync_ext_host::engine(), ());
+    let mut store = wasmtime::Store::new(partisync_ext_host::engine(), HostState::without_index());
     let instance = match loaded.1.instantiate(&mut store, &loaded.0) {
         Ok(i) => i,
         Err(e) => panic!("零 import demo component 在带 clock.read linker 下应可实例化：{e}"),
@@ -116,7 +116,7 @@ fn load_with_manifest_deny_probe_still_fails_under_clock_linker() {
         Ok(p) => p,
         Err(e) => panic!("合法 manifest 应通过校验：{e}"),
     };
-    let mut store = wasmtime::Store::new(partisync_ext_host::engine(), ());
+    let mut store = wasmtime::Store::new(partisync_ext_host::engine(), HostState::without_index());
     let err = match loaded.1.instantiate(&mut store, &loaded.0) {
         Ok(_) => panic!("缺 wasi import component 在 clock.read linker 下必拒"),
         Err(e) => e,

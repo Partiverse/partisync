@@ -9,8 +9,10 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+pub mod host_state;
 pub mod inject;
 pub mod manifest;
+pub use host_state::{HostState, IndexRead};
 pub use inject::linker_for;
 pub use manifest::{Capability, Manifest, ManifestError, ValidateError};
 
@@ -38,7 +40,7 @@ pub fn engine() -> &'static Engine {
 /// 默认拒权 linker：未注册任何宿主函数/接口——未注权 component 缺
 /// import 时实例化即拒（[P13]，错误文本不含宿主路径/env）。per-call
 /// 细粒度拒绝与白名单注入随 T02 manifest 机制落地。
-pub fn deny_linker() -> Linker<()> {
+pub fn deny_linker() -> Linker<HostState> {
     Linker::new(engine())
 }
 
@@ -57,7 +59,7 @@ pub fn load_component(path: impl AsRef<Path>) -> wasmtime::Result<Component> {
 pub fn load_with_manifest(
     wasm_path: impl AsRef<Path>,
     manifest_path: impl AsRef<Path>,
-) -> Result<(Component, Linker<()>), ManifestError> {
+) -> Result<(Component, Linker<HostState>), ManifestError> {
     let manifest = Manifest::load(manifest_path)?;
     // 阶段 2/3 失败归 `ManifestError::Parse` 桶位：wasmtime 错误为
     // `anyhow::Error`，无法塞进 `Io(std::io::Error)` 类型槽；借用

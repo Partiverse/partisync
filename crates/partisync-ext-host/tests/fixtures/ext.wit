@@ -1,0 +1,44 @@
+// PartiSync 扩展宿主 WIT 接口（SPEC M7-WP01 §2.2 capability 白名单冻结表）。
+//
+// 与 `clock_probe.wat` 配对：该 WAT component 由本文件内的 `clock`
+// 接口经 `wasm-tools component embed --world clock-probe wit <core.wasm>`
+// + `wasm-tools component new` 生成（工具链 wasm-tools 1.259.0 /
+// wit-component 0.259.0 —— ADR-0025 锁定同线）。
+//
+// interface 全名 `partisync:ext/clock@0.1.0` 必须与
+// `src/inject.rs` 的 `CLOCK_INTERFACE` 常量逐字一致——宿主侧
+// `linker.instance(全名)` 按整串匹配 component 的 import name。
+//
+// `index` 接口（T04 接线，探针 fixture 见 `index_probe.wat`）：interface
+// 全名 `partisync:ext/index@0.1.0`，与 `INDEX_INTERFACE` 常量对应。
+//
+// 签名口径：`func(query: string) -> string` —— 与「wasm component 即
+// MCP tool」的 JSON 进 JSON 出语义一致（MCP 工具亦为 JSON 入参 → JSON
+// 出参），失败以 `{"error": "..."}` 形态的 JSON 表达。不使用 canonical
+// `result<T,E>`：那要求 `Return = (Result<..>,)` 且每个元素满足
+// `ComponentType`，与 MCP 工具的错误口径（`is_error: true` + 文本）
+// 不对齐，JSON 形态更贴合既有工具面。
+
+package partisync:ext@0.1.0;
+
+interface clock {
+    /// 当前时间戳（UTC 毫秒 since UNIX epoch）。
+    now-millis: func() -> u64;
+}
+
+interface index {
+    /// 索引只读查询。返回 JSON 字符串（与 MCP 工具同语义）。
+    search: func(query: string) -> string;
+}
+
+/// 探针 world：导入 clock 接口，导出 `now()` 供宿主调用面读取。
+world clock-probe {
+    import clock;
+    export now: func() -> u64;
+}
+
+/// 索引探针 world：导入 index 接口，导出 `search()`。
+world index-probe {
+    import index;
+    export search: func(query: string) -> string;
+}
