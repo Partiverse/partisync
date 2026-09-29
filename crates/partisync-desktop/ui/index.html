@@ -20,6 +20,7 @@
     <button data-tab="search">搜索</button>
     <button data-tab="dups">重复内容</button>
     <button data-tab="jobs">作业</button>
+    <button data-tab="ext">扩展</button>
   </nav>
 
   <div id="view-browse">
@@ -43,7 +44,24 @@
   <div id="view-dups" style="display:none"></div>
   <div id="view-jobs" style="display:none"></div>
 
-  <footer>PartiSync Desktop · M6-WP03 · 内容身份 = BLAKE3 · 6 IPC commands（T03）</footer>
+  <div id="view-ext" style="display:none">
+    <div class="ext-head">
+      <span class="sub">WASM 扩展工具（沙箱内运行，JSON 进 / JSON 出）· 来源目录 ~/.partisync/extensions</span>
+      <button onclick="loadExtTools()">刷新</button>
+    </div>
+    <div id="ext-list"></div>
+    <div id="ext-call" style="display:none">
+      <div class="ext-head"><b id="ext-call-name"></b>
+        <span class="badge">source: extension</span></div>
+      <div class="searchbar">
+        <input id="ext-input" placeholder='JSON 入参，如 {"k":"v"}'>
+        <button onclick="doExtCall()">调用</button>
+      </div>
+      <pre id="ext-output" class="ext-out">（结果）</pre>
+    </div>
+  </div>
+
+  <footer>PartiSync Desktop · M6-WP03 · 内容身份 = BLAKE3 · IPC 7 commands（T03）+ 扩展面板（M7-WP01-T04）</footer>
 </div>
 <script src="app.js"></script>
 </body>

@@ -62,5 +62,15 @@ td.hash { color: var(--dim); }
 .dup li { font-family: var(--mono); font-size: 13px; padding: 3px 0; color: var(--dim); }
 
 .empty { color: var(--dim); text-align: center; padding: 40px 0; }
+
+/* 扩展面板（M7-WP01-T04） */
+.ext-head { display: flex; justify-content: space-between; align-items: center;
+            margin: 12px 0; gap: 10px; }
+.ext-head .badge { color: var(--green); font-size: 12px; white-space: nowrap; }
+.ext-out { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+           padding: 12px 14px; font-family: var(--mono); font-size: 13px;
+           color: var(--fg); white-space: pre-wrap; word-break: break-all;
+           max-height: 320px; overflow: auto; }
+.ext-out:empty::before { content: "（结果）"; color: var(--dim); }
 .error { color: var(--error); font-family: var(--mono); font-size: 12px; padding: 8px 0; }
 footer { color: var(--dim); font-size: 11px; text-align: center; margin-top: 32px; }
