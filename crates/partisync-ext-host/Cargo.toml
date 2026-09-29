@@ -1,0 +1,18 @@
+[package]
+name = "partisync-ext-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PartiSync WASM 扩展宿主（wasmtime + WIT， SPEC M7-WP01 / ADR-0025）"
+publish = false
+
+[dependencies]
+wasmtime = { workspace = true }
+# SPEC M7-WP01 §2.1：宿主 crate 仅依赖 core；索引只读经 IndexRead trait
+# 由 gateway 注入（T04 接线时引入），T01 骨架暂无内部依赖。
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true } # smoke：demo tool 输出解析式断言
