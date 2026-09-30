@@ -6,6 +6,11 @@ use partisync_core::Ulid;
 use partisync_graph::store::Store;
 use partisync_sync::crypto;
 
+/// 测试固定盐（SEC-AI-AUDIT-M7-WP02-M2D1 F-1：确定性盐 legacy KDF
+/// `#[cfg(test)]` 收窄后，本文件迁移 `argon2_master_key_with_salt`——
+/// 测试派生确定性语义经显式固定盐保持，生产路径语义不变）。
+const TEST_SALT: [u8; 16] = [0xA5; 16];
+
 async fn node(tag: &str) -> Store {
     let dir = std::env::temp_dir().join(format!("wp7-{tag}-{}", Ulid::now()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -60,12 +65,13 @@ async fn space_crypto_register_is_overwrite_on_rotation() {
 
 #[tokio::test]
 async fn kdf_chain_full_determinism() {
-    // 同一 mnemonic+space_id 派生：master → space → content/meta ⇒ 全部稳定
+    // 同 mnemonic + 固定盐（TEST_SALT）派生：master → space → content/meta ⇒ 全部稳定
+    // （space_id 仍驱动 space_key 域分离；master 盐面见 TEST_SALT 注释）
     let mnemonic =
         "abandon ability able about above absent absorb abstract absurd abuse access accident";
     let space = "default";
-    let master1 = crypto::argon2_master_key(mnemonic, space);
-    let master2 = crypto::argon2_master_key(mnemonic, space);
+    let master1 = crypto::argon2_master_key_with_salt(mnemonic, &TEST_SALT);
+    let master2 = crypto::argon2_master_key_with_salt(mnemonic, &TEST_SALT);
     assert_eq!(master1, master2, "Argon2 master 派生确定性");
     let sk1 = crypto::derive_space_key(&master1, space);
     let sk2 = crypto::derive_space_key(&master2, space);
@@ -91,9 +97,9 @@ async fn different_space_yields_different_keys() {
 
 #[tokio::test]
 async fn encrypt_decrypt_roundtrip_with_kdf_chain() {
-    let master = crypto::argon2_master_key(
+    let master = crypto::argon2_master_key_with_salt(
         "abandon ability able about above absent absorb abstract absurd abuse access accident",
-        "default",
+        &TEST_SALT,
     );
     let sk = crypto::derive_space_key(&master, "default");
     let ck = crypto::derive_content_key(&sk, "content-id-hello");
@@ -105,9 +111,9 @@ async fn encrypt_decrypt_roundtrip_with_kdf_chain() {
 
 #[tokio::test]
 async fn decrypt_rejects_byte_tampering() {
-    let master = crypto::argon2_master_key(
+    let master = crypto::argon2_master_key_with_salt(
         "abandon ability able about above absent absorb abstract absurd abuse access accident",
-        "default",
+        &TEST_SALT,
     );
     let ck = crypto::derive_content_key(&master, "x");
     let (mut ct, nonce) = crypto::encrypt_content(&ck, b"abcdef");
@@ -129,9 +135,9 @@ async fn decrypt_rejects_wrong_key() {
 async fn register_with_kek_hash_round_trip_persists() {
     // 完整链路：master → kek_hash 落库 → 再次查询能验证持有证明
     let s = node("kek").await;
-    let master = crypto::argon2_master_key(
+    let master = crypto::argon2_master_key_with_salt(
         "abandon ability able about above absent absorb abstract absurd abuse access accident",
-        "default",
+        &TEST_SALT,
     );
     let kek = kek_hash_of(&master);
     s.register_space_crypto("default", &kek, "xchacha20-blake3-v1")

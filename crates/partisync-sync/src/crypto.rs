@@ -15,7 +15,11 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use partisync_core::error::{PartisyError, Severity};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
+// Zeroize trait（.zeroize()）仅 legacy 确定性盐路径使用——该路径 F-1 收窄
+// 为 cfg(test)，release 构建下 import 需同步门控（否则 -D unused-imports）。
+#[cfg(test)]
+use zeroize::Zeroize;
 
 /// 派生主密钥（Argon2id，m=64MiB/t=3/p=1）——参数在 §5.11 既定 + ADR-0010。
 ///
@@ -25,6 +29,11 @@ use zeroize::{Zeroize, Zeroizing};
 /// ⚠️ salt = blake3(space_id) 截位——对固定 space_id（如 "default"）全局一致，
 /// 仅限测试与无状态派生。生产空间必须走 [`argon2_master_key_with_salt`] +
 /// [`crate::crypto::random_kdf_salt`] 生成的持久随机盐（SEC-AUDIT P2-3）。
+///
+/// `#[cfg(test)]`（SEC-AI-AUDIT-M7-WP02-M2D1 F-1 处置）：确定性盐路径
+/// 收窄出 release 构建面——编译期杜绝误用绕过随机盐防线；生产零调用
+/// 已由复核 grep 证实（仅 wp07 集成测试，已同步迁移 with_salt）。
+#[cfg(test)]
 pub fn argon2_master_key(mnemonic: &str, space_id: &str) -> Zeroizing<[u8; 32]> {
     let params = Params::new(64 * 1024, 3, 1, Some(32)).expect("固定参数合法");
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
