@@ -1,6 +1,8 @@
 # ADR-0023: EvalRunner 接入 hybrid_no_rerank——BM25 + 向量 RRF 融合
 
-版本: 0.1 · 状态: **草稿（2026-09-27 起草）** · 关联: M6-D67 §D7
+版本: 0.2 · 状态: **接受**（2026-10-01 状态头补登记 [M8-D1-T01]：决策自
+M6-D67-T03 EvalRunner::run_hybrid_no_rerank 实装即生效，LCSTS 三档
+对比数字入仓；本修订仅回填台账，不改决策内容）· 关联: M6-D67 §D7
 （三档对比， bm25_only 已实装见 T02）、M4-WP02（混合检索框架已实装）、
 ADR-0018（fastembed 批次）、M6-D67-T02（bm25_only 真档 Recall=0.95）
 负责人: @lead · 起草日期: 2026-09-27
