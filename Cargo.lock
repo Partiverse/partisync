@@ -7565,6 +7565,7 @@ dependencies = [
  "partisync-ai",
  "partisync-core",
  "partisync-ext-host",
+ "partisync-fuse",
  "partisync-index",
  "rmcp",
  "serde",
