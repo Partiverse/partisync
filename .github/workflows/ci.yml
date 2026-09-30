@@ -76,6 +76,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # deny action 的内置镜像不含 rust-toolchain.toml 钉的 1.94.0
+      #（2026-09-30 三连失败：override toolchain not installed）——
+      # 与 nightly 同款先装 toolchain；不改变任何门禁阈值
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   # 互操作认证矩阵（SPEC M1-WP08）：rclone S3/WebDAV + 消费面 + 跨协议。
