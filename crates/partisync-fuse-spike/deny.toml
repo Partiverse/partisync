@@ -1,0 +1,76 @@
+# cargo-deny 配置（执行方案 §5.1 依赖治理）。
+# 许可证白名单：与调研方案 §6 选型兼容；新增条目需 ADR。
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception", # ADR-0024 amend（Tauri 传递链 target-lexicon → cfg-expr → system-deps； GTK 链纯 Rust 间接依赖）
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD", # ADR-0011：varint-rs（fjall 传递依赖）
+    "BSL-1.0", # ADR-0011：xxhash-rust（fjall 传递依赖）
+    "CDLA-Permissive-2.0", # ADR-0012：webpki-root-certs（rustls-platform-verifier 链）
+    "Unlicense", # ADR-0016：async_io_stream/pharos/ws_stream_wasm（iroh-blobs wasm 链）
+    "MPL-2.0", # ADR-0016：attohttpc（iroh-blobs 链，文件级 copyleft）
+    "NCSA", # ADR-0017：libfuzzer-sys（image→ravif→rav1e AVIF 路径；OSI/FSF 认可，BSD-3 同族）
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+version = 2
+yanked = "deny"
+# ADR-0014（2026-09-21 附注）：reed-solomon-erasure v6 锁 parking_lot v0.11 → instant v0.1.13
+# unmaintained，无已知漏洞；等上游升 parking_lot ≥ 0.12 后撤销本豁免。
+# ADR-0016（2026-09-21）：iroh/iroh-blobs 传递链 unmaintained 三条——
+# atomic-polyfill(heapless→postcard)、paste(netdev→iroh)、proc-macro-error(genawaiter→bao-tree)；
+# 均无已知漏洞、无安全升级路径，上游切换后撤销。
+# ADR-0021（2026-09-25）：aws-smithy-http-client 1.4.2 双栈 HTTP 客户端拉
+# hyper 0.14 → h2 0.3.27、rustls 0.21 → webpki 0.101.7 旧 major 线四条公告
+# （RUSTSEC-2026-0258 h2 空 DATA 帧[官方 Low]、0098/0099 webpki 名约束、
+# 0104 webpki CRL panic）。可达性论证：本仓库经 AWS SDK 仅作出站客户端
+# （SQS ReceiveMessage/Delete），h2 空帧排队是对端接收行为不可达；webpki
+# 校验对象限 AWS 信任根端点（无恶意 CA 名约束/CRL 输入面）。无修复版本
+# （0.3/0.101 线 EOL）；撤销条件 = aws-smithy-http-client 弃用 hyper 0.14
+# 双栈或发布修复传递版。
+# ADR-0020（2026-09-22）：RUSTSEC-2023-0071 rsa Marvin Attack（PKCS#1 v1.5 解密
+# 时序侧信道，私钥运算）——本仓库经 c2pa 仅做签名**验证**（公钥运算），不可达；
+# 上游 RustCrypto #626 立场：无修复版本。撤销条件 = rsa 发布修复版或 c2pa 弃用 rsa。
+# ADR-0024 amend（2026-09-27）：RUSTSEC-2026-0253 lru `LruCache::pop()` UAF——
+# 两条传递链（lru 0.7.8 → reed-solomon-erasure 6.0.0 → partisync-cas； lru 0.16.4 →
+# tantivy 0.26.2 → partisync-index）。可达性论证：触发需复合失败（pop 期间 panic
+# + 引用生命周期重叠），本仓库 cas 修复路径走 error 返回非 panic， tantivy 只读
+# 查询路径不暴露 panic 输入面。撤销条件 = tantivy ≥ 0.27 或 reed-solomon-erasure
+# ≥ v7（携带 lru 0.18.2+）任一发布。
+ignore = [
+    "RUSTSEC-2024-0384", # ADR-0014
+    "RUSTSEC-2023-0089", # ADR-0016
+    "RUSTSEC-2024-0436", # ADR-0016
+    "RUSTSEC-2024-0370", # ADR-0016
+    "RUSTSEC-2023-0071", # ADR-0020
+    "RUSTSEC-2026-0253", # ADR-0024 amend（lru pop() UAF； 复合失败路径， tantivy/reed-solomon-erasure 跟进后撤销）
+    "RUSTSEC-2026-0258", # ADR-0021（h2 0.3 双栈，见上注）
+    "RUSTSEC-2026-0098", # ADR-0021（webpki 0.101 双栈）
+    "RUSTSEC-2026-0099", # ADR-0021（webpki 0.101 双栈）
+    "RUSTSEC-2026-0104", # ADR-0021（webpki 0.101 双栈）
+    # ADR-0025 修订 6（2026-09-29，wasmtime 47.0.4 两条新公告，patch 线内
+    # 无修复——修复版需 ≥48.0.3，而 48.x 须先升 rust-toolchain，属独立治理
+    # 决策）。两条均以 fuel 为前提，本仓库宿主 Config::default() + 磁盘
+    # cache，**未启用** consume_fuel / exception handling / async：
+    # 0315（call_ref + catch 丢 fuel 记账 → 指数级 fuel amplification）与
+    # 0316（dynamic record lifting 超 fuel limit 分配）皆不可达；宿主 WIT
+    # 面（partisync:ext/clock、partisync:ext/index）不含 resource/record
+    # 声明。撤销条件见 ADR-0025「重新评估条件触发记录」四条。
+    "RUSTSEC-2026-0315", # ADR-0025 修订 6（wasmtime 47.0.4；fuel 未启用）
+    "RUSTSEC-2026-0316", # ADR-0025 修订 6（wasmtime 47.0.4；无 resource/record）
+]

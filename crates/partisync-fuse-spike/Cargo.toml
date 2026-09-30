@@ -1,0 +1,24 @@
+[workspace]
+# 独立评估 workspace（SPEC M7-WP03 §2：不入产品依赖图——沿
+# partisync-wasm-spike 判例，自带 Cargo.lock 与 deny.toml）
+
+[package]
+name = "partisync-fuse-spike"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "partisync_fuse_spike"
+path = "src/lib.rs"
+
+[[bin]]
+name = "partifuse-spike"
+path = "src/main.rs"
+
+[dependencies]
+# macos-no-mount：本机（无 macFUSE/FUSE-T）编译验证用——Linux 上 build.rs
+# 先命中 pure-rust 分支不受影响（fuser 0.18 build.rs 实证）；真挂载实测
+# 走 Linux 容器（SPEC M7-WP03 R1 路径②）
+fuser = { version = "0.18.0", features = ["macos-no-mount"] }
