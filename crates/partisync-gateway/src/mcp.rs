@@ -301,6 +301,11 @@ pub struct McpServerState {
 
 impl McpServerState {
     /// 创建并初始化状态（`graph_db_path` 默认 `~/.partisync/graph.db`）。
+    ///
+    /// 首启即用契约（M7-WP01-T04 热修，此前首启必败 sqlite code 14）：
+    /// db 文件缺失时 `mode=rwc` 自动建库、父目录缺失时逐级创建——
+    /// sqlite 本身两者都不会做（无父目录 / 只读打开语义），而
+    /// 桌面壳侧车与 CLI 的默认路径在首次运行前都不存在。
     pub async fn new(graph_db_path: Option<PathBuf>) -> Result<Self, sqlx::Error> {
         let graph_db_path = graph_db_path.unwrap_or_else(|| {
             dirs::data_local_dir()
@@ -308,9 +313,12 @@ impl McpServerState {
                 .join(".partisync")
                 .join("graph.db")
         });
+        if let Some(parent) = graph_db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
-            .connect(&format!("sqlite:{}", graph_db_path.display()))
+            .connect(&format!("sqlite:{}?mode=rwc", graph_db_path.display()))
             .await?;
         Ok(Self::from_pool(pool))
     }
@@ -1424,6 +1432,27 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// M7-WP01-T04 热修回归：首启即用——db 文件与父目录均缺失时
+    /// [`McpServerState::new`] 应建库成功（此前 `sqlite:{path}` 无
+    /// mode=rwc 也不建目录，首启必败 sqlite code 14，桌面壳侧车与
+    /// CLI 默认路径首次运行即触发）。
+    #[tokio::test]
+    async fn new_creates_missing_db_and_parent_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("nested/deeper/graph.db");
+        let state = McpServerState::new(Some(db.clone()))
+            .await
+            .expect("首启路径应自动建库");
+        assert!(db.is_file(), "db 文件应已创建: {}", db.display());
+        // 连接真实可用（非仅文件落盘）
+        let one: i64 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(state.graph_pool())
+            .await
+            .expect("建库后应可执行查询");
+        assert_eq!(one, 1);
+        state.graph_pool().close().await;
     }
 
     #[tokio::test]
