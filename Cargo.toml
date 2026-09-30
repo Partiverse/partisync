@@ -15,6 +15,7 @@ members = [
     "crates/partisync-cli",
     "crates/partisync-desktop", # ADR-0024（M6-WP03 桌面壳骨架）
     "crates/partisync-ext-host", # ADR-0025（M7-WP01 WASM 扩展宿主）
+    "crates/partisync-fuse",     # ADR-0026（M8-WP01 FUSE 挂载面一期）
     "xtask",
 ]
 
@@ -73,6 +74,12 @@ tauri-build = "=2.7.0" # 与 tauri 2.12.0 配对（crates.io 实测， 2026-09-2
 wasmtime = { version = ">=47.0.4, <48", default-features = false, features = [
     "cranelift", "component-model", "runtime", "wat", "demangle", "cache",
 ] }
+# ADR-0026（M8-WP01 FUSE 挂载面一期）：线位按 ADR-0026 决策节（0.18 为
+# 当前 max_stable，T01 查证）；macos-no-mount 供无 macFUSE/FUSE-T 环境编译
+# 验证（Linux 上 build.rs 先命中 pure-rust 分支不受影响，spike 实证）。
+# 安全政策：workspace forbid unsafe——fuser 0.18 内部 unsafe 与本仓无关
+# （依赖边界），本 crate 自身零 unsafe。
+fuser = { version = ">=0.18.0, <0.19", features = ["macos-no-mount"] }
 
 [workspace.lints.rust]
 # 安全政策（执行方案 §5.2）：默认全局禁止 unsafe；确需 unsafe 的 crate 必须在
