@@ -5,6 +5,10 @@
 //
 // 错误形状： IPC 返回 `{kind: string, msg: string}`（见 error.rs）
 // → 捕获 invoke 抛错， 按 kind 分支处理（toast / 降级 / 重试）。
+//
+// 文件名 app-core.js（原 app-main.js）：WKWebView 对 tauri:// 资源的
+// 缓存不因内容更新失效，`?v=` 查询参数也无法击穿（#39 实测）——
+// 前端修复一律伴随文件改名（#39 判例：app.js → app-main.js → app-core.js）。
 
 // Tauri 全局注入（tauri.conf.json app.withGlobalTauri = true）。
 // 显式守卫：未注入时给出可读提示而非整页 JS 静默失效（此前
@@ -77,7 +81,12 @@ async function loadStats() {
       <div class="hint">${cas.refs} 个块引用 / ${cas.chunks} 个唯一块（CDC 1MiB）</div></div>`;
 }
 
-/** 由路径派生面包屑（替代 CLI 版 /api/breadcrumb 端点）。 */
+/** 由路径派生面包屑（替代 CLI 版 /api/breadcrumb 端点）。
+ *
+ * 返回完整链（含「根」）；末段由 browse() 渲染为加粗当前位置。
+ * M7-WP01-T04 热修修注：此前 #38 的 slice(1) 误删首段「根」链接
+ * （非根目录丢回根入口），且根目录 early return 不受 slice 影响
+ * 仍「根 › 根」重复——改为渲染端末段加粗，链本身不再裁剪。 */
 function breadcrumbFor(path) {
   if (path === "/") return [{ name: "根", path: "/" }];
   const parts = path.split("/").filter(Boolean);
@@ -87,17 +96,20 @@ function breadcrumbFor(path) {
     acc += "/" + p;
     out.push({ name: p, path: acc });
   }
-  return out.slice(1); // 尾段由 browse() 加粗显示，避免「根 › 根」重复
+  return out;
 }
 
 async function browse(path) {
   curPath = path || "/";
   const rows = await call("list", { prefix: curPath });
   const crumbs = breadcrumbFor(curPath);
-  $("crumbs").innerHTML = crumbs.map(e =>
-    `<a href="#" data-path="${e.path}">${e.name}</a>`
-  ).join(`<span class="sep">›</span>`) +
-    `<span class="sep">›</span><b>${curPath === "/" ? "根" : curPath.split("/").pop()}</b>`;
+  // 末段=当前位置加粗（非链接）；其余段为可点链接——去掉此前追加的
+  // 加粗尾段（与 crumbs 末段重复，「根 › 根」/「x › x」的根因）
+  $("crumbs").innerHTML = crumbs.map((e, i) =>
+    i === crumbs.length - 1
+      ? `<b>${e.name}</b>`
+      : `<a href="#" data-path="${e.path}">${e.name}</a>`
+  ).join(`<span class="sep">›</span>`);
   // CSP（script-src 'self'）禁 inline onclick 属性——交互一律 JS 绑定
   $("crumbs").querySelectorAll("a[data-path]").forEach(a => {
     a.onclick = () => browse(a.dataset.path);

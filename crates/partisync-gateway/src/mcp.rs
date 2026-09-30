@@ -1345,7 +1345,10 @@ pub async fn run_mcp_server(
     let index_reader = state.index_engine.read().await.clone();
     match crate::ext::load_registry(&ext_dir, index_reader) {
         Ok((registry, scanned_dir)) if !registry.is_empty() => {
-            println!(
+            // 必须走 stderr：stdout 是 MCP stdio JSON-RPC 协议通道，
+            // 非 JSON 行混入依赖客户端 reader 容错（M7-WP01-T05 报告
+            // §5 登记）；规范化到 stderr 消除该耦合。
+            eprintln!(
                 "partisync-mcp: loaded {} extension tool(s) from {}",
                 registry.len(),
                 scanned_dir.display()
