@@ -15,6 +15,9 @@ partisync-core = { path = "../partisync-core", version = "0.1.0" }
 # M7-WP01-T04（扩展系统接线）：ExtRegistry/ExtTool 高层封装 + IndexRead
 # trait。path-only（ADR-0024 修订 5 判例）；wasmtime 依赖不出 ext-host 边界。
 partisync-ext-host = { path = "../partisync-ext-host", version = "0.1.0" }
+# M8-WP01-T02（FUSE 挂载面组装）：挂载 bin。path-only（同上判例）；
+# fuser 依赖不出 partisync-fuse 边界（ADR-0026）。
+partisync-fuse = { path = "../partisync-fuse", version = "0.1.0" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

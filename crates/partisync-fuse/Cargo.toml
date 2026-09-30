@@ -5,6 +5,14 @@ edition = "2021"
 license = "Apache-2.0"
 description = "FUSE 挂载面（ADR-0026）：mountpoint-s3 式「诚实非 POSIX」语义——只读 + 新文件顺序写"
 
+[lib]
+name = "partisync_fuse"
+path = "src/lib.rs"
+
+[[bin]]
+name = "partifuse"
+path = "src/main.rs"
+
 [dependencies]
 fuser = { workspace = true }
 

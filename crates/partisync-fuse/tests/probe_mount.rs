@@ -87,7 +87,11 @@ fn probe_mount_lifecycle_and_semantics() {
 
     // ── ③ 拒绝面逐项 errno（P15 全量：spike 4 项 + 补齐 3 项）──
     expect_errno(fs::remove_file(mp.join("a.txt")), EPERM, "unlink");
-    expect_errno(fs::rename(mp.join("a.txt"), mp.join("b.txt")), EPERM, "rename");
+    expect_errno(
+        fs::rename(mp.join("a.txt"), mp.join("b.txt")),
+        EPERM,
+        "rename",
+    );
     expect_errno(fs::create_dir(mp.join("d")), EPERM, "mkdir");
     // 后备侧预置目录（挂载面透传可见）——rmdir 真实目录路径，
     // 保证调用到达 FUSE rmdir handler（EPERM 在 handler 层，P15）
