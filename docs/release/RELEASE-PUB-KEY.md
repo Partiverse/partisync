@@ -19,12 +19,15 @@ minisign -Vm SHA256SUMS -p partisync.pub
 sha256sum -c SHA256SUMS      # 双保险：清单校验
 ```
 
-## 公钥（待生成仪式后填入）
+## 公钥
 
 ```
-untrusted comment: PartiSync release public key
-（minisign -G 产出公钥一行，生成仪式后由双人核对指纹入此处）
+untrusted comment: minisign public key EBC32789A716D70A
+RWQK1xaniSfD6+Wn9Qp+/A+WIUQ4P/tUoIrtuQawXZozUeu/BjIst0IU
 ```
+
+指纹：`EBC32789A716D70A`（生成仪式 2026-10-01；保管流程见
+`docs/release/key-custody.md`）。
 
 ## 撤销公告
 
