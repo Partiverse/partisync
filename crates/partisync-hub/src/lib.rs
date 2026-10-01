@@ -6,6 +6,7 @@
 //! fjall 存储适配器）；基准报告归 T06/T07。
 
 pub mod acl;
+pub mod audit;
 pub mod encode;
 pub mod entry_plane;
 pub mod federation;

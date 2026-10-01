@@ -20,6 +20,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::runtime::Runtime;
@@ -186,6 +187,7 @@ pub struct HubStateMachine {
     tree: TreePlane,
     shadow: fjall::Keyspace,
     dedup: fjall::Keyspace,
+    audit: Arc<crate::audit::AuditSink>,
 }
 
 impl HubStateMachine {
@@ -197,6 +199,7 @@ impl HubStateMachine {
         db: fjall::Database,
         inner: RaftStateMachineStore,
         split_threshold: u64,
+        audit: Arc<crate::audit::AuditSink>,
     ) -> Result<Self, HubError> {
         Ok(Self {
             inner,
@@ -208,7 +211,20 @@ impl HubStateMachine {
             dedup: db
                 .keyspace(KS_DEDUP, fjall::KeyspaceCreateOptions::default)
                 .map_err(HubError::Fjall)?,
+            audit,
         })
+    }
+
+    /// 审计记录辅助：由命令导出 (action, object)。
+    fn cmd_audit_target(cmd: &HubCmd) -> (String, String) {
+        fn hex_id(id: &[u8; 16]) -> String {
+            id.iter().map(|b| format!("{b:02x}")).collect()
+        }
+        match cmd {
+            HubCmd::Put(row) => ("put".to_owned(), hex_id(&row.entry_id)),
+            HubCmd::Remove(id) => ("remove".to_owned(), hex_id(id)),
+            HubCmd::Rename(id, _, name) => ("rename".to_owned(), format!("{}:{name}", hex_id(id))),
+        }
     }
 
     /// 业务命令 apply 内核（与直连 Hub 同函数；返回响应标志位字节）。
@@ -276,7 +292,7 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for HubStateMachine {
                     {
                         Some(stored) => *stored.first().unwrap_or(&0x00),
                         None => {
-                            let byte = match self.apply_cmd(inner) {
+                            let byte = match self.apply_cmd(inner.clone()) {
                                 Ok(()) => 0x00u8,
                                 Err(HubError::EntryMissing) => 0x01u8,
                                 Err(e) => return Err(business_error(e)),
@@ -284,15 +300,24 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for HubStateMachine {
                             self.dedup
                                 .insert(req_id, [byte])
                                 .map_err(|e| business_error_msg(format!("dedup write: {e}")))?;
+                            let (action, object) = Self::cmd_audit_target(&inner);
+                            let result = if byte == 0 { "ok" } else { "entry_missing" };
+                            self.audit.record(&action, &object, result);
                             byte
                         }
                     };
                     responses[i] = crate::HubResponse(vec![resp_byte]);
                 } else if let Ok(cmd) = decode_cmd(&d.0) {
-                    match self.apply_cmd(cmd) {
-                        Ok(()) => responses[i] = crate::HubResponse(vec![0x00]),
+                    let (action, object) = Self::cmd_audit_target(&cmd);
+                    let outcome = self.apply_cmd(cmd.clone());
+                    match outcome {
+                        Ok(()) => {
+                            responses[i] = crate::HubResponse(vec![0x00]);
+                            self.audit.record(&action, &object, "ok");
+                        }
                         Err(HubError::EntryMissing) => {
                             responses[i] = crate::HubResponse(vec![0x01]);
+                            self.audit.record(&action, &object, "entry_missing");
                         }
                         Err(e) => return Err(business_error(e)),
                     }
@@ -306,6 +331,8 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for HubStateMachine {
                             .map_err(|e| business_error_msg(format!("shadow write: {e}")))?;
                     }
                     responses[i] = crate::HubResponse(vec![0x00]);
+                    self.audit
+                        .record("shadow_upsert", &cmd.rows.len().to_string(), "ok");
                 } else {
                     return Err(business_error_msg(format!(
                         "unrecognized payload at index {i}"
@@ -521,6 +548,7 @@ pub struct HubService {
     registry: RegistryService,
     shadow: fjall::Keyspace,
     identity: NodeIdentity,
+    audit: Arc<crate::audit::AuditSink>,
 }
 
 /// 节点身份与组拓扑（M8-WP04-T02，RFC M3-WP02 §8-1 承接）。
@@ -623,7 +651,7 @@ impl HubService {
     pub fn open_with_config(cfg: HubServiceConfig) -> Result<Self, ReplicaError> {
         let rt = Runtime::new().map_err(|e| ReplicaError::Io(std::io::Error::other(e)))?;
         let identity = cfg.identity.clone().unwrap_or_default();
-        let (replica, hub, registry, shadow) = rt.block_on(open_async(&cfg, &identity))?;
+        let (replica, hub, registry, shadow, audit) = rt.block_on(open_async(&cfg, &identity))?;
         Ok(Self {
             rt,
             replica,
@@ -631,6 +659,7 @@ impl HubService {
             registry,
             shadow,
             identity,
+            audit,
         })
     }
 
@@ -828,6 +857,33 @@ impl HubService {
         self.hub.persist().map_err(into_replica)
     }
 
+    /// 等待审计 sink 刷净（produced == persisted）。超时返回 false。
+    #[must_use]
+    pub fn audit_flush(&self, timeout: std::time::Duration) -> bool {
+        self.audit.flush(timeout)
+    }
+
+    /// 审计链校验：返回 (行数, 链尾 hash)。
+    ///
+    /// # Errors
+    /// 链被篡改或引擎读取失败。
+    pub fn audit_verify(&self) -> Result<(u64, String), ReplicaError> {
+        crate::audit::verify(self.replica.database())
+            .map_err(|e| ReplicaError::Io(std::io::Error::other(e)))
+    }
+
+    /// 导出 audit-ready JSONL（先链校验）。
+    ///
+    /// # Errors
+    /// 链被篡改、引擎读取或文件写入失败。
+    pub fn audit_export(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<crate::audit::AuditExportInfo, ReplicaError> {
+        crate::audit::export(self.replica.database(), path)
+            .map_err(|e| ReplicaError::Io(std::io::Error::other(e)))
+    }
+
     /// 幂等提交（M8-WP04-T03a，RFC M3-WP02 §3.1 承接）：同 `req_id`
     /// 重放返回**首次响应**、不重放业务效果。去重表（`r-dedup`）随
     /// apply 落盘，崩溃恢复后语义保持；响应字节 `0x00`=已应用、
@@ -965,7 +1021,16 @@ impl HubService {
 async fn open_async(
     cfg: &HubServiceConfig,
     identity: &NodeIdentity,
-) -> Result<(Replica, Hub, RegistryService, fjall::Keyspace), ReplicaError> {
+) -> Result<
+    (
+        Replica,
+        Hub,
+        RegistryService,
+        fjall::Keyspace,
+        Arc<crate::audit::AuditSink>,
+    ),
+    ReplicaError,
+> {
     if !identity.members.contains_key(&identity.node_id) {
         return Err(ReplicaError::Init(format!(
             "identity members must contain self node_id {} (members: {:?})",
@@ -1008,7 +1073,9 @@ async fn open_async(
     .await
     .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
     let (_, sm_generic) = crate::open_raft_stores(&db, 1)?;
-    let sm = HubStateMachine::attach(db.clone(), sm_generic, cfg.split_threshold)
+    let audit = crate::audit::AuditSink::new(&db, format!("hub-{}", identity.node_id))
+        .map_err(|e| into_replica(HubError::Fjall(e)))?;
+    let sm = HubStateMachine::attach(db.clone(), sm_generic, cfg.split_threshold, audit.clone())
         .map_err(into_replica)?;
     let node = NodeConfig {
         node_id: identity.node_id,
@@ -1027,7 +1094,7 @@ async fn open_async(
         .database()
         .keyspace(KS_SHADOW, fjall::KeyspaceCreateOptions::default)
         .map_err(|e| into_replica(HubError::Fjall(e)))?;
-    Ok((replica, hub, registry, shadow))
+    Ok((replica, hub, registry, shadow, audit))
 }
 
 impl HubService {
