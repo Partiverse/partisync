@@ -84,8 +84,29 @@ jobs:
         run: |
           cd dist
           find . -type f \( -name "*.tar.gz" -o -name "*.dmg" \) -exec sha256sum {} \; | sed 's| \./| |' > SHA256SUMS
-      # 签名步：ADR-0027 批准 + 首个密钥生成仪式（key-custody.md）后启用。
-      # 启用时在此处安装 minisign 并对每个产物 + SHA256SUMS 出 .minisig。
+      # 签名步（M8-WP02-T02，ADR-0027 已接受 + 生成仪式 2026-10-01 完成）：
+      # 依赖 GitHub secrets RELEASE_SIGNING_KEY（口令加密私钥）与
+      # RELEASE_SIGNING_PASSWORD（口令，见 key-custody.md「CI 签名口径」节）。
+      # secret 未配置时跳过签名——Release 显式标注 unsigned（不假绿）。
+      - name: install minisign
+        if: env.RELEASE_SIGNING_KEY != ''
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: brew install minisign
+      - name: sign artifacts
+        if: env.RELEASE_SIGNING_KEY != ''
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_PASSWORD: ${{ secrets.RELEASE_SIGNING_PASSWORD }}
+        run: |
+          cd dist
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > /tmp/release.key
+          trap 'rm -f /tmp/release.key' EXIT
+          for f in *.tar.gz *.dmg SHA256SUMS; do
+            [ -e "$f" ] || continue
+            minisign -Sm "$f" -s /tmp/release.key \
+              -t "PartiSync release ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          done
       - name: draft release
         uses: softprops/action-gh-release@v2
         with:
@@ -95,3 +116,4 @@ jobs:
             dist/**/*.tar.gz
             dist/**/*.dmg
             dist/SHA256SUMS
+            dist/**/*.minisig
