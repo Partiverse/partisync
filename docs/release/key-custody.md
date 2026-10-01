@@ -34,8 +34,12 @@
   口令两半线下分持**不变**（CI 口令仅供自动签名，泄漏即触发轮换）；
 - workflow 签名步为**条件执行**：secret 未配置时跳过签名，Release 草稿
   显式标注 unsigned（不假绿）；
-- 若企业需求要求口令完全离线：切换 CI 专用无口令子密钥（`minisign -G -W`，
-  公钥双签）——属密钥面变更，届时走本文件修订登记。
+- **修订（2026-10-01，触发落地）**：实测 C 版 minisign 0.12 无密码环境
+  变量（`get_password()` 强制 tty，CI 不可交互）→ 切换 **CI 专用无口令
+  子钥**（`minisign -G -W`，指纹 `E056CBB62BF3EF34`，secret
+  `RELEASE_SIGNING_CI_KEY`）；主钥离线双人保管不变（口令分持、应急签名
+  口径不变）；公钥双签入 RELEASE-PUB-KEY.md。子钥泄漏即删 secret +
+  双公钥表移除该行 + Release 公告。
 
 ## 日常原则
 
