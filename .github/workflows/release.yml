@@ -26,16 +26,18 @@ jobs:
           cargo install --locked cargo-auditable
           cargo auditable build --locked --release -p partisync-cli -p partisync-hub
       - name: package
+        # hub 产物 = hub-demo-web（hub crate 无主 bin——v0.1.0-alpha 口径，
+        # 正式 hub 服务 bin 归后续任务；release-report 登记）
         run: |
           mkdir -p dist
-          for bin in partisync-cli partisync-hub; do
+          for bin in partisync-cli hub-demo-web; do
             cp target/release/$bin dist/
           done
-          tar -czf dist/partisync-cli-linux-x86_64.tar.gz -C dist partisync-cli partisync-hub
+          tar -czf dist/partisync-linux-x86_64.tar.gz -C dist partisync-cli hub-demo-web
       - uses: actions/upload-artifact@v4
         with:
           name: cli-linux
-          path: dist/partisync-cli-linux-x86_64.tar.gz
+          path: dist/partisync-linux-x86_64.tar.gz
 
   build-cli-macos:
     runs-on: macos-latest
@@ -66,9 +68,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - name: build dmg
+        # tauri-cli 不接受 --locked（Cargo.lock 已入库，依赖由 lock 钉住）
         run: |
           cargo install tauri-cli --locked
-          cargo tauri build --locked --target aarch64-apple-darwin
+          cargo tauri build --target aarch64-apple-darwin
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-macos
