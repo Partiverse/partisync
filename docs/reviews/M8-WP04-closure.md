@@ -47,10 +47,32 @@ m5_wp02/m5_wp06（仅 `HubService::open` 路由/registry 用途）。
 - 冻结承诺：T02（NodeConfig 构造）与 T03（apply 业务化/幂等/ReadIndex）
   合入时本基线**零红灯**；`Hub::open` 单节点降级路径行为契约不变。
 
-## 2. RFC §8 移交项核销表（T03 回填，待实施）
+## 2. RFC §8 移交项核销表（T03 滚动回填；基准对照见 §3）
 
-（占位——五项逐项核销 + 证据链接随 T03 交付回填。）
+### 2.1 五项移交项（RFC §8）
 
-## 3. 基准对照（T03 回填，待实施）
+| # | 移交项 | 状态 | 证据 |
+|---|---|---|---|
+| 1 | `Hub::open` 节点身份/组拓扑参数 | ✅ **T02** | `HubServiceConfig.identity: Option<NodeIdentity>`（None=单节点降级逐字等价）+ `m-meta` 身份核对（PR #67，R2 签收 `a633b32`）；探针 wp04_identity 4 测试 |
+| 2 | follower 线性一致读（RFC F1） | ⚠️ **部分** | `ensure_linearizable`（ReadIndex）单节点组形态已在 M3-WP03 交付且 P17 并发探针绿（PR #69）；**多节点 follower 路径** = 多节点复制接线（M3 相位）随 T03 后续演化 |
+| 3 | 分裂×复制 M3-M6 + 组注册表持久化 m-meta | ✅ **T02/T03c** | m-meta 随 T02 落地；M4/M5/M6 探针绿（wp04_crash_matrix 3 测试，PR 本 PR）；M1/M2 raft 形态 = wp03 t07（`PT_META_COMMITTED` failpoint）；M3 维持规格态（见 2.2） |
+| 4 | 请求 id 幂等去重（§3.1） | ✅ **T03a** | `CMD_DEDUP` 信封 + `r-dedup` 随 apply 落盘（PR #68，`4d3a70d`）；4 探针 + M5 收敛探针复用 |
+| 5 | 业务平面经 raft apply 接线 | ✅（M3-WP03 既有 + T03 增量） | `HubStateMachine` apply 同内核（M3-WP03 T02）；T03 增量 = 幂等信封（T03a）+ P17 双面（T03b）+ 矩阵探针（T03c） |
+
+顺带清偿：F-2 endpoint_secret 合流与 ADR-0015 三待确认项回填——**未在本轮**
+（设备通道认证握手消费属 iroh 通道面，T03 多节点演化期随行），维持登记。
+
+### 2.2 崩溃矩阵逐行核销（RFC §6）
+
+| 相位 | 注入点 | 不变量 | 状态 | 证据 |
+|---|---|---|---|---|
+| M1 | `PT_META_COMMITTED` 后 kill | 新分区行 splitting 恢复方向确定；键集不变 | ✅ raft 形态 | wp03 `t07_m3_kill_during_split_meta_commit_recover` |
+| M2 | 收尾批提交后 kill | 键归属新分区；open 幂等收尾 + recount | ✅ raft 形态 | wp03 t07 系列（5 failpoint 测，wp01 直连 + wp03 raft 镜像） |
+| M3 | 复制中 kill leader | follower 不触发分裂；log 无半态 | ⏸ **规格态维持** | 需多节点组拓扑（v0.1 不可执行）；触发条件 = 多节点复制接线（group_id→store 绑定随行） |
+| M4 | 新组 bootstrap 中 kill | bootstrap 幂等重试；源组 ACK 不回退 | ✅ **T03c** | wp04_crash_matrix `m4_bootstrap_retry_cycles_converge`（两轮 kill/reopen 循环 + 键集 + 身份） |
+| M5 | 控制面写新组初始数据中 kill | 数据按序入日志；重复写入收敛（系统层去重 T03a） | ✅ **T03c** | `m5_initial_data_resume_converges`（断点续写全量重放 + 换载荷抑制 + 键集完整） |
+| M6 | 合并视图中 kill leader | 合并视图 = 源∪目标键集无重键；注册表持久 | ✅ **T03c** | `m6_merged_view_registry_persistence`（路由视图稳定 + m-meta 身份 + 单行无重键） |
+
+## 3. 基准对照（T03d 回填，待实施）
 
 （占位——RouteQuery P99 / apply 吞吐对 M5-WP02/04 口径。）
