@@ -14,6 +14,7 @@ pub mod iroh_channel;
 pub mod iroh_keyspace;
 pub mod ksconv;
 pub mod net;
+pub mod quota;
 pub mod raft_store;
 pub mod registry;
 pub mod replica;
