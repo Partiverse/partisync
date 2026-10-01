@@ -97,7 +97,8 @@ jobs:
         if: env.RELEASE_SIGNING_KEY != ''
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-        run: cargo install minisign --locked
+        # crates.io 的 minisign crate 是纯库（v0.10 无 binaries）——CLI 从官方仓库装
+        run: cargo install --git https://github.com/jedisct1/minisign.git --tag v0.11.0 minisign
       - name: sign artifacts
         if: env.RELEASE_SIGNING_KEY != ''
         env:
