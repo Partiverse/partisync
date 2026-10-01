@@ -75,3 +75,7 @@ sha256sum -c SHA256SUMS                     # 逐产物校验
 - 执行: GLM-5.3-Flash（ZCode，M8-WP02-T02/T03）· 门禁: 每 PR CI 8/8 绿
 - Release publish（对外可见）待用户终审后手动执行（draft 状态）
 - 复现构建验证、SBOM 导出、公证触发条件见 §4
+- **用户终审签收（2026-10-02）**：changelog 终审通过，v0.1.0-alpha 已
+  publish（draft=false，publishedAt 2026-10-01T16:40:49Z，
+  github.com/Partiverse/partisync/releases/tag/v0.1.0-alpha）——
+  **首个对外签名可分发版本正式生效**，G4 第 4 项闭环
