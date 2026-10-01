@@ -144,6 +144,40 @@ pub struct ShadowUpsert {
     pub rows: Vec<ShadowRow>,
 }
 
+/// 幂等信封 tag（M8-WP04-T03a，RFC M3-WP02 §3.1 承接）。
+const CMD_DEDUP: u8 = 0x10;
+/// 幂等去重 keyspace（`req_id → 首次响应字节`；随 apply 落盘）。
+const KS_DEDUP: &str = "r-dedup";
+
+/// 编码幂等信封：`[CMD_DEDUP][16B req_id][inner]`（[`encode_cmd`] 逆变换见
+/// [`decode_dedup_cmd`]）。
+///
+/// # Errors
+/// 内层命令编码失败。
+pub fn encode_dedup_cmd(req_id: &[u8; 16], cmd: &HubCmd) -> Result<Vec<u8>, HubError> {
+    let inner = encode_cmd(cmd)?;
+    let mut v = Vec::with_capacity(17 + inner.len());
+    v.push(CMD_DEDUP);
+    v.extend_from_slice(req_id);
+    v.extend_from_slice(&inner);
+    Ok(v)
+}
+
+/// 解码幂等信封（[`encode_dedup_cmd`] 逆变换）。
+///
+/// # Errors
+/// 信封格式或内层命令解码失败。
+pub fn decode_dedup_cmd(buf: &[u8]) -> Result<([u8; 16], HubCmd), HubError> {
+    let short = || HubError::Encode(crate::EncodeError::UnexpectedEof);
+    if buf.len() < 17 || buf[0] != CMD_DEDUP {
+        return Err(short());
+    }
+    let mut req_id = [0u8; 16];
+    req_id.copy_from_slice(&buf[1..17]);
+    let cmd = decode_cmd(&buf[17..])?;
+    Ok((req_id, cmd))
+}
+
 /// Hub 业务状态机 = 通用节（applied 指针/membership，[`RaftStateMachineStore`]）
 /// + 业务节（entry/children 平面 + 对账影子节，apply 调用与直连 [`Hub`] 相同的内核）。
 pub struct HubStateMachine {
@@ -151,6 +185,7 @@ pub struct HubStateMachine {
     entry: HashPlane,
     tree: TreePlane,
     shadow: fjall::Keyspace,
+    dedup: fjall::Keyspace,
 }
 
 impl HubStateMachine {
@@ -170,7 +205,29 @@ impl HubStateMachine {
             shadow: db
                 .keyspace(KS_SHADOW, fjall::KeyspaceCreateOptions::default)
                 .map_err(HubError::Fjall)?,
+            dedup: db
+                .keyspace(KS_DEDUP, fjall::KeyspaceCreateOptions::default)
+                .map_err(HubError::Fjall)?,
         })
+    }
+
+    /// 业务命令 apply 内核（与直连 Hub 同函数；返回响应标志位字节）。
+    fn apply_cmd(&mut self, cmd: HubCmd) -> Result<(), HubError> {
+        match cmd {
+            HubCmd::Put(row) => put_entry_impl(&self.entry, &self.tree, &row),
+            HubCmd::Remove(id) => {
+                let prior = self.entry.get(&id)?;
+                remove_entry_impl(&self.entry, &self.tree, &id, prior.as_ref())
+            }
+            HubCmd::Rename(id, parent, name) => {
+                match self.entry.get(&id)? {
+                    Some(row) if !row.is_deleted() => {
+                        rename_entry_impl(&self.entry, &self.tree, &row, parent, &name)
+                    }
+                    _ => Err(HubError::EntryMissing), // no-op + 标志位
+                }
+            }
+        }
     }
 }
 
@@ -204,23 +261,35 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for HubStateMachine {
         // （apply 错误在 openraft 中是 fatal——不可承载业务错误）
         for (i, e) in cloned.iter().enumerate() {
             if let openraft::EntryPayload::Normal(d) = &e.payload {
-                if let Ok(cmd) = decode_cmd(&d.0) {
-                    let outcome: Result<(), HubError> = match cmd {
-                        HubCmd::Put(row) => put_entry_impl(&self.entry, &self.tree, &row),
-                        HubCmd::Remove(id) => {
-                            let prior = self.entry.get(&id).map_err(business_error)?;
-                            remove_entry_impl(&self.entry, &self.tree, &id, prior.as_ref())
-                        }
-                        HubCmd::Rename(id, parent, name) => {
-                            match self.entry.get(&id).map_err(business_error)? {
-                                Some(row) if !row.is_deleted() => {
-                                    rename_entry_impl(&self.entry, &self.tree, &row, parent, &name)
-                                }
-                                _ => Err(HubError::EntryMissing), // no-op + 标志位
-                            }
+                // 幂等信封（T03a）：首查 r-dedup——命中回放首次响应、不重放
+                // 业务效果；未命中 apply 后落盘响应（业务操作本身幂等，
+                // 崩溃重放序确定，双写间隙自愈）。
+                if d.0.first() == Some(&CMD_DEDUP) {
+                    let (req_id, inner) = match decode_dedup_cmd(&d.0) {
+                        Ok(x) => x,
+                        Err(e) => return Err(business_error(e)),
+                    };
+                    let resp_byte: u8 = match self
+                        .dedup
+                        .get(req_id)
+                        .map_err(|e| business_error(HubError::Fjall(e)))?
+                    {
+                        Some(stored) => *stored.first().unwrap_or(&0x00),
+                        None => {
+                            let byte = match self.apply_cmd(inner) {
+                                Ok(()) => 0x00u8,
+                                Err(HubError::EntryMissing) => 0x01u8,
+                                Err(e) => return Err(business_error(e)),
+                            };
+                            self.dedup
+                                .insert(req_id, [byte])
+                                .map_err(|e| business_error_msg(format!("dedup write: {e}")))?;
+                            byte
                         }
                     };
-                    match outcome {
+                    responses[i] = crate::HubResponse(vec![resp_byte]);
+                } else if let Ok(cmd) = decode_cmd(&d.0) {
+                    match self.apply_cmd(cmd) {
                         Ok(()) => responses[i] = crate::HubResponse(vec![0x00]),
                         Err(HubError::EntryMissing) => {
                             responses[i] = crate::HubResponse(vec![0x01]);
@@ -757,6 +826,37 @@ impl HubService {
     /// 引擎刷盘失败。
     pub fn persist(&self) -> Result<(), ReplicaError> {
         self.hub.persist().map_err(into_replica)
+    }
+
+    /// 幂等提交（M8-WP04-T03a，RFC M3-WP02 §3.1 承接）：同 `req_id`
+    /// 重放返回**首次响应**、不重放业务效果。去重表（`r-dedup`）随
+    /// apply 落盘，崩溃恢复后语义保持；响应字节 `0x00`=已应用、
+    /// `0x01`=目标缺失（与普通提交同表）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub fn submit_idempotent(
+        &self,
+        req_id: [u8; 16],
+        cmd: &HubCmd,
+    ) -> Result<Vec<u8>, ReplicaError> {
+        self.rt.block_on(self.submit_idempotent_async(req_id, cmd))
+    }
+
+    /// [`Self::submit_idempotent`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn submit_idempotent_async(
+        &self,
+        req_id: [u8; 16],
+        cmd: &HubCmd,
+    ) -> Result<Vec<u8>, ReplicaError> {
+        let buf = encode_dedup_cmd(&req_id, cmd)
+            .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
+        let h = self.replica.submit(buf).await?;
+        let (_, resp) = h.ack_with_response().await?;
+        Ok(resp)
     }
 
     /// 停止 raft core（演练/测试用：进程死亡形态，无优雅交接）。
