@@ -192,6 +192,7 @@ fn p17_raft_read_monotonicity_concurrent_probe() {
                 "final read regressed: seen {observed}, got {}",
                 final_row.size
             );
+            observed = final_row.size; // 收敛判定用终读值（循环可能停在倒数第二版）
             break;
         }
         let row = svc.get_entry(&file.entry_id).expect("reader get");
