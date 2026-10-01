@@ -1,7 +1,11 @@
-# M8-WP04 收官与核销报告（滚动）
+# M8-WP04 收官与核销报告
 
 > SPEC: docs/specs/M8-WP04.md（2026-10-01 批准，PR #61）·
-> 本文件随 T01→T03 滚动回填；终版 = RFC §8 核销表 + 基准对照。
+> **WP04 关账（2026-10-01）**：T01（基线冻结，PR #65）→ T02（身份/m-meta，
+> PR #67 R2 签收 `a633b32`）→ T03a/b/c/d（幂等/P17/矩阵/基准，PR #68/#69/#70
+> + 本 PR）全交付；§2 核销表 + §3 基准已回填。延续项：多节点演化
+> （M3 相位 + follower 路径 + group_id→store 接线）与 F-2/ADR-0015
+> 顺带项维持登记。基准报告: docs/reports/bench/M8-WP04-hub-raft.md
 
 ## 1. 单节点回归基线盘点表（T01，2026-10-01）
 
@@ -73,6 +77,17 @@ m5_wp02/m5_wp06（仅 `HubService::open` 路由/registry 用途）。
 | M5 | 控制面写新组初始数据中 kill | 数据按序入日志；重复写入收敛（系统层去重 T03a） | ✅ **T03c** | `m5_initial_data_resume_converges`（断点续写全量重放 + 换载荷抑制 + 键集完整） |
 | M6 | 合并视图中 kill leader | 合并视图 = 源∪目标键集无重键；注册表持久 | ✅ **T03c** | `m6_merged_view_registry_persistence`（路由视图稳定 + m-meta 身份 + 单行无重键） |
 
-## 3. 基准对照（T03d 回填，待实施）
+## 3. 基准对照（T03d，2026-10-01）
 
-（占位——RouteQuery P99 / apply 吞吐对 M5-WP02/04 口径。）
+实测报告：docs/reports/bench/M8-WP04-hub-raft.md（探针 wp04_bench，debug 构建）。
+
+| 项 | 实测 | 基线/口径 | 裁定 |
+|---|---|---|---|
+| RouteQuery p99（n=2000） | **38.5 µs** | M5-WP02 p99 298 µs（同 route_for 路径） | ✅ 无回归（7.7× 优于，热路径口径） |
+| raft 单笔提交吞吐（n=1000 顺序） | 109 ops/s（~9 ms/笔端到端） | 无既有基线——**首次建线**；与 M5-WP04 508k evt/s 非同口径（批量 drain SM apply），不硬比 | ✅ 建线，多节点演化对照锚点 |
+| 幂等信封开销（T03a，n=300） | p50 8.38 ms / p99 15.57 ms | 与普通提交同量级 | ✅ r-dedup 查写开销可忽略 |
+
+延续项登记（不阻塞 WP04 关账）：
+1. **多节点演化**：M3 相位（复制期 kill leader）、多节点 follower ReadIndex 路径、group_id→store 绑定、r-dedup 快照面迁移——统一挂「多节点复制接线」触发条件（T03 后续 WP/任务）；
+2. F-2 endpoint_secret 合流 + ADR-0015 三待确认项回填——随 iroh 通道面演化期；
+3. release 构建基准抽测——挂 M8-WP02 发布工程实跑期顺带。
