@@ -66,7 +66,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - name: build dmg
-        run: cargo tauri build --locked --target aarch64-apple-darwin
+        run: |
+          cargo install tauri-cli --locked
+          cargo tauri build --locked --target aarch64-apple-darwin
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-macos
@@ -92,21 +94,23 @@ jobs:
         if: env.RELEASE_SIGNING_KEY != ''
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-        run: brew install minisign
+        run: cargo install minisign --locked
       - name: sign artifacts
         if: env.RELEASE_SIGNING_KEY != ''
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
           RELEASE_SIGNING_PASSWORD: ${{ secrets.RELEASE_SIGNING_PASSWORD }}
+          MINISIGN_PASSWORD: ${{ secrets.RELEASE_SIGNING_PASSWORD }}
         run: |
           cd dist
           printf '%s\n' "$RELEASE_SIGNING_KEY" > /tmp/release.key
           trap 'rm -f /tmp/release.key' EXIT
-          for f in *.tar.gz *.dmg SHA256SUMS; do
-            [ -e "$f" ] || continue
-            minisign -Sm "$f" -s /tmp/release.key \
-              -t "PartiSync release ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-          done
+          # dmg 名含空格（"PartiSync Desktop_*"）——find -print0 防拆词
+          find . -maxdepth 1 \( -name "*.tar.gz" -o -name "*.dmg" -o -name "SHA256SUMS" \) -print0 |
+            while IFS= read -r -d '' f; do
+              minisign -Sm "$f" -s /tmp/release.key \
+                -t "PartiSync release ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            done
       - name: draft release
         uses: softprops/action-gh-release@v2
         with:
