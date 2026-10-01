@@ -1,0 +1,97 @@
+# Release 发布工作流（SPEC docs/specs/M8-WP02.md §2.4）。
+# 签名工具链与密钥保管：ADR-0027（草稿——签名步在其批准后启用）+
+# docs/release/key-custody.md（私钥仅以 GitHub secret 注入，人不经手）。
+# 门禁阈值改动需 ADR（铁律：门禁前置）；toolchain 与 rust-toolchain.toml 一致（ADR-0003）。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build-cli-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - name: build (locked, auditable)
+        run: |
+          cargo install --locked cargo-auditable
+          cargo auditable build --locked --release -p partisync-cli -p partisync-hub
+      - name: package
+        run: |
+          mkdir -p dist
+          for bin in partisync-cli partisync-hub; do
+            cp target/release/$bin dist/
+          done
+          tar -czf dist/partisync-cli-linux-x86_64.tar.gz -C dist partisync-cli partisync-hub
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-linux
+          path: dist/partisync-cli-linux-x86_64.tar.gz
+
+  build-cli-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - name: build (locked, auditable)
+        run: |
+          cargo install --locked cargo-auditable
+          cargo auditable build --locked --release -p partisync-cli
+      - name: package
+        run: |
+          mkdir -p dist
+          cp target/release/partisync-cli dist/
+          tar -czf dist/partisync-cli-macos-aarch64.tar.gz -C dist partisync-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-macos
+          path: dist/partisync-cli-macos-aarch64.tar.gz
+
+  build-desktop-macos:
+    # 桌面壳 dmg（Tauri bundler）。公证（notarization）为 SPEC 非目标，
+    # 触发条件登记后另行处置（README 标注绕过方式）。
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - name: build dmg
+        run: cargo tauri build --locked --target aarch64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos
+          path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
+  release:
+    needs: [build-cli-linux, build-cli-macos, build-desktop-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: checksums
+        run: |
+          cd dist
+          find . -type f \( -name "*.tar.gz" -o -name "*.dmg" \) -exec sha256sum {} \; | sed 's| \./| |' > SHA256SUMS
+      # 签名步：ADR-0027 批准 + 首个密钥生成仪式（key-custody.md）后启用。
+      # 启用时在此处安装 minisign 并对每个产物 + SHA256SUMS 出 .minisig。
+      - name: draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.dmg
+            dist/SHA256SUMS
