@@ -451,6 +451,37 @@ pub struct HubService {
     hub: Hub,
     registry: RegistryService,
     shadow: fjall::Keyspace,
+    identity: NodeIdentity,
+}
+
+/// 节点身份与组拓扑（M8-WP04-T02，RFC M3-WP02 §8-1 承接）。
+///
+/// `members` 必须含 `node_id` 本节点（构造期校验）；身份与拓扑在
+/// `m-meta` keyspace 持久化——同 root 重开核对，不一致显式拒绝
+/// （拓扑变更 = 显式重置，T03 多节点演化前的冻结语义）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NodeIdentity {
+    /// 本节点 id。
+    pub node_id: u64,
+    /// 本节点 RPC 监听地址（测试用 `127.0.0.1:0` 临时端口）。
+    pub addr: String,
+    /// raft 组 id（= 分区 pid；数据组默认 1）。
+    pub group_id: u64,
+    /// 静态成员表（含本节点；裁定 1）。
+    pub members: std::collections::BTreeMap<u64, String>,
+}
+
+impl Default for NodeIdentity {
+    /// 单节点降级身份（与既有 `open` 硬编码逐字一致：node_id=1、
+    /// group_id=1、members={self}）。
+    fn default() -> Self {
+        Self {
+            node_id: 1,
+            addr: "127.0.0.1:0".to_owned(),
+            group_id: 1,
+            members: [(1u64, "127.0.0.1:0".to_owned())].into_iter().collect(),
+        }
+    }
 }
 
 /// 门面配置。
@@ -464,6 +495,8 @@ pub struct HubServiceConfig {
     pub election_timeout_ms: (u64, u64),
     /// 心跳间隔 ms。
     pub heartbeat_interval_ms: u64,
+    /// 节点身份（T02）。`None` = 单节点降级（[`NodeIdentity::default`]）。
+    pub identity: Option<NodeIdentity>,
 }
 
 /// 空间路由决策（SPEC M5-WP02 T06/契约 4）。
@@ -494,6 +527,7 @@ impl HubService {
             split_threshold: crate::DEFAULT_SPLIT_THRESHOLD,
             election_timeout_ms: (300, 600),
             heartbeat_interval_ms: 50,
+            identity: None,
         })
     }
 
@@ -507,24 +541,34 @@ impl HubService {
             split_threshold: threshold,
             election_timeout_ms: (300, 600),
             heartbeat_interval_ms: 50,
+            identity: None,
         })
     }
 
-    /// 全量配置打开：单节点组（node_id=1，members={self}），bootstrap 幂等，
-    /// 等待本组选出 leader 后返回。
+    /// 全量配置打开：身份取 `cfg.identity`（`None` = 单节点降级，
+    /// node_id=1，members={self}），bootstrap 幂等，等待本组选出
+    /// leader 后返回；身份与拓扑经 `m-meta` 核对（同 root 异身份拒绝）。
     ///
     /// # Errors
-    /// 存储打开、raft 启动、bootstrap 或选举等待失败。
+    /// 存储打开、身份核对失败、raft 启动、bootstrap 或选举等待失败。
     pub fn open_with_config(cfg: HubServiceConfig) -> Result<Self, ReplicaError> {
         let rt = Runtime::new().map_err(|e| ReplicaError::Io(std::io::Error::other(e)))?;
-        let (replica, hub, registry, shadow) = rt.block_on(open_async(&cfg))?;
+        let identity = cfg.identity.clone().unwrap_or_default();
+        let (replica, hub, registry, shadow) = rt.block_on(open_async(&cfg, &identity))?;
         Ok(Self {
             rt,
             replica,
             hub,
             registry,
             shadow,
+            identity,
         })
+    }
+
+    /// 本节点身份（构造期注入，`m-meta` 核对后）。
+    #[must_use]
+    pub fn identity(&self) -> &NodeIdentity {
+        &self.identity
     }
 
     /// 空间注册表服务（全局组 pid=0；裁定 4）。
@@ -813,12 +857,47 @@ impl HubService {
     }
 }
 
-/// 异步打开：建库/平面 → 注册表组（pid=0）→ 业务状态机 → 数据组
-/// （pid=1）→ bootstrap → 等 leader。
+/// 异步打开：建库/平面 → **m-meta 身份核对** → 注册表组（pid=0）→
+/// 业务状态机 → 数据组（pid=1）→ bootstrap → 等 leader。
+///
+/// `m-meta`（M8-WP04-T02）：身份与组拓扑首开写入、重开核对——同 root
+/// 异身份/异拓扑显式拒绝（[`ReplicaError::Init`]），防静默换身份。
 async fn open_async(
     cfg: &HubServiceConfig,
+    identity: &NodeIdentity,
 ) -> Result<(Replica, Hub, RegistryService, fjall::Keyspace), ReplicaError> {
+    if !identity.members.contains_key(&identity.node_id) {
+        return Err(ReplicaError::Init(format!(
+            "identity members must contain self node_id {} (members: {:?})",
+            identity.node_id, identity.members
+        )));
+    }
     let db = fjall::Database::open(fjall::Config::new(&cfg.root))?;
+    let m_meta = db
+        .keyspace("m-meta", fjall::KeyspaceCreateOptions::default)
+        .map_err(|e| into_replica(HubError::Fjall(e)))?;
+    const IDENTITY_KEY: &[u8] = b"identity";
+    match m_meta
+        .get(IDENTITY_KEY)
+        .map_err(|e| into_replica(HubError::Fjall(e)))?
+    {
+        Some(v) => {
+            let stored: NodeIdentity = serde_json::from_slice(&v)
+                .map_err(|e| ReplicaError::Init(format!("m-meta identity decode failed: {e}")))?;
+            if &stored != identity {
+                return Err(ReplicaError::Init(format!(
+                    "identity mismatch on same root: stored {stored:?}, requested {identity:?}"
+                )));
+            }
+        }
+        None => {
+            let v = serde_json::to_vec(identity)
+                .map_err(|e| ReplicaError::Init(format!("m-meta identity encode failed: {e}")))?;
+            m_meta
+                .insert(IDENTITY_KEY, v)
+                .map_err(|e| into_replica(HubError::Fjall(e)))?;
+        }
+    }
     let hub = Hub::attach(db.clone(), cfg.split_threshold).map_err(into_replica)?;
     let registry = RegistryService::open_on(
         &db,
@@ -832,11 +911,11 @@ async fn open_async(
     let sm = HubStateMachine::attach(db.clone(), sm_generic, cfg.split_threshold)
         .map_err(into_replica)?;
     let node = NodeConfig {
-        node_id: 1,
-        addr: "127.0.0.1:0".to_owned(),
+        node_id: identity.node_id,
+        addr: identity.addr.clone(),
         db_root: cfg.root.clone(),
-        group_id: 1,
-        members: [(1u64, "127.0.0.1:0".to_owned())].into_iter().collect(),
+        group_id: identity.group_id,
+        members: identity.members.clone(),
         election_timeout_ms: cfg.election_timeout_ms,
         heartbeat_interval_ms: cfg.heartbeat_interval_ms,
         disable_auto_snapshot: true,
@@ -891,7 +970,7 @@ impl HubService {
         Ok(())
     }
 
-    /// 水位表读取（` wm/{origin}` 特殊行）。
+    /// 水位表读取（`\x00wm/{origin}` 特殊行）。
     async fn watermarks_async(&self) -> Result<Vec<(String, String)>, ReplicaError> {
         self.replica.ensure_linearizable().await?;
         let mut out = Vec::new();

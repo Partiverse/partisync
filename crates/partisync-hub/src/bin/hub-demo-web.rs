@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             split_threshold: 50, // 演示阈值：小目录也能看到 apply 侧分裂
             election_timeout_ms: (300, 600),
             heartbeat_interval_ms: 50,
+            identity: None, // 单节点降级（M8-WP04-T02）
         })
     })
     .await
