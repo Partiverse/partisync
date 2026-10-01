@@ -86,9 +86,14 @@ jobs:
         with:
           path: dist
       - name: checksums
+        # 剥掉 artifact 子目录前缀——Release asset 为扁平布局，sha256sum -c
+        # 需与文件名直接对应
         run: |
           cd dist
-          find . -type f \( -name "*.tar.gz" -o -name "*.dmg" \) -exec sha256sum {} \; | sed 's| \./| |' > SHA256SUMS
+          find . -type f \( -name "*.tar.gz" -o -name "*.dmg" \) -print0 |
+            while IFS= read -r -d '' f; do
+              sha256sum "$f" | sed 's|  .*/| |' >> SHA256SUMS
+            done
       # 签名步（M8-WP02-T02，ADR-0027 已接受 + 生成仪式 2026-10-01 完成）：
       # 依赖 GitHub secrets RELEASE_SIGNING_KEY（口令加密私钥）与
       # RELEASE_SIGNING_PASSWORD（口令，见 key-custody.md「CI 签名口径」节）。
@@ -114,7 +119,7 @@ jobs:
           printf '%s\n' "$RELEASE_SIGNING_CI_KEY" > /tmp/ci.key
           trap 'rm -f /tmp/ci.key' EXIT
           # dmg 名含空格（"PartiSync Desktop_*"）——find -print0 防拆词
-          find . -maxdepth 1 \( -name "*.tar.gz" -o -name "*.dmg" -o -name "SHA256SUMS" \) -print0 |
+          find . \( -name "*.tar.gz" -o -name "*.dmg" -o -name "SHA256SUMS" \) -print0 |
             while IFS= read -r -d '' f; do
               minisign -Sm "$f" -s /tmp/ci.key \
                 -t "PartiSync release (CI subkey; $(date -u +%Y-%m-%dT%H:%M:%SZ))"
