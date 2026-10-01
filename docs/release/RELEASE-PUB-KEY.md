@@ -19,15 +19,25 @@ minisign -Vm SHA256SUMS -p partisync.pub
 sha256sum -c SHA256SUMS      # 双保险：清单校验
 ```
 
-## 公钥
+## 公钥（双钥：主钥离线 + CI 子钥自动化）
+
+发布签名采用双钥（key-custody.md「CI 签名口径」）：CI 自动化产物由
+**CI 子钥**签署（`.minisig` trusted comment 标 `CI subkey`）；主钥离线
+双人保管，用于应急/最终签名。验签时任一公钥通过即有效（两钥同列如下）。
+
+**主钥**（指纹 `EBC32789A716D70A`，生成仪式 2026-10-01）：
 
 ```
 untrusted comment: minisign public key EBC32789A716D70A
 RWQK1xaniSfD6+Wn9Qp+/A+WIUQ4P/tUoIrtuQawXZozUeu/BjIst0IU
 ```
 
-指纹：`EBC32789A716D70A`（生成仪式 2026-10-01；保管流程见
-`docs/release/key-custody.md`）。
+**CI 子钥**（指纹 `E056CBB62BF3EF34`，2026-10-01；无口令，仅 CI secret）：
+
+```
+untrusted comment: PartiSync CI signing subkey
+RWQ07/MrtstW4BJcQJxvDyj415FpHOt9qD6/5PDzjkQKQF/HDvxgaX4j
+```
 
 ## 撤销公告
 

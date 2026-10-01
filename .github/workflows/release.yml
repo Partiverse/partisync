@@ -94,9 +94,9 @@ jobs:
       # RELEASE_SIGNING_PASSWORD（口令，见 key-custody.md「CI 签名口径」节）。
       # secret 未配置时跳过签名——Release 显式标注 unsigned（不假绿）。
       - name: install minisign
-        if: env.RELEASE_SIGNING_KEY != ''
+        if: env.RELEASE_SIGNING_CI_KEY != ''
         env:
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_CI_KEY: ${{ secrets.RELEASE_SIGNING_CI_KEY }}
         # minisign CLI 无 Rust 发布（crates.io crate 纯库；官方仓库 0.10+ 为 C/Zig
         # 构建）——ubuntu 用官方预编译二进制（release asset）
         run: |
@@ -104,20 +104,20 @@ jobs:
           sudo install minisign-linux/x86_64/minisign /usr/local/bin/minisign
           minisign -v
       - name: sign artifacts
-        if: env.RELEASE_SIGNING_KEY != ''
+        # C 版 minisign 无密码环境变量（get_password 强制 tty）——CI 用无口令
+        # 子钥（key-custody.md「CI 签名口径」修订；主钥离线双人保管不变）
+        if: env.RELEASE_SIGNING_CI_KEY != ''
         env:
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-          RELEASE_SIGNING_PASSWORD: ${{ secrets.RELEASE_SIGNING_PASSWORD }}
-          MINISIGN_PASSWORD: ${{ secrets.RELEASE_SIGNING_PASSWORD }}
+          RELEASE_SIGNING_CI_KEY: ${{ secrets.RELEASE_SIGNING_CI_KEY }}
         run: |
           cd dist
-          printf '%s\n' "$RELEASE_SIGNING_KEY" > /tmp/release.key
-          trap 'rm -f /tmp/release.key' EXIT
+          printf '%s\n' "$RELEASE_SIGNING_CI_KEY" > /tmp/ci.key
+          trap 'rm -f /tmp/ci.key' EXIT
           # dmg 名含空格（"PartiSync Desktop_*"）——find -print0 防拆词
           find . -maxdepth 1 \( -name "*.tar.gz" -o -name "*.dmg" -o -name "SHA256SUMS" \) -print0 |
             while IFS= read -r -d '' f; do
-              minisign -Sm "$f" -s /tmp/release.key \
-                -t "PartiSync release ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+              minisign -Sm "$f" -s /tmp/ci.key \
+                -t "PartiSync release (CI subkey; $(date -u +%Y-%m-%dT%H:%M:%SZ))"
             done
       - name: draft release
         uses: softprops/action-gh-release@v2
