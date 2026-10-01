@@ -97,8 +97,12 @@ jobs:
         if: env.RELEASE_SIGNING_KEY != ''
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-        # crates.io 的 minisign crate 是纯库（v0.10 无 binaries）——CLI 从官方仓库装
-        run: cargo install --git https://github.com/jedisct1/minisign.git --tag 0.9 minisign
+        # minisign CLI 无 Rust 发布（crates.io crate 纯库；官方仓库 0.10+ 为 C/Zig
+        # 构建）——ubuntu 用官方预编译二进制（release asset）
+        run: |
+          curl -sL https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz | tar xz
+          sudo install minisign-0.12-linux/minisign /usr/local/bin/minisign
+          minisign -v
       - name: sign artifacts
         if: env.RELEASE_SIGNING_KEY != ''
         env:
