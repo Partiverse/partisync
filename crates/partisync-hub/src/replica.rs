@@ -75,6 +75,8 @@ pub enum ReplicaError {
     Init(String),
     /// 客户端写失败。
     ClientWrite(ClientWriteError<u64, BasicNode>),
+    /// 配额硬限拒绝（M8-WP03-T02；FUSE 侧映射 ENOSPC）。
+    QuotaExceeded,
     /// 线性一致读的就绪确认失败。
     CheckIsLeader(CheckIsLeaderError<u64, BasicNode>),
     /// 状态机读取失败。
@@ -92,6 +94,7 @@ impl std::fmt::Display for ReplicaError {
             Self::Fatal(e) => write!(f, "replica fatal: {e}"),
             Self::Init(e) => write!(f, "replica bootstrap: {e}"),
             Self::ClientWrite(e) => write!(f, "replica client write: {e}"),
+            Self::QuotaExceeded => write!(f, "quota exceeded"),
             Self::CheckIsLeader(e) => write!(f, "replica read: {e}"),
             Self::Storage(e) => write!(f, "replica state machine: {e}"),
             Self::Timeout => write!(f, "replica wait timeout"),

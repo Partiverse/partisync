@@ -43,6 +43,8 @@ pub enum HubCmd {
     Remove([u8; 16]),
     /// 改名/移动（[`Hub::rename_entry`] 同构）。
     Rename([u8; 16], Option<[u8; 16]>, String),
+    /// 设置配额硬限（None = 不限量；M8-WP03-T02）。
+    SetQuota(Option<u64>),
 }
 
 /// 命令 tag。
@@ -51,6 +53,8 @@ const CMD_PUT: u8 = 0x01;
 const CMD_REMOVE: u8 = 0x02;
 /// 命令 tag。
 const CMD_RENAME: u8 = 0x03;
+/// 命令 tag。
+const CMD_SET_QUOTA: u8 = 0x04;
 
 /// 编码 [`HubCmd`]（紧凑二进制；EntryRow 用 WP01 行编码）。
 ///
@@ -77,6 +81,16 @@ pub fn encode_cmd(cmd: &HubCmd) -> Result<Vec<u8>, HubError> {
                 v.extend_from_slice(p);
             }
             v.extend_from_slice(name.as_bytes());
+        }
+        HubCmd::SetQuota(limit) => {
+            v.push(CMD_SET_QUOTA);
+            match limit {
+                None => v.push(0),
+                Some(b) => {
+                    v.push(1);
+                    v.extend_from_slice(&b.to_be_bytes());
+                }
+            }
         }
     }
     Ok(v)
@@ -134,6 +148,21 @@ pub fn decode_cmd(mut buf: &[u8]) -> Result<HubCmd, HubError> {
                 .map_err(|_| HubError::Encode(crate::EncodeError::InvalidNameLength))?;
             Ok(HubCmd::Rename(id, parent, name))
         }
+        CMD_SET_QUOTA => {
+            if buf.is_empty() {
+                return Err(short);
+            }
+            if buf[0] == 0 {
+                Ok(HubCmd::SetQuota(None))
+            } else {
+                if buf.len() < 9 {
+                    return Err(short);
+                }
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&buf[1..9]);
+                Ok(HubCmd::SetQuota(Some(u64::from_be_bytes(b))))
+            }
+        }
         _ => Err(short),
     }
 }
@@ -187,6 +216,7 @@ pub struct HubStateMachine {
     tree: TreePlane,
     shadow: fjall::Keyspace,
     dedup: fjall::Keyspace,
+    quota: fjall::Keyspace,
     audit: Arc<crate::audit::AuditSink>,
 }
 
@@ -211,6 +241,12 @@ impl HubStateMachine {
             dedup: db
                 .keyspace(KS_DEDUP, fjall::KeyspaceCreateOptions::default)
                 .map_err(HubError::Fjall)?,
+            quota: db
+                .keyspace(
+                    crate::quota::KS_QUOTA,
+                    fjall::KeyspaceCreateOptions::default,
+                )
+                .map_err(HubError::Fjall)?,
             audit,
         })
     }
@@ -224,26 +260,62 @@ impl HubStateMachine {
             HubCmd::Put(row) => ("put".to_owned(), hex_id(&row.entry_id)),
             HubCmd::Remove(id) => ("remove".to_owned(), hex_id(id)),
             HubCmd::Rename(id, _, name) => ("rename".to_owned(), format!("{}:{name}", hex_id(id))),
+            HubCmd::SetQuota(limit) => ("quota_set".to_owned(), format!("{limit:?}")),
         }
     }
 
-    /// 业务命令 apply 内核（与直连 Hub 同函数；返回响应标志位字节）。
-    fn apply_cmd(&mut self, cmd: HubCmd) -> Result<(), HubError> {
-        match cmd {
-            HubCmd::Put(row) => put_entry_impl(&self.entry, &self.tree, &row),
+    /// 业务命令 apply 内核（与直连 Hub 同函数）+ 配额计量（M8-WP03-T02）。
+    /// 返回响应标志位字节：0x00 ok / 0x01 entry_missing / 0x02 quota_exceeded。
+    fn apply_cmd(&mut self, cmd: HubCmd) -> Result<u8, HubError> {
+        let mut st = crate::quota::read_ks(&self.quota)?;
+        let byte = match cmd {
+            HubCmd::Put(row) => {
+                let prior = self.entry.get(&row.entry_id)?;
+                let prior_live = prior
+                    .as_ref()
+                    .filter(|r| !r.is_deleted())
+                    .map(|r| r.size)
+                    .unwrap_or(0);
+                let delta = row.size as i64 - prior_live as i64;
+                if st.would_exceed(delta) {
+                    return Ok(0x02); // 拒绝先于效果：无状态变更
+                }
+                put_entry_impl(&self.entry, &self.tree, &row)?;
+                st.used_bytes = (st.used_bytes as i64 + delta) as u64;
+                0x00
+            }
             HubCmd::Remove(id) => {
                 let prior = self.entry.get(&id)?;
-                remove_entry_impl(&self.entry, &self.tree, &id, prior.as_ref())
+                let prior_live = prior
+                    .as_ref()
+                    .filter(|r| !r.is_deleted())
+                    .map(|r| r.size)
+                    .unwrap_or(0);
+                remove_entry_impl(&self.entry, &self.tree, &id, prior.as_ref())?;
+                st.used_bytes = (st.used_bytes as i64 - prior_live as i64) as u64;
+                0x00
             }
             HubCmd::Rename(id, parent, name) => {
                 match self.entry.get(&id)? {
                     Some(row) if !row.is_deleted() => {
-                        rename_entry_impl(&self.entry, &self.tree, &row, parent, &name)
+                        rename_entry_impl(&self.entry, &self.tree, &row, parent, &name)?;
+                        0x00
                     }
-                    _ => Err(HubError::EntryMissing), // no-op + 标志位
+                    _ => return Ok(0x01), // no-op + 标志位
                 }
             }
+            HubCmd::SetQuota(limit) => {
+                st.limit_bytes = limit;
+                0x00 // 审计由循环统一记录（cmd_audit_target）
+            }
+        };
+        let alert = st.update_alert(); // 先改状态再落盘，soft_alerted 才能持久
+        crate::quota::write_state(&self.quota, &st)?;
+        if alert {
+            self.audit
+                .record("quota_soft_alert", &st.used_bytes.to_string(), "ok");
         }
+        Ok(byte)
     }
 }
 
@@ -293,15 +365,19 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for HubStateMachine {
                         Some(stored) => *stored.first().unwrap_or(&0x00),
                         None => {
                             let byte = match self.apply_cmd(inner.clone()) {
-                                Ok(()) => 0x00u8,
-                                Err(HubError::EntryMissing) => 0x01u8,
+                                Ok(b) => b,
+                                Err(HubError::EntryMissing) => 0x01,
                                 Err(e) => return Err(business_error(e)),
                             };
                             self.dedup
                                 .insert(req_id, [byte])
                                 .map_err(|e| business_error_msg(format!("dedup write: {e}")))?;
                             let (action, object) = Self::cmd_audit_target(&inner);
-                            let result = if byte == 0 { "ok" } else { "entry_missing" };
+                            let result = match byte {
+                                0x00 => "ok",
+                                0x01 => "entry_missing",
+                                _ => "quota_exceeded",
+                            };
                             self.audit.record(&action, &object, result);
                             byte
                         }
@@ -311,13 +387,14 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for HubStateMachine {
                     let (action, object) = Self::cmd_audit_target(&cmd);
                     let outcome = self.apply_cmd(cmd.clone());
                     match outcome {
-                        Ok(()) => {
-                            responses[i] = crate::HubResponse(vec![0x00]);
-                            self.audit.record(&action, &object, "ok");
-                        }
-                        Err(HubError::EntryMissing) => {
-                            responses[i] = crate::HubResponse(vec![0x01]);
-                            self.audit.record(&action, &object, "entry_missing");
+                        Ok(byte) => {
+                            responses[i] = crate::HubResponse(vec![byte]);
+                            let result = match byte {
+                                0x00 => "ok",
+                                0x01 => "entry_missing",
+                                _ => "quota_exceeded",
+                            };
+                            self.audit.record(&action, &object, result);
                         }
                         Err(e) => return Err(business_error(e)),
                     }
@@ -733,7 +810,10 @@ impl HubService {
         let cmd = encode_cmd(&HubCmd::Put(row.clone()))
             .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
         let h = self.replica.submit(cmd).await?;
-        h.ack().await?;
+        let (_, resp) = h.ack_with_response().await?;
+        if resp.first() == Some(&0x02) {
+            return Err(ReplicaError::QuotaExceeded);
+        }
         Ok(())
     }
 
@@ -882,6 +962,38 @@ impl HubService {
     ) -> Result<crate::audit::AuditExportInfo, ReplicaError> {
         crate::audit::export(self.replica.database(), path)
             .map_err(|e| ReplicaError::Io(std::io::Error::other(e)))
+    }
+
+    /// 设置配额硬限（`None` = 不限量；经 raft 全副本一致）。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub fn set_quota(&self, limit_bytes: Option<u64>) -> Result<(), ReplicaError> {
+        self.rt.block_on(self.set_quota_async(limit_bytes))
+    }
+
+    /// [`Self::set_quota`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 错误。
+    pub async fn set_quota_async(&self, limit_bytes: Option<u64>) -> Result<(), ReplicaError> {
+        let cmd = encode_cmd(&HubCmd::SetQuota(limit_bytes))
+            .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
+        let h = self.replica.submit(cmd).await?;
+        h.ack().await?;
+        Ok(())
+    }
+
+    /// 配额状态快照（线性一致读；used/limit/soft_alerted）。
+    ///
+    /// # Errors
+    /// raft 或引擎错误。
+    pub fn quota_status(&self) -> Result<crate::quota::QuotaState, ReplicaError> {
+        self.rt.block_on(async {
+            self.replica.ensure_linearizable().await?;
+            crate::quota::read_state(self.replica.database())
+                .map_err(|e| into_replica(HubError::Fjall(e)))
+        })
     }
 
     /// 幂等提交（M8-WP04-T03a，RFC M3-WP02 §3.1 承接）：同 `req_id`
@@ -1038,6 +1150,8 @@ async fn open_async(
         )));
     }
     let db = fjall::Database::open(fjall::Config::new(&cfg.root))?;
+    let audit = crate::audit::AuditSink::new(&db, format!("hub-{}", identity.node_id))
+        .map_err(|e| into_replica(HubError::Fjall(e)))?;
     let m_meta = db
         .keyspace("m-meta", fjall::KeyspaceCreateOptions::default)
         .map_err(|e| into_replica(HubError::Fjall(e)))?;
@@ -1064,17 +1178,16 @@ async fn open_async(
         }
     }
     let hub = Hub::attach(db.clone(), cfg.split_threshold).map_err(into_replica)?;
-    let registry = RegistryService::open_on(
+    let registry = RegistryService::open_on_with_audit(
         &db,
         &cfg.root,
         cfg.election_timeout_ms,
         cfg.heartbeat_interval_ms,
+        Some(Arc::clone(&audit)),
     )
     .await
     .map_err(|e| ReplicaError::Io(std::io::Error::other(e.to_string())))?;
     let (_, sm_generic) = crate::open_raft_stores(&db, 1)?;
-    let audit = crate::audit::AuditSink::new(&db, format!("hub-{}", identity.node_id))
-        .map_err(|e| into_replica(HubError::Fjall(e)))?;
     let sm = HubStateMachine::attach(db.clone(), sm_generic, cfg.split_threshold, audit.clone())
         .map_err(into_replica)?;
     let node = NodeConfig {

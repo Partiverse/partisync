@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use fjall::Database;
@@ -286,6 +287,7 @@ pub struct RegistryStateMachine {
     inner: RaftStateMachineStore,
     spaces: fjall::Keyspace,
     routes: fjall::Keyspace,
+    audit: Option<Arc<crate::audit::AuditSink>>,
 }
 
 /// 业务拒绝/成功 → 应答字节。
@@ -359,6 +361,9 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for RegistryStateMachine
                                 .insert(space_id.as_bytes(), json)
                                 .map_err(business_error)?;
                             responses[i] = crate::HubResponse(vec![FLAG_OK]);
+                            if let Some(a) = &self.audit {
+                                a.record("space_create", &space_id, "ok");
+                            }
                         }
                     }
                     RegistryCmd::SetMember {
@@ -430,6 +435,9 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for RegistryStateMachine
                             .insert(row.space_id.as_bytes(), json)
                             .map_err(business_error)?;
                         responses[i] = crate::HubResponse(vec![FLAG_OK]);
+                        if let Some(a) = &self.audit {
+                            a.record("route_set", &row.space_id, "ok");
+                        }
                     }
                 };
             }
@@ -494,6 +502,20 @@ impl RegistryService {
         election_timeout_ms: (u64, u64),
         heartbeat_interval_ms: u64,
     ) -> Result<Self, RegistryError> {
+        Self::open_on_with_audit(db, root, election_timeout_ms, heartbeat_interval_ms, None).await
+    }
+
+    /// 同 [`Self::open_on`]，附带审计 sink 注入（M8-WP03-T02 补接 T01 顺延项）。
+    ///
+    /// # Errors
+    /// 同 [`Self::open_on`]。
+    pub async fn open_on_with_audit(
+        db: &Database,
+        root: &std::path::Path,
+        election_timeout_ms: (u64, u64),
+        heartbeat_interval_ms: u64,
+        audit: Option<Arc<crate::audit::AuditSink>>,
+    ) -> Result<Self, RegistryError> {
         let (_, sm_generic) = crate::open_raft_stores(db, REGISTRY_GROUP)
             .map_err(|e| RegistryError::Io(e.to_string()))?;
         let spaces = db
@@ -506,6 +528,7 @@ impl RegistryService {
             inner: sm_generic,
             spaces,
             routes,
+            audit,
         };
         let node = NodeConfig {
             node_id: 1,
