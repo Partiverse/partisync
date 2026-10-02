@@ -7,6 +7,16 @@
 > 执行: GLM-5.3-Flash (ZCode)（frontend-design 流程：计划→自审→构建
 > →截图自查）
 >
+> **v4（2026-10-02 用户三次补充：微观宇宙粒子隐喻）**——核心设计
+> 逻辑升级：**数据文件/设备 = 粒子（particle）= 微观宇宙中的尘埃/
+> 星球/天体**。落地：①多层 radial-gradient 星点底（星域）；②条目
+> 指纹 = 圆粒星点 + hover 光晕（`::after` 粒子）；③**去重星图组件**
+> （browse 详情：v1/v2 两行粒子，亮 = 新增存储 · 暗 = 复用已有——
+> borgbackup 去重可视化的**叙事借鉴 + 原创粒子执行，非样式抄袭**）；
+> ④同步大数字 **data-count 滚动入场**（counters 逻辑原创实现，
+> reduced-motion 直落终值）。「指纹即视觉」「全等宽/直角/扫描线」
+> 不变。
+>
 > **v3（2026-10-02 用户二次补充：直角 + 赛博朋克感 + 参考
 > borgbackup.org 官网）**——官网 tokens **实测提取**（curl 源码）：
 > `--bg #020503` / `--green #22D045` / `--panel rgba(8,18,10,.82)` /
@@ -50,7 +60,10 @@ PartiSync 桌面壳是**本地优先引擎的档案工具**：用户的核心对
 | 直角 | `border-radius: 0 !important` | 全组件（用户硬性要求 + 官网判例） |
 | 扫描线 | 3px 周期 rgba(0,0,0,.12) fixed overlay | CRT 质感（subtle） |
 | glow | `text/box-shadow rgba(34,208,69,.35~.6)` | 标题/得分条/当前 tab（赛博霓虹） |
-| 网格底纹 | 32px repeating-linear（4% 绿） | body 背景 |
+| 星点底 | 多层 radial-gradient 1–2px 粒子（12 颗，绿/白/琥珀/青/紫） | body 背景（星域；网格底纹之上） |
+| 去重星图 | 两行圆粒（10px，lit=primary glow / dim=border） | browse 详情（讲「同内容只存一次」） |
+| 计数入场 | data-count + rAF ease-out 900ms | 同步大数字（reduced-motion 直落终值） |
+| 网格底纹 | 32px repeating-linear（3.5% 绿） | body 背景（星域坐标网格） |
 | 终端提示符 | `partisync@local:~$` + 闪烁光标 | 检索区/状态横幅引导 |
 
 字号：30 mono（同步大数字）/ 14（wordmark/检索输入/条目名）/ 13 正文 /
