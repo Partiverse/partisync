@@ -604,6 +604,9 @@ impl McpServerState {
         drop(registry); // 调用期间不持 registry 读锁（实例锁独立）
 
         let joined = tokio::task::spawn_blocking(move || call);
+        // M8-WP06：内层 epoch/fuel 为终止主机制（真终止，线程释放）；
+        // 本 timeout 保留为二层防御（tick 线程异常时的兜底），错误文本
+        // 与 epoch deadline / fuel 路径可区分。
         match tokio::time::timeout(EXT_CALL_TIMEOUT, joined).await {
             Ok(Ok(Ok(out))) => {
                 // source 标注（SPEC §2.3）：扩展结果不隐式获得内建工具信任

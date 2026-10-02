@@ -57,6 +57,14 @@ fn load_with_manifest_valid_clock_then_instantiate_succeeds() {
     };
     // linker 根 instance 可取；该 component 零 import 时实例化必然成功
     let mut store = wasmtime::Store::new(partisync_ext_host::engine(), HostState::without_index());
+    partisync_ext_host::init_termination_budget(&mut store);
+    // M8-WP06：epoch/fuel 开启的 Engine 上自建 Store 需初始化终止预算
+    // （装载期预注入只覆盖 ExtTool::load 内部 Store；deadline 大 delta
+    // 防 current+delta 溢出）
+    store.set_epoch_deadline(u64::MAX / 2);
+    store
+        .set_fuel(partisync_ext_host::registry::FUEL_BUDGET)
+        .expect("fuel init");
     let instance = match loaded.1.instantiate(&mut store, &loaded.0) {
         Ok(i) => i,
         Err(e) => panic!("零 import demo component 在带 clock.read linker 下应可实例化：{e}"),
@@ -117,6 +125,7 @@ fn load_with_manifest_deny_probe_still_fails_under_clock_linker() {
         Err(e) => panic!("合法 manifest 应通过校验：{e}"),
     };
     let mut store = wasmtime::Store::new(partisync_ext_host::engine(), HostState::without_index());
+    partisync_ext_host::init_termination_budget(&mut store);
     let err = match loaded.1.instantiate(&mut store, &loaded.0) {
         Ok(_) => panic!("缺 wasi import component 在 clock.read linker 下必拒"),
         Err(e) => e,

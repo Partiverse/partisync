@@ -21,6 +21,7 @@ fn smoke_demo_tool_loads_and_calls() {
     let component = fixture("demo_tool.wasm");
     let linker = partisync_ext_host::deny_linker();
     let mut store = Store::new(engine, HostState::without_index());
+    partisync_ext_host::init_termination_budget(&mut store);
     let instance = linker
         .instantiate(&mut store, &component)
         .expect("零能力 demo tool 必须在默认拒权 linker 下实例化");
@@ -45,6 +46,7 @@ fn smoke_deny_probe_instantiation_fails_without_host_leak() {
     let component = fixture("probe_deny.wasm");
     let linker = partisync_ext_host::deny_linker();
     let mut store = Store::new(engine, HostState::without_index());
+    partisync_ext_host::init_termination_budget(&mut store);
     let err = linker
         .instantiate(&mut store, &component)
         .expect_err("默认拒权下缺权 component 实例化必须失败");
