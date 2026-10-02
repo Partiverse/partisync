@@ -22,18 +22,21 @@ use tauri::State;
 use partisync_cas::CasStats;
 use partisync_graph::jobs::{self, JobRow};
 use partisync_graph::store::{DupGroup, EntryRow, Stats};
-use partisync_index::Bm25Query;
+use partisync_index::{Bm25Query, HybridQuery, HybridVectorKind, SearchFilters, VectorKind};
 
 use crate::error::{DesktopError, DesktopResult};
 use crate::state::AppState;
 
-/// IPC 检索命中（Bm25Hit 的 IPC DTO； 保持字段最少， `content_id`
-/// 前端可走 `get_stats` / `list` / `duplicates` 反查路径）。
+/// IPC 检索命中（Bm25Hit / HybridHit 的**统一** DTO；`mode` 标注检索
+/// 通道——function-map §4-N3：HybridResult 的 `rrf_score` 与 BM25 的
+/// `score` 量纲不同，前端渲染统一，通道差异由 `mode` 呈现）。
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub content_id: String,
     pub score: f32,
     pub highlight: Option<String>,
+    /// 检索通道（`bm25` / `hybrid`；M8-WP05-T01 起随载荷下发）。
+    pub mode: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +98,60 @@ pub async fn search(state: State<'_, AppState>, args: SearchArgs) -> DesktopResu
             content_id: h.content_id,
             score: h.score,
             highlight: h.highlight,
+            mode: "bm25",
+        })
+        .collect())
+}
+
+/// 语义混合检索 IPC（M8-WP05-T01 旗舰；BM25 + 向量 RRF）。
+///
+/// 与 [`search`] 的差异只有**查询向量**来源：语义模式先经
+/// `AppState::embedder()`（fastembed BGE-small-zh-v1.5，**懒加载**——
+/// 冷启动路径零模型加载，function-map §4-N1）产出 512d 向量，再走
+/// `IndexEngine::hybrid_search`（`VectorKind::TextDenseZh512`，与
+/// M6-D67-T03 判例一致）。
+///
+/// 返回形状与 [`search`] **完全一致**（统一 SearchHit + `mode`）——
+/// 前端结果渲染零分支（§4-N3）。首次语义检索需加载模型权重（秒级），
+/// 前端在调用期间显示 loading 态。
+///
+/// # Errors
+/// 嵌入模型初始化/推理失败，或 hybrid 检索失败 →
+/// `DesktopError::Index`（`kind:"Index"`）。
+#[tauri::command]
+pub async fn search_hybrid(
+    state: State<'_, AppState>,
+    args: SearchArgs,
+) -> DesktopResult<Vec<SearchHit>> {
+    let limit = args.limit.unwrap_or(20).min(100) as usize;
+    let query = args.q.clone();
+    let embedder = state.embedder().await?;
+    let query_vector = embedder.embed_query(&query)?;
+    let engine = state.index().await?;
+    let result = engine
+        .hybrid_search(
+            &query,
+            &query_vector,
+            VectorKind::TextDenseZh512,
+            HybridQuery {
+                query: query.clone(),
+                filters: SearchFilters::default(),
+                limit,
+                vector_kind: HybridVectorKind::TextDense,
+                include_transcript: true,
+                use_reranker: false,
+            },
+        )
+        .await
+        .map_err(|e| DesktopError::Index(e.to_string()))?;
+    Ok(result
+        .hits
+        .into_iter()
+        .map(|h| SearchHit {
+            content_id: h.content_id,
+            score: h.rrf_score,
+            highlight: h.highlight,
+            mode: "hybrid",
         })
         .collect())
 }

@@ -22,8 +22,8 @@
 use std::path::PathBuf;
 
 use partisync_desktop::ipc::{
-    cas_stats, duplicates, get_stats, jobs, list, mcp_call, search, DuplicatesArgs, ListArgs,
-    McpCallArgs, SearchArgs,
+    cas_stats, duplicates, get_stats, jobs, list, mcp_call, search, search_hybrid, DuplicatesArgs,
+    ListArgs, McpCallArgs, SearchArgs,
 };
 use partisync_desktop::mcp_sidecar::McpSidecar;
 use partisync_desktop::state::AppState;
@@ -274,4 +274,66 @@ async fn window_state_capture_guard_and_apply_smoke() {
     };
     store.save(&state).expect("save");
     window_state::apply(&win, store.load()).expect("apply");
+}
+
+// ===== M8-WP05-T01：语义检索旗舰（SPEC §2.1 + function-map §4-N1/N3） =====
+
+fn state_dbg(app: &tauri::App<tauri::test::MockRuntime>) -> String {
+    use tauri::Manager;
+    format!("{:?}", app.state::<AppState>())
+}
+
+/// 冷启动不加载嵌入模型（§4-N1 硬线）：`AppState::open` 后 embedder
+/// 未初始化；BM25 检索后仍未初始化——语义模型只在语义检索路径加载。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t01_embedder_not_loaded_on_startup_or_bm25() {
+    let (app, _tmp) = make_app().await;
+    let dbg = state_dbg(&app);
+    assert!(
+        dbg.contains("embedder_loaded: false"),
+        "startup must not load embedder: {dbg}"
+    );
+    let _ = search(
+        app.state::<AppState>(),
+        SearchArgs {
+            q: "anything".into(),
+            limit: Some(5),
+        },
+    )
+    .await
+    .expect("bm25 search");
+    let dbg = state_dbg(&app);
+    assert!(
+        dbg.contains("embedder_loaded: false"),
+        "bm25 search must not load embedder: {dbg}"
+    );
+}
+
+/// 空索引语义检索：返回空 hits（不 panic）且确实走了嵌入器路径
+/// （§4-N1 反向断言：语义检索**必须**加载模型）。
+///
+/// **需下载 BGE-small-zh 权重**（秒级，缓存于 `index/embed-cache`）——
+/// 沿 M5-WP05 `t03` 判例显式跑：
+/// `cargo test -p partisync-desktop --test commands t01_hybrid -- --ignored --nocapture`。
+/// CI 常绿的是 [`t01_embedder_not_loaded_on_startup_or_bm25`]（冷启动
+/// 预算保护），本测补语义路径的端到端归一形状与真实命中。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "需下载嵌入模型权重：显式跑（-- --ignored --nocapture）"]
+async fn t01_hybrid_empty_index_returns_no_hits_and_loads_embedder() {
+    let (app, _tmp) = make_app().await;
+    let hits = search_hybrid(
+        app.state::<AppState>(),
+        SearchArgs {
+            q: "项目验收报告".into(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("hybrid search on empty index");
+    assert!(hits.is_empty(), "empty index must yield no hits");
+    let dbg = state_dbg(&app);
+    assert!(
+        dbg.contains("embedder_loaded: true"),
+        "hybrid search must load embedder: {dbg}"
+    );
 }

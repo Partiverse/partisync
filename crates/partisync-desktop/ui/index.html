@@ -3,67 +3,97 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PartiSync Desktop</title>
-<link rel="stylesheet" href="styles.css">
+<title>PartiSync · 本机节点</title>
+<link rel="stylesheet" href="styles-v3.css">
 </head>
 <body>
 <header>
-  <h1><span class="logo">partisync</span> 资产图谱</h1>
-  <span class="sub" id="db-badge">桌面壳 · 本机</span>
-</header>
-<div class="wrap">
-  <div id="error-region" class="error" style="display:none"></div>
-  <div class="cards" id="cards"></div>
-
-  <nav class="tabs">
-    <button data-tab="browse" class="active">浏览</button>
-    <button data-tab="search">搜索</button>
+  <div class="wordmark">
+    <span class="sigil"><i></i><i></i><i></i></span>
+    partisync <small>@local:~$ v0.1.0-alpha</small>
+  </div>
+  <nav>
+    <button data-tab="browse" aria-current="page">浏览</button>
+    <button data-tab="search">检索</button>
+    <button data-tab="sync">同步</button>
     <button data-tab="dups">重复内容</button>
     <button data-tab="jobs">作业</button>
     <button data-tab="ext">扩展</button>
   </nav>
+</header>
 
-  <div id="view-browse">
+<div id="error-region" class="error" style="display:none"></div>
+
+<!-- 统计仪表（常驻；功能域 A） -->
+<section class="tally" aria-label="本机统计">
+  <div class="cell ok"><div class="num" id="st-files">0</div><div class="cap">文件</div></div>
+  <div class="cell"><div class="num" id="st-dirs">0</div><div class="cap">目录</div></div>
+  <div class="cell"><div class="num" id="st-bytes">0 B</div><div class="cap">总容量</div></div>
+  <div class="cell"><div class="num" id="st-unique">0</div><div class="cap">唯一内容</div></div>
+  <div class="cell"><div class="num" id="st-saved">0 B</div><div class="cap">去重节省</div></div>
+  <div class="cell"><div class="num" id="st-chunks">0</div><div class="cap">唯一块（CDC 1MiB）</div></div>
+</section>
+
+<main>
+  <!-- 浏览 -->
+  <section id="view-browse" style="display:none">
     <div class="crumbs" id="crumbs"></div>
-    <table>
-      <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:110px">大小</th>
-        <th style="width:170px">修改时间</th><th>内容身份</th></tr></thead>
+    <table class="panel-table" aria-label="目录条目">
+      <thead><tr><th></th><th>名称</th><th>大小</th><th>修改时间</th><th>内容身份</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
-  </div>
+  </section>
 
-  <div id="view-search" style="display:none">
-    <div class="searchbar">
-      <input id="q" placeholder="BM25 全文检索（如 png、report、f3…）">
-      <button id="btn-search">搜索</button>
+  <!-- 检索（旗舰） -->
+  <section id="view-search" style="display:none">
+    <div class="prompt-line"><b>partisync@local:~$</b> query<span class="cursor"></span></div>
+    <form class="query-row" onsubmit="return false">
+      <input id="q" type="search" placeholder="搜文件名、内容、转写文本…" aria-label="检索">
+      <button id="btn-search" type="submit">[检索]</button>
+    </form>
+    <div class="mode-switch" role="radiogroup" aria-label="检索模式">
+      <label><input type="radio" name="mode" id="mode-bm25" checked> 关键词</label>
+      <label><input type="radio" name="mode" id="mode-hybrid"> 语义</label>
+      <label><input type="radio" name="mode" id="mode-transcript"> 含转写文本</label>
     </div>
-    <table><thead><tr><th style="width:90px">内容</th><th>命中片段</th><th style="width:90px">分数</th></tr></thead>
-      <tbody id="srows"></tbody></table>
-  </div>
+    <div class="result-meta" id="ssearch-meta"></div>
+    <div id="srows" class="hits"></div>
+  </section>
 
-  <div id="view-dups" style="display:none"></div>
-  <div id="view-jobs" style="display:none"></div>
+  <!-- 同步（T03 交付数据面；本视图为占位框架） -->
+  <section id="view-sync" style="display:none">
+    <div class="status-banner">
+      <span class="dot"></span>
+      同步数据面由 T03 接入（本机引擎视角 · Hub/iroh 不进桌面进程）
+      <time>SPEC M8-WP05 §2.3 / T03</time>
+    </div>
+  </section>
 
-  <div id="view-ext" style="display:none">
+  <!-- 重复内容 -->
+  <section id="view-dups" style="display:none"></section>
+
+  <!-- 作业 -->
+  <section id="view-jobs" style="display:none"></section>
+
+  <!-- 扩展 -->
+  <section id="view-ext" style="display:none">
+    <div class="section-tag">extensions</div>
     <div class="ext-head">
-      <span class="sub">WASM 扩展工具（沙箱内运行，JSON 进 / JSON 出）· 来源目录 ~/.partisync/extensions</span>
-      <button id="btn-ext-refresh">刷新</button>
+      <span class="ext-sub">WASM 扩展工具（沙箱内运行，JSON 进 / JSON 出）· 来源目录 ~/.partisync/extensions</span>
+      <button id="btn-ext-refresh" class="btn ghost">刷新</button>
     </div>
     <div id="ext-list"></div>
     <div id="ext-call" style="display:none">
-      <div class="ext-head"><b id="ext-call-name"></b>
-        <span class="badge">source: extension</span></div>
-      <div class="searchbar">
-        <input id="ext-input" placeholder='JSON 入参，如 {"k":"v"}'>
-        <button id="btn-ext-call">调用</button>
-      </div>
-      <pre id="ext-output" class="ext-out">（结果）</pre>
+      <div class="section-tag">call / <span id="ext-call-name"></span></div>
+      <textarea id="ext-input" rows="4" placeholder='{"input": "…"}'></textarea>
+      <button id="btn-ext-call" class="btn primary">调用</button>
+      <pre id="ext-output"></pre>
     </div>
-    <div id="ext-debug" style="font-size:11px;color:#8b949e;white-space:pre-wrap;font-family:monospace"></div>
-  </div>
+    <pre id="ext-debug"></pre>
+  </section>
+</main>
 
-  <footer>PartiSync Desktop · M6-WP03 · 内容身份 = BLAKE3 · IPC 7 commands（T03）+ 扩展面板（M7-WP01-T04）</footer>
-</div>
-<script src="app-core.js"></script>
+<footer>partisync · 内容身份 = BLAKE3 · IPC 8 commands（T03+T05+T01）· 指纹即视觉</footer>
+<script src="app-core-v3.js"></script>
 </body>
 </html>
