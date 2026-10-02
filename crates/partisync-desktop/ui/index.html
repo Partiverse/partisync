@@ -36,12 +36,15 @@
 
 <main>
   <!-- 浏览 -->
-  <section id="view-browse" style="display:none">
+  <section id="view-browse">
     <div class="crumbs" id="crumbs"></div>
-    <table class="panel-table" aria-label="目录条目">
-      <thead><tr><th></th><th>名称</th><th>大小</th><th>修改时间</th><th>内容身份</th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
+    <div class="stage">
+      <table class="panel-table" aria-label="目录条目">
+        <thead><tr><th></th><th>名称</th><th>大小</th><th>修改时间</th><th>内容身份</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <aside id="detail-panel" class="detail" style="display:none"></aside>
+    </div>
   </section>
 
   <!-- 检索（旗舰） -->

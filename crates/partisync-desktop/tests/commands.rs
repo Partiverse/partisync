@@ -22,8 +22,8 @@
 use std::path::PathBuf;
 
 use partisync_desktop::ipc::{
-    cas_stats, duplicates, get_stats, jobs, list, mcp_call, search, search_hybrid, DuplicatesArgs,
-    ListArgs, McpCallArgs, SearchArgs,
+    asset_detail, cas_stats, duplicates, get_stats, jobs, list, mcp_call, search, search_hybrid,
+    DuplicatesArgs, ListArgs, McpCallArgs, SearchArgs,
 };
 use partisync_desktop::mcp_sidecar::McpSidecar;
 use partisync_desktop::state::AppState;
@@ -336,4 +336,20 @@ async fn t01_hybrid_empty_index_returns_no_hits_and_loads_embedder() {
         dbg.contains("embedder_loaded: true"),
         "hybrid search must load embedder: {dbg}"
     );
+}
+
+/// 详情 IPC（T02）：不存在 content_id → 空 copies（不 panic）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t02_asset_detail_empty_db_returns_empty_copies() {
+    let (app, _tmp) = make_app().await;
+    let d = asset_detail(
+        app.state::<AppState>(),
+        ListArgs {
+            prefix: "deadbeef".into(),
+        },
+    )
+    .await
+    .expect("detail on empty db");
+    assert!(d.copies.is_empty());
+    assert_eq!(d.content_id, "deadbeef");
 }

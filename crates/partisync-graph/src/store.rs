@@ -468,6 +468,23 @@ impl Store {
         .map_err(|e| db_err("查询条目", e))
     }
 
+    /// 按内容身份列条目（M8-WP05-T02 详情面板：同 content_id 全部路径）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn entries_by_content(
+        &self,
+        content_id: &str,
+    ) -> Result<Vec<EntryRow>, PartisyError> {
+        sqlx::query_as::<_, EntryRow>(
+            "SELECT id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device, state, content_hydrated_at_ns, pin_count FROM entry WHERE content_id = ? ORDER BY path",
+        )
+        .bind(content_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("按内容查询条目", e))
+    }
+
     /// 列出直接子项（目录在前，名称序；LIMIT 1000——病态大目录的 UI 分页，
     /// M1-WP08 实测：顶层 16 万子项目录无限制时序列化 1.3s）。
     ///
