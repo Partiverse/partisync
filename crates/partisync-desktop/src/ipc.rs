@@ -1,4 +1,5 @@
-//! IPC commands（T03 期 6 个 + T05 期 1 个 `mcp_call`）。
+//! IPC commands（11 个： M6-WP03 基础 6 + T01/T02/T05 增量 + M8-WP05-T03
+//! 同步对）。
 //!
 //! 由前端 `window.__TAURI__.invoke(cmd, args)` 调用； 所有命令接收
 //! `tauri::State<AppState>` 句柄， 返回 [`crate::error::DesktopResult`]。
@@ -7,9 +8,13 @@
 //! - `get_stats` → [`Stats`] 全局统计
 //! - `list` → `Vec<EntryRow>` 指定前缀下的子条目
 //! - `search` → `Vec<SearchHit>` BM25 全文检索命中
+//! - `search_hybrid` (T01) → `Vec<SearchHit>` 语义混合检索命中
+//! - `asset_detail` (T02) → [`AssetDetail`] 条目详情
 //! - `cas_stats` → [`CasStats`] 块库统计
 //! - `duplicates` → `Vec<DupGroup>` 内容级去重组
 //! - `jobs` → `Vec<JobRow>` 作业列表
+//! - `sync_stats` (M8-WP05-T03) → [`SyncStatsView`] 同步状态只读派生
+//! - `sync_recent` (M8-WP05-T03) → `Vec<SyncRecentItem>` 最近活动时间线
 //! - `mcp_call` (T05) → `serde_json::Value` 转发到 `partisync-mcp` 侧车
 //!
 //! [`Stats`]: partisync_graph::store::Stats
@@ -23,6 +28,8 @@ use partisync_cas::CasStats;
 use partisync_graph::jobs::{self, JobRow};
 use partisync_graph::store::{DupGroup, EntryRow, Stats};
 use partisync_index::{Bm25Query, HybridQuery, HybridVectorKind, SearchFilters, VectorKind};
+// M8-WP05-T03： sync 域统计口径类型（只读复用， 无写路径/网络面——N2）。
+use partisync_sync::session::SyncStats as SyncSessionStats;
 
 use crate::error::{DesktopError, DesktopResult};
 use crate::state::AppState;
@@ -198,6 +205,169 @@ pub async fn duplicates(
 #[tauri::command]
 pub async fn jobs(state: State<'_, AppState>) -> DesktopResult<Vec<JobRow>> {
     Ok(jobs::list(&state.store).await?)
+}
+
+/// 同步状态视图（M8-WP05-T03；SPEC §2.3）。
+///
+/// **只读派生**： 直接聚合 graph store 既有持久态（`sync_oplog` /
+/// `sync_conflict` 表）， 不引入任何写路径/网络面——Hub/iroh 不进
+/// desktop 进程（function-map §4-N2）。 字段口径复用 sync 域会话统计
+/// 类型 `partisync_sync::session::SyncStats`（该类型无 `Serialize`，
+/// IPC 层另包本视图）：
+/// - `applied`： oplog 中**远端 origin** 行 = 本节点已应用的他机变更；
+/// - `skipped_self`： 本机 origin 行（对端回放按回环防护跳过——
+///   mockup「本机跳过（回环）」口径）；
+/// - `skipped_lww`： LWW 落选行不入库（`INSERT OR IGNORE` 丢弃），
+///   读侧恒 0， UI 照实呈现；
+/// - `conflicts`： `sync_conflict` 血缘表行数（P11「保留两者」落档）。
+#[derive(Debug, Serialize)]
+pub struct SyncStatsView {
+    pub applied: u64,
+    pub skipped_self: u64,
+    pub skipped_lww: u64,
+    pub conflicts: u64,
+    /// 已对账设备数（oplog 去重后的远端 origin）。
+    pub devices: u64,
+    /// 最近对账时间（远端 origin 行最大 `at_ns`；`None` = 尚无他机变更）。
+    pub last_sync_ns: Option<i64>,
+}
+
+/// `sync_recent` IPC 入参。
+#[derive(Debug, Deserialize)]
+pub struct SyncRecentArgs {
+    pub limit: Option<u32>,
+}
+
+/// 同步最近活动行（M8-WP05-T03 时间线；oplog 尾部 + 冲突血缘合并）。
+#[derive(Debug, Serialize)]
+pub struct SyncRecentItem {
+    pub at_ns: i64,
+    /// 文件名（oplog payload `name` / path 末段；冲突 = base_path 末段）。
+    pub name: String,
+    /// 所在目录（冲突行 = 空串）。
+    pub dir: String,
+    /// 来源设备（冲突 = 来方设备）。
+    pub origin_device: String,
+    /// `upsert` / `remove` / `conflict`。
+    pub op: String,
+    /// P11 冲突血缘行（前端琥珀标注）。
+    pub conflict: bool,
+    /// 内容身份（指纹色派生；冲突行 = `None`）。
+    pub content_id: Option<String>,
+}
+
+/// oplog 尾部扫描深度（HLC 升序取尾；与 `limit` 合并后截断）。
+const OPLOG_TAIL: usize = 200;
+/// 冲突血缘统计扫描上限（桌面壳演示规模， 冲突量级远低于此）。
+const CONFLICT_SCAN_LIMIT: u32 = 10_000;
+
+/// 同步状态只读统计（M8-WP05-T03；SPEC §2.3）。
+///
+/// 未登记设备的空库（`device` 表空）按捕获侧同款兜底 `device-local`
+/// 处理——全库 oplog 行均视为本机 origin， 前端呈现「尚未与其他设备
+/// 同步」。
+///
+/// # Errors
+/// DB 错误 → `DesktopError::Internal`（`{kind:"Internal"}`，H1）。
+#[tauri::command]
+pub async fn sync_stats(state: State<'_, AppState>) -> DesktopResult<SyncStatsView> {
+    let self_device = state
+        .store
+        .device_id()
+        .await
+        .unwrap_or_else(|_| "device-local".into());
+    let rows = state.store.pending_oplog().await?;
+    let mut devices = std::collections::BTreeSet::new();
+    let mut last_sync_ns = None;
+    let mut applied = 0u64;
+    let mut skipped_self_origin = 0u64;
+    for r in &rows {
+        if r.origin_device == self_device {
+            skipped_self_origin += 1;
+            continue;
+        }
+        applied += 1;
+        devices.insert(r.origin_device.as_str());
+        last_sync_ns = last_sync_ns.max(Some(r.at_ns));
+    }
+    // 口径对齐 sync 域类型（skipped_lww 恒 0： LWW 落选行不入库）。
+    let session = SyncSessionStats {
+        applied,
+        skipped_self_origin,
+        skipped_lww: 0,
+        conflicts: 0,
+    };
+    let conflicts = state.store.list_conflicts(CONFLICT_SCAN_LIMIT).await?.len() as u64;
+    Ok(SyncStatsView {
+        applied: session.applied,
+        skipped_self: session.skipped_self_origin,
+        skipped_lww: session.skipped_lww,
+        conflicts,
+        devices: devices.len() as u64,
+        last_sync_ns,
+    })
+}
+
+/// 同步最近活动时间线（M8-WP05-T03）： oplog 尾部 + 冲突血缘按 `at_ns`
+/// 降序合并截断。 空库返回空 vec（前端呈现动作邀请空态）。
+///
+/// # Errors
+/// DB 错误 → `DesktopError::Internal`； oplog payload 非法 JSON 按空
+/// 对象兜底（不 fail 整条时间线）。
+#[tauri::command]
+pub async fn sync_recent(
+    state: State<'_, AppState>,
+    args: SyncRecentArgs,
+) -> DesktopResult<Vec<SyncRecentItem>> {
+    let limit = args.limit.unwrap_or(30).min(100) as usize;
+    let rows = state.store.pending_oplog().await?;
+    let mut items: Vec<SyncRecentItem> = Vec::new();
+    for r in rows.iter().rev().take(OPLOG_TAIL) {
+        let payload: Value = serde_json::from_str(&r.payload).unwrap_or(Value::Null);
+        let path = payload
+            .get("path")
+            .and_then(Value::as_str)
+            .map_or_else(|| r.entity_id.clone(), str::to_string);
+        let name = payload
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| basename_or(&path));
+        let content_id = payload
+            .get("content_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        items.push(SyncRecentItem {
+            at_ns: r.at_ns,
+            dir: path
+                .strip_suffix(&name)
+                .map_or_else(String::new, str::to_string),
+            name,
+            origin_device: r.origin_device.clone(),
+            op: r.op.clone(),
+            conflict: false,
+            content_id,
+        });
+    }
+    for c in state.store.list_conflicts(limit as u32).await? {
+        items.push(SyncRecentItem {
+            at_ns: c.at_ns,
+            dir: String::new(),
+            name: basename_or(&c.base_path),
+            origin_device: c.origin_device,
+            op: "conflict".into(),
+            conflict: true,
+            content_id: None,
+        });
+    }
+    items.sort_by(|a, b| b.at_ns.cmp(&a.at_ns).then_with(|| a.name.cmp(&b.name)));
+    items.truncate(limit);
+    Ok(items)
+}
+
+/// path 末段（无 `/` 时原样返回）。
+fn basename_or(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 /// 转发到 `partisync-mcp` 侧车进程（SPEC §2.3 第 7 命令）。

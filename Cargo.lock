@@ -7531,6 +7531,7 @@ dependencies = [
  "partisync-gateway",
  "partisync-graph",
  "partisync-index",
+ "partisync-sync",
  "serde",
  "serde_json",
  "tauri",

@@ -240,7 +240,7 @@ main { padding: 0 22px 56px; }
 .detail .copies li { padding: 3px 0; color: var(--text); word-break: break-all; }
 .detail .copies li .dim { color: var(--text-dim); }
 
-/* ===== 同步/横幅 ===== */
+/* ===== 同步（T03：状态横幅 + 四格仪表 + 按日时间线；design v4.3 wireframe） ===== */
 .status-banner {
   margin: 20px 0 0; padding: 10px 14px;
   border: 1px solid var(--green-dim); background: var(--panel);
@@ -248,6 +248,44 @@ main { padding: 0 22px 56px; }
 }
 .status-banner .dot { width: 8px; height: 8px; background: var(--green); flex-shrink: 0; }
 .status-banner time { color: var(--text-dim); font-size: 11px; margin-left: auto; font-family: var(--mono); }
+.status-banner b { color: var(--green); font-weight: 400; }
+.status-banner.alert { border-color: var(--amber); }
+.status-banner.alert .dot { background: var(--amber); box-shadow: 0 0 6px rgba(215, 160, 21, 0.6); }
+.status-banner .conflict-note { color: var(--amber); }
+/* 四格仪表：复用 tally 骨架；冲突格琥珀（唯一警示色语义——conflict ≠ error） */
+.sync-tally { margin: 14px 0 0; }
+.sync-tally .num { font-size: 30px; }
+.sync-tally .cell.alert .num {
+  color: var(--amber);
+  text-shadow: 0 0 10px rgba(215, 160, 21, 0.35);
+}
+.sync-tally .cell.alert .cap::before { color: var(--amber); }
+/* 按日分组时间线（指纹条延续：upsert 按 content_id 派生，冲突琥珀） */
+.sync-timeline { border: 1px solid var(--panel-line); background: var(--panel); }
+.sync-day {
+  padding: 7px 14px; font-size: 11px; color: var(--green);
+  border-bottom: 1px solid var(--panel-line); background: rgba(2, 5, 3, 0.5);
+}
+.sync-day::before { content: "// "; color: var(--green-dim); }
+.sync-item {
+  display: flex; gap: 13px; align-items: center;
+  padding: 10px 14px; border-bottom: 1px solid var(--panel-line);
+  position: relative;
+}
+.sync-item::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
+  width: 2px; background: var(--fp, var(--green-dim));
+}
+.sync-item .fp-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: var(--fp, var(--green-dim)); box-shadow: 0 0 6px var(--fp, transparent);
+}
+.sync-item .what { flex: 1; min-width: 0; }
+.sync-item .what b { font-size: 13px; font-weight: 700; color: var(--text); }
+.sync-item .what span { display: block; font-size: 11.5px; color: var(--text-dim); }
+.sync-item .what span.conflict { color: var(--amber); }
+.sync-item .what .dir { font-size: 11px; color: var(--text-dim); word-break: break-all; }
+.sync-item time { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
 
 /* ===== 重复内容 / 作业 ===== */
 .dup { border: 1px solid var(--panel-line); background: var(--panel); margin-bottom: 12px; }
