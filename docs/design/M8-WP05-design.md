@@ -113,7 +113,23 @@ PartiSync 桌面壳是**本地优先引擎的档案工具**：用户的核心对
 - 空态文案：「本机还没有索引文件——运行 `partisync index <路径>` 开始」
   （给动作，不给情绪）。
 
-## 5. 复核日志
+## 5. 设计审计（v4.1，2026-10-02）
+
+**审计文档**: `docs/design/M8-WP05-design-audit.md`（功能×组件覆盖矩阵 +
+shadcn 偏离评估）。要点：
+
+- **token 补齐**：`--destructive`（操作错误，独立于 amber 冲突警示）、
+  `--secondary`、`--input`——shadcn 语义色清单补全；
+- **组件状态画廊** `mockup-states.html`（截图
+  `docs/screenshots/M8-WP05-design-states.png`）：Skeleton 检索加载 /
+  Empty 动作邀请 / Button 四变体 / Toast 成败 / 破坏性确认 Dialog /
+  conflict≠error 语义分离 / cursor 分页控件；
+- **实施硬约束（T1–T4）**：不允许只做 happy path——「加载/空/错」三态
+  全覆盖；
+- **有意偏离登记**（不回改）：radius 0（用户直角要求）、全 mono 正文
+  （borgbackup 判例）、仅 dark 主题——三处均 shadcn 标准的自觉偏离。
+
+## 6. 复核日志
 
 - 三页原型截图自查（headless Chrome 1280 宽）：指纹语言三页贯通、
   唯一警示色仅同步冲突、无模板俗套（对照 frontend-design 校准清单
