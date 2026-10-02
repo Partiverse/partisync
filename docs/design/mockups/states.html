@@ -66,7 +66,7 @@ body {
 .toast.ok { border-color: var(--green-dim); }
 .toast.ok::before { content: "■"; color: var(--green); font-size: 9px; }
 .toast.err { border-color: hsl(0 72% 56% / 0.5); }
-.toast.err::before { content: "■"; color: var(--destructive); font-size: 9px; }
+.toast.err::before { content: "✕"; color: var(--destructive); font-size: 9px; }
 .toast time { margin-left: auto; font-size: 10px; color: var(--text-dim); }
 /* Dialog（破坏性确认） */
 .dialog-demo { position: relative; min-height: 150px; background: hsl(160 5% 3% / 0.8); display: flex; align-items: center; justify-content: center; }
@@ -76,16 +76,16 @@ body {
   box-shadow: 0 0 30px hsl(0 72% 56% / 0.15);
 }
 .dialog h4 { font-size: 13.5px; color: var(--destructive); margin-bottom: 8px; }
-.dialog h4::before { content: "⚠ "; }
+
 .dialog p { font-size: 12.5px; color: var(--text-dim); margin-bottom: 16px; }
 .dialog .row { display: flex; justify-content: flex-end; gap: 10px; }
 /* Destructive 警示条（与 amber 冲突警示分离） */
 .warns { display: flex; flex-direction: column; gap: 10px; }
 .warn { padding: 9px 14px; font-size: 12.5px; border: 1px solid var(--panel-line); background: var(--panel); }
 .warn.conflict { border-color: hsl(38 78% 46% / 0.5); }
-.warn.conflict::before { content: "◆ 冲突 · "; color: var(--amber); }
+.warn.conflict { border-color: hsl(38 78% 46% / 0.5); }
 .warn.error { border-color: hsl(0 72% 56% / 0.5); }
-.warn.error::before { content: "■ 错误 · "; color: var(--destructive); }
+.warn.error { border-color: hsl(0 72% 56% / 0.5); }
 /* cursor 分页控件 */
 .pager { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-dim); }
 .pager button { font-family: var(--mono); font-size: 12px; padding: 5px 12px; background: var(--secondary); color: var(--text); border: 1px solid var(--panel-line); cursor: pointer; }
@@ -128,8 +128,8 @@ body {
   <div class="demo">
     <div class="cap">同一动作全流程同名：按钮「推送」→ toast「已推送」</div>
     <div class="toast-row">
-      <div class="toast ok">已推送到 2 台设备 <time>刚刚</time></div>
-      <div class="toast err">推送失败：对端不可达，将在 30s 后自动重试 <time>刚刚</time></div>
+      <div class="toast ok"><span aria-hidden="true">■</span> 已推送到 2 台设备 <time>刚刚</time></div>
+      <div class="toast err"><span aria-hidden="true">✕</span> 推送失败：对端不可达，将在 30s 后自动重试 <time>刚刚</time></div>
     </div>
   </div>
 
@@ -138,7 +138,7 @@ body {
     <div class="cap">写路径操作前置（对账语义任务接入后启用）</div>
     <div class="dialog-demo">
       <div class="dialog" role="alertdialog" aria-label="确认删除">
-        <h4>删除索引？</h4>
+        <h4><span aria-hidden="true">⚠&#xFE0E;</span> 删除索引？</h4>
         <p>将移除 1,284 条索引记录与检索数据。原始文件与 CAS 内容不受影响。此操作不可撤销。</p>
         <div class="row">
           <button class="btn ghost">取消</button>
@@ -152,8 +152,8 @@ body {
   <div class="demo">
     <div class="cap">amber = 数据冲突态（同步面）；destructive = 操作错误态（全局）</div>
     <div class="warns">
-      <div class="warn conflict">验收会录音转写.txt —— 两台设备都改了此文件，需要选择保留版本</div>
-      <div class="warn error">索引写入失败：磁盘空间不足（剩余 0 B），已暂停扫描作业</div>
+      <div class="warn conflict"><span aria-hidden="true">◆ </span>冲突 · 验收会录音转写.txt —— 两台设备都改了此文件，需要选择保留版本</div>
+      <div class="warn error"><span aria-hidden="true">■ </span>错误 · 索引写入失败：磁盘空间不足（剩余 0 B），已暂停扫描作业</div>
     </div>
   </div>
 
