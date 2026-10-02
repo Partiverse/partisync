@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PartiSync · 检索 — 设计原型</title>
+<style>
+/* ============ 设计 tokens（M8-WP05 设计语言） ============
+   基底：档案纸灰；主色：铜绿；指纹色环：HSL 派生自 blake3 摘要
+   （同内容永远同色——语义化，非装饰）。等宽字体仅承载真实摘要。 */
+:root {
+  --paper: #F4F5F3;
+  --ink: #171B19;
+  --ink-2: #4A524E;
+  --ink-3: #7C847F;
+  --line: #D8DCD7;
+  --green: #33604F;
+  --green-soft: #E4EDE8;
+  --amber: #9A6B15;
+  --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --sans: "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --serif: "Songti SC", "STSong", serif;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.6;
+}
+/* ===== 壳：header + tabs ===== */
+header {
+  display: flex; align-items: baseline; gap: 16px;
+  padding: 18px 28px 0;
+  border-bottom: 1px solid var(--line);
+}
+.wordmark {
+  font-family: var(--serif);
+  font-size: 21px;
+  letter-spacing: 0.02em;
+}
+.wordmark small {
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-left: 8px;
+  letter-spacing: 0;
+}
+nav { display: flex; gap: 2px; margin-left: auto; }
+nav a {
+  color: var(--ink-2);
+  text-decoration: none;
+  padding: 8px 14px 12px;
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+}
+nav a:hover { color: var(--ink); }
+nav a[aria-current] {
+  color: var(--green);
+  font-weight: 600;
+  border-bottom-color: var(--green);
+}
+/* ===== 检索主区（hero 检索框） ===== */
+.search-stage {
+  max-width: 720px;
+  margin: 56px auto 0;
+  padding: 0 28px;
+}
+.query-row {
+  display: flex; gap: 0;
+  border: 1px solid var(--ink);
+  background: #FDFDFC;
+}
+.query-row:focus-within { outline: 2px solid var(--green); outline-offset: -1px; }
+.query-row input {
+  flex: 1; border: 0; background: transparent;
+  font-family: var(--sans); font-size: 17px;
+  padding: 14px 18px;
+  color: var(--ink);
+}
+.query-row input::placeholder { color: var(--ink-3); }
+.query-row input:focus { outline: none; }
+.query-row button {
+  border: 0; background: var(--green); color: #F4F5F3;
+  font-family: var(--sans); font-size: 14px; font-weight: 600;
+  padding: 0 26px; cursor: pointer;
+}
+.query-row button:hover { background: #2A5040; }
+/* 检索模式开关：分段控件（非卡片） */
+.mode-switch {
+  display: flex; margin-top: 14px;
+  font-size: 12.5px;
+}
+.mode-switch label {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 14px;
+  cursor: pointer;
+  color: var(--ink-2);
+  border-left: 1px solid var(--line);
+}
+.mode-switch label:first-child { border-left: 0; padding-left: 0; }
+.mode-switch input { accent-color: var(--green); }
+.mode-switch label:has(input:checked) { color: var(--green); font-weight: 600; }
+.hint {
+  margin-top: 26px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.hint code { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+/* ===== 结果区 ===== */
+.results {
+  max-width: 720px;
+  margin: 40px auto 0;
+  padding: 0 28px 60px;
+}
+.result-meta {
+  display: flex; align-items: baseline; gap: 12px;
+  font-size: 12.5px; color: var(--ink-3);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.result-meta b { color: var(--ink); font-weight: 600; }
+.hit {
+  display: flex; gap: 14px;
+  padding: 15px 0 15px 14px;
+  border-bottom: 1px solid var(--line);
+  position: relative;
+}
+/* 指纹条：色相派生自内容摘要——同内容永远同色 */
+.hit::before {
+  content: "";
+  position: absolute; left: 0; top: 12px; bottom: 12px;
+  width: 3px;
+  background: var(--fp, #888);
+}
+.hit .fp-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 7px;
+  height: fit-content;
+  color: #FDFDFC;
+  background: var(--fp, #888);
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.hit .body { flex: 1; min-width: 0; }
+.hit .name {
+  font-weight: 600; font-size: 14.5px;
+}
+.hit .path { font-size: 12px; color: var(--ink-3); margin-top: 1px; }
+.hit .snippet {
+  margin-top: 6px; font-size: 13px; color: var(--ink-2);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.hit .snippet mark { background: var(--green-soft); color: var(--ink); padding: 0 1px; }
+/* score 细条（数据可视化，非装饰） */
+.score {
+  width: 56px; flex-shrink: 0; text-align: right;
+  margin-top: 3px;
+}
+.score .bar { height: 3px; background: var(--green); margin-left: auto; }
+.score .num { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+/* 语义模式说明行 */
+.mode-note {
+  margin-top: 18px; font-size: 12px; color: var(--ink-3);
+}
+.mode-note b { color: var(--green); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wordmark">PartiSync<small>本机 · 索引已就绪</small></div>
+  <nav>
+    <a href="mockup-browse.html">浏览</a>
+    <a href="#" aria-current="page">检索</a>
+    <a href="mockup-sync.html">同步</a>
+    <a href="#">重复内容</a>
+    <a href="#">作业</a>
+    <a href="#">扩展</a>
+  </nav>
+</header>
+
+<main class="search-stage">
+  <form class="query-row" onsubmit="return false">
+    <input type="search" value="项目验收 报告" placeholder="搜文件名、内容、转写文本…" aria-label="检索">
+    <button type="submit">检索</button>
+  </form>
+  <div class="mode-switch" role="radiogroup" aria-label="检索模式">
+    <label><input type="radio" name="mode"> 关键词</label>
+    <label><input type="radio" name="mode" checked> 语义</label>
+    <label><input type="radio" name="mode"> 含转写文本</label>
+  </div>
+  <p class="hint">语义模式理解意思而非逐字匹配——「项目验收 报告」也会命中「交付物确认书」。指纹列与色标由内容摘要派生，同一文件在任何视图里颜色相同。</p>
+</main>
+
+<section class="results" aria-label="检索结果">
+  <div class="result-meta"><b>14</b> 个命中 · 语义模式 · 耗时 41 ms</div>
+
+  <article class="hit" style="--fp: hsl(152, 38%, 38%)">
+    <span class="fp-badge">9f3a2c1d</span>
+    <div class="body">
+      <div class="name">2026-Q3 项目验收报告.docx</div>
+      <div class="path">~/Projects/aurora/交付</div>
+      <div class="snippet">…经三方评审，<mark>项目验收</mark>通过条件已全部满足，本<mark>报告</mark>作为 aurora 二期结项依据…</div>
+    </div>
+    <div class="score"><div class="bar" style="width: 92%"></div><div class="num">0.92</div></div>
+  </article>
+
+  <article class="hit" style="--fp: hsl(28, 42%, 45%)">
+    <span class="fp-badge">7b81e0aa</span>
+    <div class="body">
+      <div class="name">验收会录音转写.txt</div>
+      <div class="path">~/Projects/aurora/会议</div>
+      <div class="snippet">（语音转写）…关于验收范围，建议按里程碑拆分：<mark>报告</mark>评审、<mark>项目验收</mark>测试、文档归档三部分…</div>
+    </div>
+    <div class="score"><div class="bar" style="width: 78%"></div><div class="num">0.78</div></div>
+  </article>
+
+  <article class="hit" style="--fp: hsl(204, 35%, 42%)">
+    <span class="fp-badge">c4d92e07</span>
+    <div class="body">
+      <div class="name">扫描件_盖章版.pdf</div>
+      <div class="path">~/Archive/2025</div>
+      <div class="snippet">（OCR）…兹确认上述<mark>项目验收</mark>结果，双方签字盖章之日起生效…</div>
+    </div>
+    <div class="score"><div class="bar" style="width: 61%"></div><div class="num">0.61</div></div>
+  </article>
+
+  <article class="hit" style="--fp: hsl(315, 25%, 44%)">
+    <span class="fp-badge">1e6b40f9</span>
+    <div class="body">
+      <div class="name">meeting-notes-0912.md</div>
+      <div class="path">~/Projects/aurora/会议</div>
+      <div class="snippet">…下一步：整理验收材料清单，起草结项<mark>报告</mark>初稿，抄送甲方项目负责人…</div>
+    </div>
+    <div class="score"><div class="bar" style="width: 44%"></div><div class="num">0.44</div></div>
+  </article>
+
+  <p class="mode-note"><b>语义</b>命中含关键词不完全一致的条目（如「结项报告」）。切回「关键词」模式可严格匹配字面。</p>
+</section>
+</body>
+</html>
