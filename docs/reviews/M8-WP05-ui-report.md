@@ -19,7 +19,7 @@
 - **工具链判例**：cliclick（点击/鼠标）+ osascript frontmost（按 **unix id** 定位实例——多实例重名时按名匹配会撞错进程）+ `screencapture -x` 全屏 + `sips -c 1600 2400 --cropOffset 100 240` 裁 1200×800 逻辑窗（2x retina）。
 - **数据态种子判例**（T3 首创）：CLI 无 capture 写路径——对**运行中**实例的 WAL DB 直接 `sqlite3 INSERT` oplog/conflict 种子行，前端 5s 轮询自动刷新，一张截图同时实证渲染 + IPC 读链路 + 轮询（H3）。
 - **视觉查证**：截图经 visual-judge 子代理对照设计 v4.3 规范独立评审（T3 双图 PASS：布局对齐 wireframe、全直角/全 mono、琥珀仅冲突语义、空态动作邀请文案）。
-- **T4 环境受限**：会话后段显示器锁定（caffeinate -d/cliclick 唤醒无效，密码门不可代答），全 tab 视觉巡检未能执行——按验收规则 PR 保持 OPEN 标注「待 GUI 验证」（§5）。
+- **T4 全 tab 巡检（已补验，2026-10-02 晚）**：初轮因显示器锁定改走「待 GUI 验证」（PR 正文签收动作）；用户解锁后按签收动作补齐——7 张截图归档 + demo_echo 真调用（AXPress 路径）出参回显 + 调用历史数据态；visual-judge 对照 v4.3 评审 7 张（首轮 4 pass + 3 fail：browse/dups/jobs 空态缺动作邀请——即修复验，见 §6）。
 
 ## 3. 截图索引（docs/screenshots/）
 
@@ -33,7 +33,13 @@
 | M8-WP05-T2-detail.png | T2 | 浏览详情面板（blake3 色带 + 副本路径） |
 | M8-WP05-T3-sync-empty.png | T3 | 同步 tab 空态（动作邀请） |
 | M8-WP05-T3-sync-data.png | T3 | 同步 tab 数据态（琥珀横幅 + 3/1/0/1 仪表 + 时间线，轮询实证） |
-| （本 PR 待补）M8-WP05-T4-tab-*.png ×6 | T4 | 全 tab 视觉巡检 + ext 调用历史数据态——**待 GUI 验证** |
+| M8-WP05-T4-tab-browse.png | T4 | 浏览 tab（根路径空态 + 动作邀请） |
+| M8-WP05-T4-tab-search.png | T4 | 检索 tab（关键词模式 + hero 框 + 三开关） |
+| M8-WP05-T4-tab-sync.png | T4 | 同步 tab 空态（T03 交付复核） |
+| M8-WP05-T4-tab-dups.png | T4 | 重复内容 tab（空态 + 动作邀请） |
+| M8-WP05-T4-tab-jobs.png | T4 | 作业 tab（空态 + 动作邀请） |
+| M8-WP05-T4-tab-ext.png | T4 | 扩展 tab（工具表 + capabilities 展示 + 调用历史空态） |
+| M8-WP05-T4-ext-history.png | T4 | 扩展调用历史数据态（demo_echo 真调用：出参 JSON + 历史行 23:04:23 OK in（空）· out） |
 
 ## 4. function-map 功能覆盖矩阵核对（§1 逻辑树）
 
@@ -65,8 +71,9 @@
 | D3 | 详情面板测试空库路径覆盖（T02 登记延续） | T2 | 随下一桌面任务顺带补测试 |
 | D4 | 转写检索开关为 N4 纯透传语义标注（include_transcript 后端常开） | T2 | 维持，后端开关化时回改 |
 | D5 | Mimosa `scanner_enobufs` 反复出现，deep 完整审计重跑（hook 兼容策略期间不宣称项目安全） | hook 提示 ×3+ | **下一独立任务**（会话谱系见项目记忆） |
-| D6 | **T4 全 tab 视觉巡检待 GUI 验证**（显示器锁定环境不可得）：PR 保持 OPEN、不自行合入；环境恢复后补 6 tab 截图（含 ext 调用历史数据态：demo_echo 真调用 + 行点击回看）入 docs/screenshots/ 后签收 | AGENTS.md 验收规则 | 本 PR 合入前置条件 |
+| D6 | ~~T4 全 tab 视觉巡检待 GUI 验证~~ **已清账（2026-10-02 晚）**：7 张截图归档 + demo_echo 真调用 + visual-judge 评审；随带修复 browse/dups/jobs 空态动作邀请缺口（judge 首轮 3 fail → 整改） | AGENTS.md 验收规则 | 已闭环 |
 
 ## 6. 复核日志
 
 - 2026-10-02：GLM-5.3-Flash 初稿（T01–T03 证据回溯 + T4 交付 + 债表 D1–D6）。
+- 2026-10-02 晚：D6 清账——锁屏解除后按 PR 签收动作补全 GUI 巡检；visual-judge 首轮 7 图评审（4 pass / 3 fail），3 fail = browse/dups/jobs 空态缺动作邀请（T01 重写遗留缺口，设计 §4 明文）→ 当场修复空态文案 + 重截 + 复评。GUI 工具链新增判例：WKWebView 对 cliclick 合成点击在部分静态按钮上不派发 onclick（hover 态正常）——改走 **macOS Accessibility AXPress**（computer-use）可靠触发；setValue 会遭智能引号替换（尾引号变 ”），绕法 = 空参调用或含数字值 JSON。

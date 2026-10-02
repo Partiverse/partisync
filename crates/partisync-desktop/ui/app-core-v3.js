@@ -16,6 +16,12 @@ if (!__tauriCore) {
 }
 const { invoke } = __tauriCore;
 
+// 全局 JS 异常 → #ext-debug（T04 GUI 诊断；保留为轻量错误面）。
+window.addEventListener("error", (e) => {
+  const d = document.getElementById("ext-debug");
+  if (d) d.textContent = `[JS-ERR] ${e.message} @${e.filename}:${e.lineno}\n` + d.textContent;
+});
+
 let curPath = "/";
 let searchMode = "bm25"; // bm25 = 关键词；hybrid = 语义（T01 旗舰）
 const $ = (id) => document.getElementById(id);
@@ -102,7 +108,7 @@ async function browse(path) {
       <td>${e.name}</td><td class="size">${dir ? "—" : sizeFmt(e.size)}</td>
       <td class="mtime">${timeFmt(e.mtime_ns)}</td>
       <td class="fp"${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>${e.content_id ? "<i></i>" + e.content_id.slice(0, 8) : "—"}</td></tr>`;
-  }).join("") : `<tr><td colspan="5" class="empty">空目录</td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="empty">${curPath === "/" ? "本机还没有索引文件——运行 <b>partisync index &lt;路径&gt;</b> 开始建立索引" : "空目录"}</td></tr>`;
   $("rows").querySelectorAll("tr[data-path]").forEach(tr => {
     tr.onclick = () => browse(tr.dataset.path);
   });
@@ -213,7 +219,7 @@ async function loadDups() {
         <span class="badge">${g.copies.length} 份副本 · 每份 ${sizeFmt(g.size)}</span>
       </div>
       <ul>${g.copies.map(c => `<li>${c.path}</li>`).join("")}</ul>
-    </div>`).join("") : `<div class="empty">没有发现重复内容</div>`;
+    </div>`).join("") : `<div class="empty">没有发现重复内容——索引更多文件后这里会自动按内容身份聚合相同文件</div>`;
 }
 
 // ── E. 作业 ──
@@ -226,11 +232,12 @@ async function loadJobs() {
       return `<tr><td class="fp">${r.id.slice(0,10)}…</td><td>${r.kind}</td>
         <td class="${cls}">${r.status_name || r.status}</td>
         <td class="size">${r.done_files}</td><td class="fp">${r.checkpoint || "—"}</td></tr>`;
-    }).join("")}</tbody></table>` : `<div class="empty">暂无作业</div>`;
+    }).join("")}</tbody></table>` : `<div class="empty">暂无作业——运行 <b>partisync index / watch</b> 后这里会显示作业进度</div>`;
 }
 
 // ── G. 扩展 ──
 async function loadExtTools() {
+  renderExtHistory();
   const dbg = (m) => { const d = $("ext-debug"); if (d) d.textContent = `[${new Date().toLocaleTimeString()}] ${m}\n` + (d.textContent || ""); };
   try {
     dbg("loadExtTools: start");
