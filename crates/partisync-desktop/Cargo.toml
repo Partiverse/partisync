@@ -27,6 +27,12 @@ partisync-index = { path = "../partisync-index", version = "0.1.0" }
 # `partisync-mcp` bin target + 拿 `env!("CARGO_BIN_EXE-partisync-mcp")` 绝对路径。
 # 不链接 gateway lib。 ADR-0024 修订 5 登记。
 partisync-gateway = { path = "../partisync-gateway", version = "0.1.0" }
+# M8-WP05-T01（语义检索旗舰）：查询向量嵌入器（fastembed BGE-small-zh-v1.5
+# ——与 M6-D67-T03 EvalRunner 同模型同线位，ADR-0018 批次内已锚定
+# fastembed =7.0.1，workspace 既有依赖，非新增顶层 crates.io 依赖）。
+# 懒加载于 `AppState::embedder()`：**启动路径不加载**（function-map §4-N1
+# 冷启动预算硬线）。
+fastembed = { workspace = true }
 
 [features]
 # 默认仅启用最小 webview； 后续 task 再开 protocol / devtools / updater 等

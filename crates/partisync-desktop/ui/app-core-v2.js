@@ -1,14 +1,16 @@
 // PartiSync Desktop 前端（T03 IPC 调用层 + M7-WP01-T04 扩展面板）。
 //
-// 数据走 7 个 Tauri command（src/ipc.rs）：
-//   get_stats / list / search / cas_stats / duplicates / jobs / mcp_call
+// 数据走 8 个 Tauri command（src/ipc.rs）：
+//   get_stats / list / search / search_hybrid / cas_stats / duplicates /
+//   jobs / mcp_call
 //
 // 错误形状： IPC 返回 `{kind: string, msg: string}`（见 error.rs）
 // → 捕获 invoke 抛错， 按 kind 分支处理（toast / 降级 / 重试）。
 //
-// 文件名 app-core.js（原 app-main.js）：WKWebView 对 tauri:// 资源的
-// 缓存不因内容更新失效，`?v=` 查询参数也无法击穿（#39 实测）——
-// 前端修复一律伴随文件改名（#39 判例：app.js → app-main.js → app-core.js）。
+// 文件名 app-core-v2.js：WKWebView 对 tauri:// 资源的缓存不因内容更新
+// 失效，`?v=` 查询参数也无法击穿（#39 实测）——前端修复一律伴随文件
+// 改名（判例链：app.js → app-main.js → app-core.js → app-core-v2.js，
+// M8-WP05-T01 语义检索开关/三态为本次改名动因）。
 
 // Tauri 全局注入（tauri.conf.json app.withGlobalTauri = true）。
 // 显式守卫：未注入时给出可读提示而非整页 JS 静默失效（此前

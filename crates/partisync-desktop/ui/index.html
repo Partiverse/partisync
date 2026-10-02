@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PartiSync Desktop</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles-v2.css">
 </head>
 <body>
 <header>
@@ -34,8 +34,13 @@
 
   <div id="view-search" style="display:none">
     <div class="searchbar">
-      <input id="q" placeholder="BM25 全文检索（如 png、report、f3…）">
-      <button id="btn-search">搜索</button>
+      <input id="q" placeholder="关键词（f3、report）或自然语言问题（项目验收报告）">
+      <button id="btn-search">检索</button>
+    </div>
+    <div class="mode-switch">
+      <button id="mode-bm25" class="on">关键词</button>
+      <button id="mode-hybrid">语义</button>
+      <span class="sub" id="ssearch-meta"></span>
     </div>
     <table><thead><tr><th style="width:90px">内容</th><th>命中片段</th><th style="width:90px">分数</th></tr></thead>
       <tbody id="srows"></tbody></table>
@@ -64,6 +69,6 @@
 
   <footer>PartiSync Desktop · M6-WP03 · 内容身份 = BLAKE3 · IPC 7 commands（T03）+ 扩展面板（M7-WP01-T04）</footer>
 </div>
-<script src="app-core.js"></script>
+<script src="app-core-v2.js"></script>
 </body>
 </html>
