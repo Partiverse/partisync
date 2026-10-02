@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use partisync_desktop::ipc::{
     asset_detail, cas_stats, duplicates, get_stats, jobs, list, mcp_call, search, search_hybrid,
-    DuplicatesArgs, ListArgs, McpCallArgs, SearchArgs,
+    sync_recent, sync_stats, DuplicatesArgs, ListArgs, McpCallArgs, SearchArgs, SyncRecentArgs,
 };
 use partisync_desktop::mcp_sidecar::McpSidecar;
 use partisync_desktop::state::AppState;
@@ -352,4 +352,152 @@ async fn t02_asset_detail_empty_db_returns_empty_copies() {
     .expect("detail on empty db");
     assert!(d.copies.is_empty());
     assert_eq!(d.content_id, "deadbeef");
+}
+
+// ── M8-WP05-T03：同步状态界面（sync_stats / sync_recent） ──
+
+/// 空库（device 表未登记）：统计全零 + 时间线空（不 panic）——SPEC §3 T03
+/// 空态验收。`device_id()` 失败按捕获侧同款兜底 `device-local`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_sync_stats_on_empty_db_returns_zeros() {
+    let (app, _tmp) = make_app().await;
+    let s = sync_stats(app.state::<AppState>())
+        .await
+        .expect("sync_stats on empty db");
+    assert_eq!(s.applied, 0);
+    assert_eq!(s.skipped_self, 0);
+    assert_eq!(s.skipped_lww, 0, "LWW 落选行不入库，读侧恒 0");
+    assert_eq!(s.conflicts, 0);
+    assert_eq!(s.devices, 0);
+    assert_eq!(s.last_sync_ns, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_sync_recent_on_empty_db_returns_empty() {
+    let (app, _tmp) = make_app().await;
+    let rows = sync_recent(app.state::<AppState>(), SyncRecentArgs { limit: Some(10) })
+        .await
+        .expect("sync_recent on empty db");
+    assert!(rows.is_empty());
+}
+
+/// 种子同步持久态（M2 判例直写，不走 capture 写路径）：device 登记 +
+/// oplog 两行（远端 origin / 本机 origin 各一）+ 冲突血缘一行。
+async fn seed_sync_fixture(state: &AppState) {
+    state
+        .store
+        .seed_device_volume("device-self", "本机", "vol-self")
+        .await
+        .expect("seed device");
+    state
+        .store
+        .record_oplog(
+            "default",
+            0,
+            "entry",
+            "n1",
+            "upsert",
+            "device-remote",
+            r#"{"path":"/Projects/aurora/报告.docx","name":"报告.docx","content_id":"9f3a2c1d"}"#,
+        )
+        .await
+        .expect("seed oplog remote");
+    state
+        .store
+        .record_oplog(
+            "default",
+            0,
+            "entry",
+            "n2",
+            "remove",
+            "device-self",
+            r#"{"path":"/tmp/old.txt"}"#,
+        )
+        .await
+        .expect("seed oplog self");
+    state
+        .store
+        .record_conflict(
+            "default",
+            "/会议/notes.md",
+            "/会议/notes.md",
+            "/会议/notes.conflict-device-b.md",
+            "device-b",
+            "hlc-seed-1",
+        )
+        .await
+        .expect("seed conflict");
+}
+
+/// 种子库统计口径：applied 只数远端 origin；本机行归 skipped_self；
+/// 冲突独立计数；devices = 远端 origin 去重。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_sync_stats_with_seeded_oplog_counts_by_origin() {
+    let (app, _tmp) = make_app().await;
+    let state = app.state::<AppState>();
+    seed_sync_fixture(&state).await;
+    let s = sync_stats(state).await.expect("sync_stats seeded");
+    assert_eq!(s.applied, 1);
+    assert_eq!(s.skipped_self, 1);
+    assert_eq!(s.conflicts, 1);
+    assert_eq!(s.devices, 1);
+    assert!(s.last_sync_ns.is_some());
+}
+
+/// 种子库时间线：oplog 尾部 + 冲突血缘合并，at_ns 降序；payload 解析出
+/// name/dir/content_id；冲突行 op = "conflict"。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_sync_recent_with_seeded_rows_merges_timeline() {
+    let (app, _tmp) = make_app().await;
+    let state = app.state::<AppState>();
+    seed_sync_fixture(&state).await;
+    let rows = sync_recent(state, SyncRecentArgs { limit: Some(10) })
+        .await
+        .expect("sync_recent seeded");
+    assert_eq!(rows.len(), 3);
+    assert!(rows.windows(2).all(|w| w[0].at_ns >= w[1].at_ns), "降序");
+    let conflict = rows.iter().find(|r| r.conflict).expect("conflict row");
+    assert_eq!(conflict.op, "conflict");
+    assert_eq!(conflict.name, "notes.md");
+    assert_eq!(conflict.origin_device, "device-b");
+    assert!(conflict.content_id.is_none());
+    let upsert = rows.iter().find(|r| r.op == "upsert").expect("upsert row");
+    assert_eq!(upsert.name, "报告.docx");
+    assert_eq!(upsert.dir, "/Projects/aurora/");
+    assert_eq!(upsert.content_id.as_deref(), Some("9f3a2c1d"));
+    let remove = rows.iter().find(|r| r.op == "remove").expect("remove row");
+    assert_eq!(remove.name, "old.txt");
+}
+
+/// 非法 payload JSON 兜底（AI 审查 F4）：不 panic，path/name 退化到
+/// entity_id，dir 空，content_id None——单条脏数据不 fail 时间线。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_sync_recent_tolerates_invalid_payload_json() {
+    let (app, _tmp) = make_app().await;
+    let state = app.state::<AppState>();
+    state
+        .store
+        .seed_device_volume("device-self", "本机", "vol-self")
+        .await
+        .expect("seed device");
+    state
+        .store
+        .record_oplog(
+            "default",
+            0,
+            "entry",
+            "raw-entry-n5",
+            "upsert",
+            "device-remote",
+            "not-json",
+        )
+        .await
+        .expect("seed bad payload");
+    let rows = sync_recent(state, SyncRecentArgs { limit: Some(10) })
+        .await
+        .expect("sync_recent with invalid payload");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "raw-entry-n5");
+    assert_eq!(rows[0].dir, "");
+    assert!(rows[0].content_id.is_none());
 }
