@@ -36,6 +36,9 @@ use crate::replica::{NodeConfig, Replica, ReplicaError};
 pub const KS_SPACE: &str = "r-space";
 /// 联邦路由 keyspace（组 0 业务节，SPEC M5-WP02 裁定 2；键 = space_id）。
 pub const KS_ROUTE: &str = "r-route";
+/// 租户归属反向表（M8-WP03-T03 spike F3 修订：`space_id → tenant_id`，
+/// 一行一空间；可见性判定 O(1)）。
+pub const KS_TENANT: &str = "r-tenant";
 /// 注册表组 id（pid=0；数据分区组自 1 起）。
 pub const REGISTRY_GROUP: u64 = 0;
 
@@ -223,6 +226,19 @@ pub enum RegistryCmd {
         /// 胜出的路由行（整体 upsert，按 space_id 键覆盖）。
         row: RouteRow,
     },
+    /// 空间租户归属（M8-WP03-T03 spike F3：一空间至多一租户；已属他
+    /// 租户 → FORBIDDEN 拒绝；换绑 = Unassign + Assign 显式两步）。
+    AssignTenant {
+        /// 空间 id（须已存在）。
+        space_id: String,
+        /// 租户 id（不透明字符串）。
+        tenant_id: String,
+    },
+    /// 解除空间租户归属（无归属 → MISSING）。
+    UnassignTenant {
+        /// 空间 id。
+        space_id: String,
+    },
 }
 
 /// 注册表操作（读侧权限判定用）。
@@ -287,6 +303,7 @@ pub struct RegistryStateMachine {
     inner: RaftStateMachineStore,
     spaces: fjall::Keyspace,
     routes: fjall::Keyspace,
+    tenants: fjall::Keyspace,
     audit: Option<Arc<crate::audit::AuditSink>>,
 }
 
@@ -439,6 +456,65 @@ impl openraft::storage::RaftStateMachine<HubTypeConfig> for RegistryStateMachine
                             a.record("route_set", &row.space_id, "ok");
                         }
                     }
+                    RegistryCmd::AssignTenant {
+                        space_id,
+                        tenant_id,
+                    } => {
+                        // 语义（spike F3）：space 须存在；一空间至多一租户；
+                        // 同租户重 assign = OK 幂等
+                        if self
+                            .spaces
+                            .get(space_id.as_bytes())
+                            .map_err(business_error)?
+                            .is_none()
+                        {
+                            responses[i] = crate::HubResponse(vec![FLAG_MISSING]);
+                        } else if let Some(existing) = self
+                            .tenants
+                            .get(space_id.as_bytes())
+                            .map_err(business_error)?
+                        {
+                            if existing.as_ref() == tenant_id.as_bytes() {
+                                responses[i] = crate::HubResponse(vec![FLAG_OK]);
+                            } else {
+                                responses[i] = crate::HubResponse(vec![FLAG_FORBIDDEN]);
+                            }
+                        } else {
+                            self.tenants
+                                .insert(space_id.as_bytes(), tenant_id.as_bytes())
+                                .map_err(business_error)?;
+                            responses[i] = crate::HubResponse(vec![FLAG_OK]);
+                        }
+                        let flag = responses[i].0[0];
+                        if let Some(a) = &self.audit {
+                            let result = match flag {
+                                FLAG_OK => "ok",
+                                FLAG_FORBIDDEN => "already_assigned",
+                                _ => "missing",
+                            };
+                            a.record("tenant_assign", &format!("{space_id}:{tenant_id}"), result);
+                        }
+                    }
+                    RegistryCmd::UnassignTenant { space_id } => {
+                        let existed = self
+                            .tenants
+                            .get(space_id.as_bytes())
+                            .map_err(business_error)?
+                            .is_some();
+                        if existed {
+                            self.tenants
+                                .remove(space_id.as_bytes())
+                                .map_err(business_error)?;
+                            responses[i] = crate::HubResponse(vec![FLAG_OK]);
+                        } else {
+                            responses[i] = crate::HubResponse(vec![FLAG_MISSING]);
+                        }
+                        let flag = responses[i].0[0];
+                        if let Some(a) = &self.audit {
+                            let result = if flag == FLAG_OK { "ok" } else { "missing" };
+                            a.record("tenant_unassign", &space_id, result);
+                        }
+                    }
                 };
             }
         }
@@ -524,10 +600,14 @@ impl RegistryService {
         let routes = db
             .keyspace(KS_ROUTE, fjall::KeyspaceCreateOptions::default)
             .map_err(|e| RegistryError::Io(e.to_string()))?;
+        let tenants = db
+            .keyspace(KS_TENANT, fjall::KeyspaceCreateOptions::default)
+            .map_err(|e| RegistryError::Io(e.to_string()))?;
         let sm = RegistryStateMachine {
             inner: sm_generic,
             spaces,
             routes,
+            tenants,
             audit,
         };
         let node = NodeConfig {
@@ -747,6 +827,137 @@ impl RegistryService {
     ///
     /// # Errors
     /// raft 错误。
+    /// 空间租户归属（M8-WP03-T03 spike F3；无归属 → None）。
+    ///
+    /// # Errors
+    /// raft 或引擎错误。
+    pub async fn tenant_of_async(&self, space_id: &str) -> Result<Option<String>, RegistryError> {
+        // 线性一致读：经 raft ensure 后直读 keyspace（与 route_async 同口径）
+        let tenants = self.tenants_handle()?;
+        match tenants
+            .get(space_id.as_bytes())
+            .map_err(|e| RegistryError::Io(e.to_string()))?
+        {
+            Some(v) => Ok(Some(String::from_utf8_lossy(&v).into_owned())),
+            None => Ok(None),
+        }
+    }
+
+    fn tenants_handle(&self) -> Result<fjall::Keyspace, RegistryError> {
+        self.replica
+            .database()
+            .keyspace(KS_TENANT, fjall::KeyspaceCreateOptions::default)
+            .map_err(|e| RegistryError::Io(e.to_string()))
+    }
+
+    /// [`Self::tenant_of_async`] 的阻塞形态。
+    ///
+    /// # Errors
+    /// 同 [`Self::tenant_of_async`]。
+    pub fn tenant_of(&self, space_id: &str) -> Result<Option<String>, RegistryError> {
+        self.handle.block_on(self.tenant_of_async(space_id))
+    }
+
+    /// 租户归属写路径（spike F3：一空间至多一租户；已属他租户 →
+    /// [`RegistryError::Forbidden`]；换绑 = Unassign + Assign 两步）。
+    ///
+    /// # Errors
+    /// 空间不存在（Missing）、已属他租户（Forbidden）或 raft 错误。
+    pub fn assign_tenant(&self, space_id: &str, tenant_id: &str) -> Result<(), RegistryError> {
+        self.handle
+            .block_on(self.assign_tenant_async(space_id, tenant_id))
+    }
+
+    /// [`Self::assign_tenant`] 的异步形态。
+    ///
+    /// # Errors
+    /// 同 [`Self::assign_tenant`]。
+    pub async fn assign_tenant_async(
+        &self,
+        space_id: &str,
+        tenant_id: &str,
+    ) -> Result<(), RegistryError> {
+        let flag = self
+            .submit_async(RegistryCmd::AssignTenant {
+                space_id: space_id.to_owned(),
+                tenant_id: tenant_id.to_owned(),
+            })
+            .await?;
+        match flag {
+            FLAG_OK => Ok(()),
+            FLAG_MISSING => Err(RegistryError::Missing),
+            FLAG_FORBIDDEN => Err(RegistryError::Forbidden),
+            other => Err(RegistryError::Io(format!("unexpected flag {other}"))),
+        }
+    }
+
+    /// 解除租户归属（无归属 → [`RegistryError::Missing`]）。
+    ///
+    /// # Errors
+    /// 同上。
+    pub fn unassign_tenant(&self, space_id: &str) -> Result<(), RegistryError> {
+        self.handle.block_on(self.unassign_tenant_async(space_id))
+    }
+
+    /// [`Self::unassign_tenant`] 的异步形态。
+    ///
+    /// # Errors
+    /// 同上。
+    pub async fn unassign_tenant_async(&self, space_id: &str) -> Result<(), RegistryError> {
+        let flag = self
+            .submit_async(RegistryCmd::UnassignTenant {
+                space_id: space_id.to_owned(),
+            })
+            .await?;
+        match flag {
+            FLAG_OK => Ok(()),
+            FLAG_MISSING => Err(RegistryError::Missing),
+            other => Err(RegistryError::Io(format!("unexpected flag {other}"))),
+        }
+    }
+
+    /// 租户过滤列举（spike F2）：未归属行 ∪ viewer 租户行；他租户行剔除。
+    /// `viewer = None` 仅见未归属（公共）行。`routes()` 保留为管理员
+    /// 全量视图（doc 注明）。
+    ///
+    /// # Errors
+    /// raft 或引擎错误。
+    pub async fn routes_tenant_async(
+        &self,
+        viewer_tenant: Option<&str>,
+    ) -> Result<Vec<RouteRow>, RegistryError> {
+        let all = self.routes_async().await?;
+        let mut out = Vec::with_capacity(all.len());
+        for row in all {
+            let owner = self.tenant_of_async(&row.space_id).await?;
+            match (&owner, viewer_tenant) {
+                (None, _) | (Some(_), None) => {
+                    if owner.is_none() {
+                        out.push(row); // 公共行对所有 viewer 可见
+                    } // 他租户行对 None viewer 不可见
+                }
+                (Some(t), Some(v)) => {
+                    if t == v {
+                        out.push(row);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Self::routes_tenant_async`] 的阻塞形态。
+    ///
+    /// # Errors
+    /// 同 [`Self::routes_tenant_async`]。
+    pub fn routes_tenant(
+        &self,
+        viewer_tenant: Option<&str>,
+    ) -> Result<Vec<RouteRow>, RegistryError> {
+        self.handle
+            .block_on(self.routes_tenant_async(viewer_tenant))
+    }
+
     pub fn route(&self, space_id: &str) -> Result<Option<RouteRow>, RegistryError> {
         self.handle.block_on(self.route_async(space_id))
     }
