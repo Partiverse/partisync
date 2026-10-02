@@ -322,6 +322,16 @@ main { padding: 0 22px 56px; }
 #ext-input:focus { outline: none; border-color: var(--green-dim); }
 #ext-output { margin-top: 10px; padding: 10px 12px; background: rgba(2, 5, 3, 0.7); border: 1px solid var(--panel-line); font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; min-height: 40px; }
 #ext-output:empty::before { content: "（结果）"; color: var(--text-dim); }
+/* 调用历史（M8-WP05-T04：会话内最近 20 次入参/出参，纯前端态；行点击回看） */
+#ext-history table { width: 100%; border-collapse: collapse; border: 1px solid var(--panel-line); background: var(--panel); }
+#ext-history th { text-align: left; font-weight: 400; font-size: 11px; color: var(--text-dim); padding: 8px 12px; border-bottom: 1px solid var(--green-dim); }
+#ext-history td { padding: 8px 12px; border-bottom: 1px solid var(--panel-line); font-size: 12px; }
+#ext-history tr:last-child td { border-bottom: 0; }
+#ext-history tr[data-hist] { cursor: pointer; }
+#ext-history tr[data-hist]:hover td { background: rgba(34, 208, 69, 0.06); }
+#ext-history .hist-ok { color: var(--green); }
+#ext-history .hist-err { color: var(--red); }
+#ext-history .hist-io { color: var(--text-dim); max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #ext-debug { margin-top: 12px; font-size: 10.5px; color: var(--text-dim); white-space: pre-wrap; max-height: 120px; overflow: auto; }
 .error { color: var(--red); font-family: var(--mono); font-size: 12px; padding: 8px 22px; }
 footer { color: var(--text-dim); font-size: 11px; text-align: center; margin: 32px 0 20px; }

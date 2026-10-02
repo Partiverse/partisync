@@ -16,6 +16,12 @@ if (!__tauriCore) {
 }
 const { invoke } = __tauriCore;
 
+// 全局 JS 异常 → #ext-debug（T04 GUI 诊断；保留为轻量错误面）。
+window.addEventListener("error", (e) => {
+  const d = document.getElementById("ext-debug");
+  if (d) d.textContent = `[JS-ERR] ${e.message} @${e.filename}:${e.lineno}\n` + d.textContent;
+});
+
 let curPath = "/";
 let searchMode = "bm25"; // bm25 = 关键词；hybrid = 语义（T01 旗舰）
 const $ = (id) => document.getElementById(id);
@@ -102,7 +108,7 @@ async function browse(path) {
       <td>${e.name}</td><td class="size">${dir ? "—" : sizeFmt(e.size)}</td>
       <td class="mtime">${timeFmt(e.mtime_ns)}</td>
       <td class="fp"${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>${e.content_id ? "<i></i>" + e.content_id.slice(0, 8) : "—"}</td></tr>`;
-  }).join("") : `<tr><td colspan="5" class="empty">空目录</td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="empty">${curPath === "/" ? "本机还没有索引文件——运行 <b>partisync index &lt;路径&gt;</b> 开始建立索引" : "空目录"}</td></tr>`;
   $("rows").querySelectorAll("tr[data-path]").forEach(tr => {
     tr.onclick = () => browse(tr.dataset.path);
   });
@@ -213,7 +219,7 @@ async function loadDups() {
         <span class="badge">${g.copies.length} 份副本 · 每份 ${sizeFmt(g.size)}</span>
       </div>
       <ul>${g.copies.map(c => `<li>${c.path}</li>`).join("")}</ul>
-    </div>`).join("") : `<div class="empty">没有发现重复内容</div>`;
+    </div>`).join("") : `<div class="empty">没有发现重复内容——索引更多文件后这里会自动按内容身份聚合相同文件</div>`;
 }
 
 // ── E. 作业 ──
@@ -226,11 +232,12 @@ async function loadJobs() {
       return `<tr><td class="fp">${r.id.slice(0,10)}…</td><td>${r.kind}</td>
         <td class="${cls}">${r.status_name || r.status}</td>
         <td class="size">${r.done_files}</td><td class="fp">${r.checkpoint || "—"}</td></tr>`;
-    }).join("")}</tbody></table>` : `<div class="empty">暂无作业</div>`;
+    }).join("")}</tbody></table>` : `<div class="empty">暂无作业——运行 <b>partisync index / watch</b> 后这里会显示作业进度</div>`;
 }
 
 // ── G. 扩展 ──
 async function loadExtTools() {
+  renderExtHistory();
   const dbg = (m) => { const d = $("ext-debug"); if (d) d.textContent = `[${new Date().toLocaleTimeString()}] ${m}\n` + (d.textContent || ""); };
   try {
     dbg("loadExtTools: start");
@@ -276,10 +283,46 @@ async function doExtCall() {
   try {
     const r = await call("mcp_call", { tool, args });
     const payload = r?.structuredContent ?? r;
-    $("ext-output").textContent = JSON.stringify(payload, null, 2);
+    const out = JSON.stringify(payload, null, 2);
+    $("ext-output").textContent = out;
+    extHistory.unshift({ at: Date.now(), tool, input: raw || "（空）", output: out, ok: true });
   } catch (e) {
-    $("ext-output").textContent = "调用失败：" + (e?.msg ?? String(e));
+    const msg = e?.msg ?? String(e);
+    $("ext-output").textContent = "调用失败：" + msg;
+    extHistory.unshift({ at: Date.now(), tool, input: raw || "（空）", output: msg, ok: false });
   }
+  if (extHistory.length > 20) extHistory.length = 20;
+  renderExtHistory();
+}
+
+// ── G2. 扩展调用历史（M8-WP05-T04：会话内最近 20 次入参/出参，纯前端态） ──
+let extHistory = [];
+
+function trunc(s, n) {
+  s = String(s ?? "");
+  return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+function renderExtHistory() {
+  const box = $("ext-history");
+  if (!extHistory.length) {
+    box.innerHTML = `<div class="empty">本次会话还没有扩展调用——在上方选工具后点「调用」</div>`;
+    return;
+  }
+  box.innerHTML = `<table class="panel-table"><thead><tr><th style="width:90px">时间</th><th style="width:130px">工具</th><th style="width:56px">状态</th><th>入参 / 出参</th></tr></thead><tbody>${
+    extHistory.map((h, i) => `
+      <tr data-hist="${i}" title="点击回看本次入参/出参"><td class="size">${new Date(h.at).toLocaleTimeString("zh-CN", { hour12: false })}</td>
+      <td class="fp">${h.tool}</td>
+      <td class="${h.ok ? "hist-ok" : "hist-err"}">${h.ok ? "OK" : "ERR"}</td>
+      <td class="hist-io">in ${trunc(h.input, 70)} · out ${trunc(h.output, 90)}</td></tr>`).join("")}</tbody></table>`;
+  box.querySelectorAll("tr[data-hist]").forEach(tr => {
+    tr.onclick = () => {
+      const h = extHistory[+tr.dataset.hist];
+      openExtCall(h.tool);
+      $("ext-input").value = h.input === "（空）" ? "" : h.input;
+      $("ext-output").textContent = h.output;
+    };
+  });
 }
 
 // ── F. 同步（M8-WP05-T03：sync_stats/sync_recent 只读呈现；H3 5s 轮询） ──
