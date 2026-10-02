@@ -28,6 +28,15 @@ use crate::{linker_for, load_component};
 /// MCP 工具调用的扩展导出函数名（world `partisync:demo/demo-tool`）。
 const TOOL_EXPORT: &str = "call";
 
+/// 单次工具调用 fuel 预算（M8-WP06 SPEC §2.2：编译期常量，不进 manifest
+/// schema——P14 注权面零改动）。按 demo-tool 实测量级 10× 余量定。
+pub const FUEL_BUDGET: u64 = 1_000_000_000;
+
+/// 单次工具调用 epoch 预算（毫秒；/EPOCH_TICK_MS = deadline ticks）。
+/// 与 gateway `EXT_CALL_TIMEOUT`（10s）对齐——内层 epoch 先到先终止，
+/// 外层 timeout 保留为二层防御。
+pub const DEADLINE_BUDGET_MS: u64 = 10_000;
+
 /// 装载失败（加载期；含 [P14] 全部拒绝路径 + F-4 preflight）。
 ///
 /// wasmtime 相关变体存 `String`（`wasmtime::Error` 是 anyhow 别名，
@@ -110,6 +119,11 @@ pub enum CallError {
     /// anyhow 别名不实现 StdError，且避免 wasmtime 类型泄漏进公共 API，
     /// PR #35 审查 P2-5）。
     Trap(String),
+    /// epoch deadline 到——guest 被 wasmtime 强制中断（M8-WP06：真终止，
+    /// 非 timeout 假终止；线程随 trap 释放）。
+    Deadline,
+    /// fuel 预算耗尽——单调用计算量超限（M8-WP06 SPEC §2.2 固定常量）。
+    Fuel,
 }
 
 impl std::fmt::Display for CallError {
@@ -117,6 +131,8 @@ impl std::fmt::Display for CallError {
         match self {
             Self::Poisoned => f.write_str("ext tool lock poisoned"),
             Self::Trap(e) => write!(f, "guest call failed: {e}"),
+            Self::Deadline => f.write_str("extension deadline exceeded (epoch interruption)"),
+            Self::Fuel => f.write_str("extension fuel budget exhausted"),
         }
     }
 }
@@ -141,6 +157,16 @@ impl ExtTool {
         let linker: Linker<HostState> =
             linker_for(crate::engine(), &manifest).map_err(|e| LoadError::Linker(e.to_string()))?;
         let mut store = Store::new(crate::engine(), state);
+        // M8-WP06：epoch_interruption(true) 下 Store 默认 deadline = 当前
+        // epoch（tick 一推进即 interrupt trap）——装载期先设大 delta
+        // （u64::MAX/2；deadline = current + delta，直接传 u64::MAX 会
+        // 加法溢出），调用期由 call 前重置为预算 ticks；fuel 同理在
+        // consume_fuel(true) 下初始 = 0（canonical ABI 起始 shim 计费），
+        // 实例化前预注入。
+        store.set_epoch_deadline(u64::MAX / 2);
+        store
+            .set_fuel(FUEL_BUDGET)
+            .map_err(|e| LoadError::Instantiate(format!("fuel init: {e}")))?;
         let instance = linker
             .instantiate(&mut store, &component)
             .map_err(|e| LoadError::Instantiate(e.to_string()))?;
@@ -166,10 +192,33 @@ impl ExtTool {
     /// 这里不再重复检查——单点强制。
     pub fn call(&self, input_json: &str) -> Result<String, CallError> {
         let mut store = self.store.lock().map_err(|_| CallError::Poisoned)?;
-        let (out,) = self
+        // M8-WP06（SPEC §2.1/§2.2）：每次调用前重置终止预算——epoch
+        // deadline（100ms tick × 预算 ms）+ fuel 固定常量，先到者终止。
+        store.set_epoch_deadline(DEADLINE_BUDGET_MS / crate::EPOCH_TICK_MS);
+        store
+            .set_fuel(FUEL_BUDGET)
+            .map_err(|e| CallError::Trap(format!("fuel init: {e}")))?;
+        let result = self
             .func
             .call(&mut *store, (input_json.to_owned(),))
-            .map_err(|e| CallError::Trap(e.to_string()))?;
+            .map_err(|e| {
+                // trap 文案在 anyhow 根因层（顶层只有 wasm backtrace）：
+                // epoch 中断 = "wasm trap: interrupt"；fuel 耗尽 =
+                // "all fuel consumed by WebAssembly"
+                let msg = e.to_string();
+                let cause = e.root_cause().to_string();
+                if cause.contains("fuel") {
+                    CallError::Fuel
+                } else if cause.contains("interrupt")
+                    || cause.contains("epoch")
+                    || cause.contains("deadline")
+                {
+                    CallError::Deadline
+                } else {
+                    CallError::Trap(msg)
+                }
+            });
+        let (out,) = result?;
         Ok(out)
     }
 }

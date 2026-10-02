@@ -35,8 +35,38 @@ pub fn engine() -> &'static Engine {
         if let Ok(cache) = Cache::new(CacheConfig::default()) {
             cfg.cache(Some(cache));
         }
-        Engine::new(&cfg).expect("wasmtime Engine 初始化失败（不可恢复）")
+        // M8-WP06（SPEC §2.1/§2.2）：epoch 终止 + fuel 配额——替换
+        // gateway 侧 timeout 假终止（M7-WP01 §6-R8）。
+        cfg.epoch_interruption(true);
+        cfg.consume_fuel(true);
+        let engine = Engine::new(&cfg).expect("wasmtime Engine 初始化失败（不可恢复）");
+        start_epoch_ticker(&engine);
+        engine
     })
+}
+
+/// epoch tick 周期（毫秒）——deadline 预算换算基准（SPEC §2.1）。
+pub const EPOCH_TICK_MS: u64 = 100;
+
+/// epoch tick 线程（Engine 单例惰性启动，daemon 化：进程退出不阻塞）。
+fn start_epoch_ticker(engine: &Engine) {
+    let engine = engine.clone();
+    std::thread::Builder::new()
+        .name("wasmtime-epoch-tick".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(EPOCH_TICK_MS));
+            engine.increment_epoch();
+        })
+        .expect("epoch tick 线程启动失败（不可恢复）");
+}
+
+/// M8-WP06：为**手工构造**的 Store 初始化终止预算（epoch 大 delta +
+/// fuel 预注入）。`ExtTool::load` 内部 Store 已自动处理；此 helper 供
+/// 测试/桌面壳直连等手工构造 Store 的调用方使用（deadline 大 delta 防
+/// current+delta 溢出）。
+pub fn init_termination_budget(store: &mut wasmtime::Store<crate::host_state::HostState>) {
+    store.set_epoch_deadline(u64::MAX / 2);
+    let _ = store.set_fuel(crate::registry::FUEL_BUDGET);
 }
 
 /// 默认拒权 linker：未注册任何宿主函数/接口——未注权 component 缺

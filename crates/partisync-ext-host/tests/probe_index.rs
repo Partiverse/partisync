@@ -59,6 +59,7 @@ fn t04a_index_read_calls_injected_trait_impl() {
         partisync_ext_host::engine(),
         HostState::with_index(Arc::new(EchoIndex)),
     );
+    partisync_ext_host::init_termination_budget(&mut store);
     let instance = match linker.instantiate(&mut store, &component) {
         Ok(i) => i,
         Err(e) => panic!("注权 index.read 后 index_probe 必须可实例化：{e}"),
@@ -85,6 +86,7 @@ fn t04a_index_read_ungranted_rejects_instantiation() {
     let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &m)
         .expect("零注权 linker 构造成功");
     let mut store = Store::new(partisync_ext_host::engine(), HostState::without_index());
+    partisync_ext_host::init_termination_budget(&mut store);
     let err = match linker.instantiate(&mut store, &component) {
         Ok(_) => panic!("未注权 index.read 时 index_probe 必须实例化失败"),
         Err(e) => e,
@@ -109,6 +111,7 @@ fn t04a_index_granted_but_unwired_returns_error_json() {
     let linker = partisync_ext_host::linker_for(partisync_ext_host::engine(), &index_manifest())
         .expect("注权 index.read 的 linker 构造成功");
     let mut store = Store::new(partisync_ext_host::engine(), HostState::without_index());
+    partisync_ext_host::init_termination_budget(&mut store);
     let instance = match linker.instantiate(&mut store, &component) {
         Ok(i) => i,
         Err(e) => panic!("注权后即便宿主未接线，实例化仍应成功：{e}"),
@@ -142,6 +145,7 @@ fn t04b_backend_error_returns_json_and_keeps_store_usable() {
         partisync_ext_host::engine(),
         HostState::with_index(Arc::new(FailingIndex)),
     );
+    partisync_ext_host::init_termination_budget(&mut store);
     let instance = match linker.instantiate(&mut store, &component) {
         Ok(i) => i,
         Err(e) => panic!("实例化必须成功：{e}"),
@@ -210,6 +214,7 @@ fn t04b_oversized_query_rejected_by_host_side_limit() {
         partisync_ext_host::engine(),
         HostState::with_index(Arc::new(EchoIndex)),
     );
+    partisync_ext_host::init_termination_budget(&mut store);
     let instance = match linker.instantiate(&mut store, &component) {
         Ok(i) => i,
         Err(e) => panic!("实例化必须成功：{e}"),
@@ -250,6 +255,7 @@ fn t04b_backend_error_message_is_json_escaped() {
         partisync_ext_host::engine(),
         HostState::with_index(Arc::new(QuoteIndex)),
     );
+    partisync_ext_host::init_termination_budget(&mut store);
     let instance = match linker.instantiate(&mut store, &component) {
         Ok(i) => i,
         Err(e) => panic!("实例化必须成功：{e}"),
