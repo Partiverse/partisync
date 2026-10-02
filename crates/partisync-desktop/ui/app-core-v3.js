@@ -1,9 +1,9 @@
 // PartiSync Desktop 前端 v3（设计语言 v4.3 落地——旧薄面弃用重写）。
 // M8-WP05-T01：语义检索旗舰（search_hybrid + 三态）。
 // 绑定面：index.html（v4.3 结构：tally 仪表 / hit 卡 / section-tag）。
-// 数据走 8 个 Tauri command（src/ipc.rs）：
-//   get_stats / list / search / search_hybrid / cas_stats / duplicates /
-//   jobs / mcp_call
+// 数据走 11 个 Tauri command（src/ipc.rs）：
+//   get_stats / list / search / search_hybrid / asset_detail / cas_stats /
+//   duplicates / jobs / sync_stats / sync_recent / mcp_call
 // 文件名 app-core-v3.js：#39 判例（WKWebView 缓存击穿靠改名）。
 
 const __tauriCore = window.__TAURI__?.core;
@@ -282,6 +282,100 @@ async function doExtCall() {
   }
 }
 
+// ── F. 同步（M8-WP05-T03：sync_stats/sync_recent 只读呈现；H3 5s 轮询） ──
+// 大数字 data-count 滚动只在首次入场播一次（design v4.3 tokens），轮询静默刷新。
+let syncAnimated = false;
+
+function relTime(ns) {
+  if (!ns) return "";
+  const s = Math.max(0, (Date.now() - ns / 1e6) / 1000);
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return `${Math.floor(s / 86400)} 天前`;
+}
+
+function dayLabel(ns) {
+  const d = new Date(ns / 1e6), now = new Date();
+  const day = (x) => Math.floor((x.getTime() - x.getTimezoneOffset() * 6e4) / 864e5);
+  const diff = day(now) - day(d);
+  if (diff <= 0) return "今天";
+  if (diff === 1) return "昨天";
+  return d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+}
+
+function countUp(el, target, animate) {
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce || !animate) { el.textContent = target.toLocaleString("zh-CN"); return; }
+  const t0 = performance.now(), dur = 900;
+  const tick = (t) => {
+    const p = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+    el.textContent = Math.round(target * e).toLocaleString("zh-CN");
+    if (p < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+async function loadSync(animate = false) {
+  const timeline = $("sync-timeline");
+  try {
+    const [stats, recent] = await Promise.all([
+      call("sync_stats"),
+      call("sync_recent", { limit: 30 })
+    ]);
+    countUp($("sync-applied"), stats.applied, animate);
+    countUp($("sync-skipped"), stats.skipped_self, animate);
+    countUp($("sync-lww"), stats.skipped_lww, animate);
+    countUp($("sync-conflicts"), stats.conflicts, animate);
+    // 状态横幅：对账语义（devices = oplog 远端 origin 去重）
+    const banner = $("sync-banner");
+    banner.classList.toggle("alert", stats.conflicts > 0);
+    const total = stats.applied + stats.skipped_self;
+    if (stats.devices > 0) {
+      $("sync-banner-text").innerHTML =
+        `已与 <b>${stats.devices} 台设备</b>保持一致${
+          stats.conflicts ? ` · <span class="conflict-note">${stats.conflicts} 项冲突待处理</span>` : ""}`;
+      $("sync-banner-time").textContent =
+        stats.last_sync_ns ? `最近对账 ${relTime(stats.last_sync_ns)}` : "";
+    } else if (total > 0) {
+      $("sync-banner-text").innerHTML =
+        `本机已记录 <b>${total.toLocaleString("zh-CN")}</b> 项变更 · 尚未与其他设备同步`;
+      $("sync-banner-time").textContent = "";
+    } else {
+      $("sync-banner-text").textContent = "本机还没有同步记录";
+      $("sync-banner-time").textContent = "";
+    }
+    // 按日分组时间线（指纹色延续：upsert 按 content_id 派生，冲突琥珀）
+    if (!recent.length) {
+      timeline.innerHTML =
+        `<div class="empty">还没有文件变更——运行 <b>partisync index &lt;路径&gt;</b> 开始建立本机索引</div>`;
+      return;
+    }
+    let lastDay = null, html = "";
+    for (const it of recent) {
+      const day = dayLabel(it.at_ns);
+      if (day !== lastDay) { html += `<div class="sync-day">${day}</div>`; lastDay = day; }
+      const fp = it.conflict ? "var(--amber)"
+        : it.content_id ? fpOf(it.content_id) : "var(--green-dim)";
+      const sub = it.conflict
+        ? `<span class="conflict">冲突 · 两台设备都改了此文件</span>`
+        : `<span>来自 ${it.origin_device}${it.op === "remove" ? " · 删除" : ""}</span>`;
+      html += `<div class="sync-item" style="--fp: ${fp}">
+        <span class="fp-dot"></span>
+        <div class="what"><b>${it.name}</b>${sub}${it.dir ? `<div class="dir">${it.dir}</div>` : ""}</div>
+        <time>${new Date(it.at_ns / 1e6).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" })}</time>
+      </div>`;
+    }
+    timeline.innerHTML = html;
+  } catch (e) {
+    const kind = e?.kind ?? "Internal";
+    timeline.innerHTML = `<div class="empty">同步状态加载失败（${kind}）——确认数据库可读后重试。</div>`;
+    $("sync-banner").classList.remove("alert");
+    $("sync-banner-text").textContent = "同步状态不可用";
+    $("sync-banner-time").textContent = "";
+  }
+}
+
 // ── 绑定（CSP 禁 inline onclick） ──
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.removeAttribute("aria-current"));
@@ -292,6 +386,7 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
     if (el) el.style.display = v === t ? "" : "none";
   });
   if (t === "browse") browse(curPath);
+  if (t === "sync") { loadSync(!syncAnimated); syncAnimated = true; }
   if (t === "dups") loadDups();
   if (t === "jobs") loadJobs();
   if (t === "ext") loadExtTools();
@@ -306,8 +401,12 @@ $("btn-ext-call").onclick = doExtCall;
 
 setInterval(async () => {
   await loadStats();
-  if (document.querySelector("nav button[aria-current]")?.dataset.tab === "browse") {
+  const cur = document.querySelector("nav button[aria-current]")?.dataset.tab;
+  if (cur === "browse") {
     browse(curPath);
+  }
+  if (cur === "sync") {
+    loadSync(false);
   }
 }, 5000);
 

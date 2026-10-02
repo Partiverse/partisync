@@ -99,6 +99,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             ipc::cas_stats,
             ipc::duplicates,
             ipc::jobs,
+            ipc::sync_stats,
+            ipc::sync_recent,
             ipc::mcp_call,
         ])
         .setup(|app| {

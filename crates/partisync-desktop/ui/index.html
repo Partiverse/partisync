@@ -63,13 +63,21 @@
     <div id="srows" class="hits"></div>
   </section>
 
-  <!-- 同步（T03 交付数据面；本视图为占位框架） -->
+  <!-- 同步（M8-WP05-T03：sync_stats/sync_recent 只读呈现；design v4.3 wireframe） -->
   <section id="view-sync" style="display:none">
-    <div class="status-banner">
+    <div class="status-banner" id="sync-banner">
       <span class="dot"></span>
-      同步数据面由 T03 接入（本机引擎视角 · Hub/iroh 不进桌面进程）
-      <time>SPEC M8-WP05 §2.3 / T03</time>
+      <span id="sync-banner-text">同步状态读取中…</span>
+      <time id="sync-banner-time"></time>
     </div>
+    <div class="tally sync-tally" aria-label="同步统计">
+      <div class="cell ok"><div class="num" id="sync-applied">0</div><div class="cap">已应用变更</div></div>
+      <div class="cell"><div class="num" id="sync-skipped">0</div><div class="cap">本机跳过（回环）</div></div>
+      <div class="cell"><div class="num" id="sync-lww">0</div><div class="cap">规则落选（后写优先）</div></div>
+      <div class="cell alert"><div class="num" id="sync-conflicts">0</div><div class="cap">冲突待处理</div></div>
+    </div>
+    <div class="section-tag">最近活动</div>
+    <div id="sync-timeline" class="sync-timeline"><div class="empty">加载中…</div></div>
   </section>
 
   <!-- 重复内容 -->
@@ -96,7 +104,7 @@
   </section>
 </main>
 
-<footer>partisync · 内容身份 = BLAKE3 · IPC 8 commands（T03+T05+T01）· 指纹即视觉</footer>
+<footer>partisync · 内容身份 = BLAKE3 · IPC 11 commands（T01+T02+T03+T05）· 指纹即视觉</footer>
 <script src="app-core-v3.js"></script>
 </body>
 </html>
