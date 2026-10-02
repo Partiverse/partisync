@@ -70,7 +70,7 @@
 | D2 | 时间线/历史等 innerHTML 插值未转义（沿 v3 判例，CSP `script-src 'self'` 已挡 inline 事件，残留 markup 破格风险）——统一 `escapeHtml` UI 硬化 | T3 AI 审查 F2（P3） | 独立 UI 硬化任务，不在功能 PR 顺手修 |
 | D3 | 详情面板测试空库路径覆盖（T02 登记延续） | T2 | 随下一桌面任务顺带补测试 |
 | D4 | 转写检索开关为 N4 纯透传语义标注（include_transcript 后端常开） | T2 | 维持，后端开关化时回改 |
-| D5 | Mimosa `scanner_enobufs` 反复出现，deep 完整审计重跑（hook 兼容策略期间不宣称项目安全） | hook 提示 ×3+ | **下一独立任务**（会话谱系见项目记忆） |
+| D5 | ~~Mimosa `scanner_enobufs` 反复出现，deep 完整审计重跑~~ **已清账（2026-10-02）**：deep 复扫 `scan-2026-10-02T15-25-41.420Z-0a39454d7cbc`（seal `sha256:6163689e…`）全程无 enobufs，唯一 HIGH advisory 与 M6-report §5.1 已签收误报同源（M8-WP00 台账行已更新复扫记录） | hook 提示 ×3+ | 已闭环（登记不构成安全放行结论） |
 | D6 | ~~T4 全 tab 视觉巡检待 GUI 验证~~ **已清账（2026-10-02 晚）**：7 张截图归档 + demo_echo 真调用 + visual-judge 评审；随带修复 browse/dups/jobs 空态动作邀请缺口（judge 首轮 3 fail → 整改） | AGENTS.md 验收规则 | 已闭环 |
 
 ## 6. 复核日志
