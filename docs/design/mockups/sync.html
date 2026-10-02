@@ -3,91 +3,86 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PartiSync · 同步 — Borg/shadcn 设计原型</title>
+<title>PartiSync · 同步 — v3 赛博朋克/borgbackup 设计原型</title>
 <style>
 :root {
-  --background: hsl(160 10% 4%); --card: hsl(160 8% 7%); --popover: hsl(160 8% 9%);
-  --border: hsl(160 6% 16%); --foreground: hsl(150 8% 92%);
-  --muted-foreground: hsl(150 5% 58%); --primary: hsl(152 70% 52%);
-  --primary-foreground: hsl(160 15% 6%); --accent: hsl(152 40% 14%);
-  --ring: hsl(152 70% 52%); --radius: 6px; --amber: hsl(38 78% 46%);
-  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
-  --sans: "Inter", "Geist", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --bg: #020503; --green: #22D045; --green-dim: #14803a; --green-dark: #0a3d1c;
+  --panel: rgba(8, 18, 10, 0.82); --panel-line: rgba(34, 208, 69, 0.22);
+  --text: #d7e8da; --text-dim: #8aa892; --amber: #d7a015;
+  --mono: ui-monospace, Menlo, Monaco, "Cascadia Mono", "Segoe UI Mono", monospace;
 }
-* { margin: 0; padding: 0; box-sizing: border-box; }
+* { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0 !important; }
 body {
   background:
-    repeating-linear-gradient(0deg, transparent 0 31px, hsl(160 30% 50% / 0.03) 31px 32px),
-    repeating-linear-gradient(90deg, transparent 0 31px, hsl(160 30% 50% / 0.03) 31px 32px),
-    var(--background);
-  color: var(--foreground); font-family: var(--sans); font-size: 14px; line-height: 1.6;
+    repeating-linear-gradient(0deg, transparent 0 31px, rgba(34, 208, 69, 0.04) 31px 32px),
+    repeating-linear-gradient(90deg, transparent 0 31px, rgba(34, 208, 69, 0.04) 31px 32px),
+    var(--bg);
+  color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.65;
   min-height: 100vh;
 }
-header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--border); }
-.wordmark { font-weight: 600; font-size: 16px; display: flex; align-items: center; gap: 9px; }
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 999;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
+}
+header { display: flex; align-items: center; gap: 16px; padding: 12px 22px; border-bottom: 1px solid var(--panel-line); background: var(--panel); }
+.wordmark { font-weight: 700; font-size: 14px; color: var(--green); text-shadow: 0 0 10px rgba(34, 208, 69, 0.5); display: flex; align-items: center; gap: 10px; }
 .wordmark .sigil { display: flex; gap: 2px; }
-.wordmark .sigil i { width: 7px; height: 7px; background: var(--primary); }
-.wordmark .sigil i:nth-child(2) { background: hsl(152 40% 30%); }
-.wordmark small { font-size: 11px; color: var(--muted-foreground); margin-left: 4px; font-weight: 400; }
+.wordmark .sigil i { width: 8px; height: 8px; background: var(--green); box-shadow: 0 0 6px rgba(34, 208, 69, 0.6); }
+.wordmark .sigil i:nth-child(2) { background: var(--green-dim); box-shadow: none; }
+.wordmark small { font-size: 11px; color: var(--text-dim); font-weight: 400; }
 nav { display: flex; gap: 2px; margin-left: auto; }
-nav a { color: var(--muted-foreground); text-decoration: none; padding: 6px 12px; font-size: 13px; border: 1px solid transparent; border-radius: var(--radius); }
-nav a:hover { color: var(--foreground); border-color: var(--border); }
-nav a[aria-current] { color: var(--primary); font-weight: 500; border-color: hsl(152 70% 52% / 0.35); background: hsl(152 40% 14% / 0.6); }
-/* 状态横幅：shadcn alert 形态（border 驱动，无重底色） */
+nav a { color: var(--text-dim); text-decoration: none; padding: 5px 12px; font-size: 12.5px; border: 1px solid transparent; }
+nav a:hover { color: var(--green); border-color: var(--panel-line); }
+nav a[aria-current] { color: var(--green); border: 1px solid var(--green); text-shadow: 0 0 8px rgba(34, 208, 69, 0.5); }
+/* 状态横幅：终端一行 */
 .status-banner {
-  margin: 20px 24px 0; padding: 11px 16px;
-  border: 1px solid hsl(152 70% 52% / 0.35); border-radius: var(--radius);
-  background: hsl(152 40% 14% / 0.4);
-  font-size: 13px; display: flex; align-items: center; gap: 10px;
+  margin: 20px 22px 0; padding: 10px 14px;
+  border: 1px solid var(--green-dim); background: var(--panel);
+  font-size: 12.5px; display: flex; align-items: center; gap: 10px;
 }
-.status-banner .dot { width: 8px; height: 8px; background: var(--primary); flex-shrink: 0; }
-.status-banner b { color: var(--primary); font-weight: 500; }
-.status-banner time { color: var(--muted-foreground); font-size: 11.5px; margin-left: auto; font-family: var(--mono); }
-/* 大数字：mono 精密仪表感（Borg 数据面） */
-.tally { display: flex; gap: 0; margin: 20px 24px 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--card); }
-.tally .cell { flex: 1; padding: 18px 22px 16px; }
-.tally .cell + .cell { border-left: 1px solid var(--border); }
-.tally .num { font-family: var(--mono); font-size: 34px; line-height: 1; font-variant-numeric: tabular-nums; }
-.tally .num small { font-size: 14px; color: var(--muted-foreground); margin-left: 3px; }
-.tally .cap { font-size: 12px; color: var(--muted-foreground); margin-top: 7px; display: flex; align-items: center; gap: 6px; }
-.tally .cap i { width: 7px; height: 7px; background: var(--muted-foreground); }
-.tally .cell.ok .num { color: var(--primary); }
-.tally .cell.alert .num { color: var(--amber); }
-.tally .cell.alert .cap i { background: var(--amber); }
-/* 活动流：行式（指纹条延续） */
-.recent { margin: 20px 24px 56px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
-.recent h2 {
-  font-size: 12px; font-weight: 500; color: var(--muted-foreground);
-  padding: 10px 16px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 8px;
-}
-.recent h2 .sigil { display: flex; gap: 2px; }
-.recent h2 .sigil i { width: 5px; height: 5px; background: var(--primary); }
-.day { padding: 8px 16px 2px; font-family: var(--mono); font-size: 10.5px; color: var(--muted-foreground); }
+.status-banner .prompt { color: var(--green); }
+.status-banner b { color: var(--green); font-weight: 400; text-shadow: 0 0 8px rgba(34, 208, 69, 0.4); }
+.status-banner time { color: var(--text-dim); font-size: 11px; margin-left: auto; }
+/* 大数字面板：等宽仪表阵列 */
+.tally { display: flex; margin: 16px 22px 0; border: 1px solid var(--panel-line); background: var(--panel); }
+.tally .cell { flex: 1; padding: 15px 20px 13px; }
+.tally .cell + .cell { border-left: 1px solid var(--panel-line); }
+.tally .num { font-size: 30px; line-height: 1; font-variant-numeric: tabular-nums; color: var(--green); text-shadow: 0 0 10px rgba(34, 208, 69, 0.35); }
+.tally .cell.dim .num { color: var(--text); text-shadow: none; }
+.tally .cell.alert .num { color: var(--amber); text-shadow: 0 0 10px rgba(215, 160, 21, 0.35); }
+.tally .cap { font-size: 11px; color: var(--text-dim); margin-top: 7px; }
+.tally .cap::before { content: "▸ "; color: var(--green-dim); }
+.tally .cell.alert .cap::before { color: var(--amber); }
+/* 活动流 */
+.recent { margin: 16px 22px 56px; border: 1px solid var(--panel-line); background: var(--panel); }
+.recent h2 { font-size: 12px; font-weight: 400; color: var(--green); padding: 9px 14px; border-bottom: 1px solid var(--green-dim); }
+.recent h2::before { content: "// "; }
+.day { padding: 8px 14px 2px; font-size: 10.5px; color: var(--text-dim); }
+.day::before { content: "── "; color: var(--green-dim); }
 .event {
   display: flex; gap: 12px; align-items: baseline;
-  padding: 8px 16px 8px 14px; border-bottom: 1px solid var(--border);
+  padding: 7px 14px 7px 13px; border-bottom: 1px solid var(--panel-line);
   position: relative;
 }
 .event:last-child { border-bottom: 0; }
 .event::before {
   content: ""; position: absolute; left: 0; top: 10px; bottom: 10px;
-  width: 2px; background: var(--fp, hsl(152 40% 40%));
+  width: 2px; background: var(--fp, var(--green-dim));
 }
 .event .what { flex: 1; min-width: 0; }
-.event .what b { font-weight: 500; font-size: 13px; }
-.event .what span { color: var(--muted-foreground); font-size: 11.5px; margin-left: 8px; }
-.event .conflict { color: var(--amber); font-size: 11.5px; margin-left: 8px; }
-.event .dir { font-size: 11px; color: var(--muted-foreground); font-family: var(--mono); }
-.event time { font-family: var(--mono); font-size: 10.5px; color: var(--muted-foreground); }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.event .what b { font-weight: 400; font-size: 12.5px; color: var(--text); }
+.event .what span { color: var(--text-dim); font-size: 11px; margin-left: 8px; }
+.event .what span.conflict { color: var(--amber); }
+.event .dir { font-size: 11px; color: var(--text-dim); }
+.event time { font-size: 10.5px; color: var(--text-dim); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
 <header>
   <div class="wordmark">
     <span class="sigil"><i></i><i></i><i></i></span>
-    PartiSync <small>本机节点 · 索引已就绪</small>
+    partisync <small>@local:~$ v0.1.0-alpha</small>
   </div>
   <nav>
     <a href="mockup-browse.html">浏览</a>
@@ -100,41 +95,41 @@ nav a[aria-current] { color: var(--primary); font-weight: 500; border-color: hsl
 </header>
 
 <div class="status-banner">
-  <span class="dot"></span>
+  <span class="prompt">sync@local:~$</span>
   已与 <b>2 台设备</b>保持一致
   <time>最近对账 4 分钟前</time>
 </div>
 
 <section class="tally" aria-label="同步统计">
-  <div class="cell ok"><div class="num">1,284</div><div class="cap"><i></i>已应用变更</div></div>
-  <div class="cell"><div class="num">96</div><div class="cap"><i></i>本机跳过（回环）</div></div>
-  <div class="cell"><div class="num">31</div><div class="cap"><i></i>规则落选（后写优先）</div></div>
-  <div class="cell alert"><div class="num">2</div><div class="cap"><i></i>冲突待处理</div></div>
+  <div class="cell"><div class="num">1,284</div><div class="cap">已应用变更</div></div>
+  <div class="cell dim"><div class="num">96</div><div class="cap">本机跳过（回环）</div></div>
+  <div class="cell dim"><div class="num">31</div><div class="cap">规则落选（后写优先）</div></div>
+  <div class="cell alert"><div class="num">2</div><div class="cap">冲突待处理</div></div>
 </section>
 
 <section class="recent" aria-label="最近活动">
-  <h2><span class="sigil"><i></i><i></i><i></i></span>最近活动</h2>
+  <h2>recent activity</h2>
 
   <div class="day">今天</div>
-  <div class="event" style="--fp: hsl(152 55% 55%)">
+  <div class="event" style="--fp: #22D045">
     <div class="what"><b>2026-Q3 项目验收报告.docx</b><span>来自 MacBook Pro</span><div class="dir">Projects/aurora/交付</div></div>
     <time>14:22</time>
   </div>
-  <div class="event" style="--fp: hsl(204 60% 60%)">
+  <div class="event" style="--fp: #4ab8d8">
     <div class="what"><b>扫描件_盖章版.pdf</b><span>本机修改 · 已推送</span><div class="dir">Projects/aurora/交付</div></div>
     <time>11:03</time>
   </div>
-  <div class="event" style="--fp: hsl(38 70% 55%)">
+  <div class="event" style="--fp: #d7a015">
     <div class="what"><b>验收会录音转写.txt</b><span class="conflict">冲突 · 两台设备都改了此文件</span><div class="dir">Projects/aurora/会议</div></div>
     <time>09:47</time>
   </div>
 
   <div class="day">昨天</div>
-  <div class="event" style="--fp: hsl(315 45% 62%)">
+  <div class="event" style="--fp: #c85fd4">
     <div class="what"><b>meeting-notes-0912.md</b><span>来自 MacBook Pro</span><div class="dir">Projects/aurora/会议</div></div>
     <time>18:40</time>
   </div>
-  <div class="event" style="--fp: hsl(95 45% 52%)">
+  <div class="event" style="--fp: #7ac03a">
     <div class="what"><b>结项清单.xlsx</b><span>本机修改 · 已推送</span><div class="dir">Projects/aurora/交付</div></div>
     <time>10:15</time>
   </div>
