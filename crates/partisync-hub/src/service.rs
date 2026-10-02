@@ -773,6 +773,51 @@ impl HubService {
             .block_on(self.route_for_async(space_id, self_hub_id))
     }
 
+    /// 租户过滤路由门（M8-WP03-T03 spike F1）：他租户空间 →
+    /// [`RouteDecision::Unknown`]（不可见，防存在性泄露）；公共/同租户
+    /// 空间维持三分类。`viewer_tenant = None` 仅见公共空间。
+    ///
+    /// # Errors
+    /// raft 读失败。
+    pub fn route_for_tenant(
+        &self,
+        space_id: &str,
+        self_hub_id: u64,
+        viewer_tenant: Option<&str>,
+    ) -> Result<RouteDecision, ReplicaError> {
+        self.rt
+            .block_on(self.route_for_tenant_async(space_id, self_hub_id, viewer_tenant))
+    }
+
+    /// [`Self::route_for_tenant`] 的异步形态。
+    ///
+    /// # Errors
+    /// raft 读失败。
+    pub async fn route_for_tenant_async(
+        &self,
+        space_id: &str,
+        self_hub_id: u64,
+        viewer_tenant: Option<&str>,
+    ) -> Result<RouteDecision, ReplicaError> {
+        let owner = self
+            .registry
+            .tenant_of_async(space_id)
+            .await
+            .map_err(|e| match e {
+                RegistryError::Raft(re) => *re,
+                other => ReplicaError::Io(std::io::Error::other(other.to_string())),
+            })?;
+        let visible = match (&owner, viewer_tenant) {
+            (None, _) => true,
+            (Some(t), Some(v)) => t == v,
+            (Some(_), None) => false,
+        };
+        if !visible {
+            return Ok(RouteDecision::Unknown);
+        }
+        self.route_for_async(space_id, self_hub_id).await
+    }
+
     /// [`Self::route_for`] 的异步形态。
     ///
     /// # Errors
