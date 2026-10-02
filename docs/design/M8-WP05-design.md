@@ -7,6 +7,19 @@
 > 执行: GLM-5.3-Flash (ZCode)（frontend-design 流程：计划→自审→构建
 > →截图自查）
 >
+> **v4.3（2026-10-02 borgbackup 源码仓库深度调研：borgbackup.github.io
+> clone 实测）**——重大发现：官网新版 index3.html 已有 **three.js 粒子
+> 宇宙**（6³ InstancedMesh 方块格 = 存储块、900 星星空、FogExp2 深度
+> 雾、数据块螺旋吸入、GSAP ScrollTrigger 编排）——与「微观宇宙」构想
+> 同源，验证方向正确。**颜色搭配可取**：三档色分布（90% base / 16%
+> mid / 10% hot 荧光）+ 深度雾层次；**交互可取**：滚动编排粒子吸入。
+> **v4.3 CSS 化吸收**（three.js 3D 登记探针，不阻塞桌面壳）：①星点
+> twinkle 双层交替闪烁（活星空，body::before/::after 双层）；②中央
+> 绿核 radial glow（深度层次，FogExp2 的 CSS 化）；③检索结果**聚拢
+> 入场**（gather 0.32s stagger——「粒子从星域聚拢到位」，动效唯一
+> 升级，截图实证中间帧）。已知微瑕：扫描线层与 twinkle-b 共层（轻微
+> 闪烁），后续拆层。
+>
 > **v4（2026-10-02 用户三次补充：微观宇宙粒子隐喻）**——核心设计
 > 逻辑升级：**数据文件/设备 = 粒子（particle）= 微观宇宙中的尘埃/
 > 星球/天体**。落地：①多层 radial-gradient 星点底（星域）；②条目
@@ -60,7 +73,9 @@ PartiSync 桌面壳是**本地优先引擎的档案工具**：用户的核心对
 | 直角 | `border-radius: 0 !important` | 全组件（用户硬性要求 + 官网判例） |
 | 扫描线 | 3px 周期 rgba(0,0,0,.12) fixed overlay | CRT 质感（subtle） |
 | glow | `text/box-shadow rgba(34,208,69,.35~.6)` | 标题/得分条/当前 tab（赛博霓虹） |
-| 星点底 | 多层 radial-gradient 1–2px 粒子（12 颗，绿/白/琥珀/青/紫） | body 背景（星域；网格底纹之上） |
+| 星点底 | 多层 radial-gradient 1–2px 粒子（12 颗静态 + 5 颗 twinkle 交替闪烁） | body 背景（活星空；网格底纹之上） |
+| 中央绿核 | radial-gradient 600×400 hsla(152,60%,30%,0.12) | 深度层次（borgbackup FogExp2 的 CSS 化） |
+| 聚拢入场 | gather 0.32s stagger（blur(2px)+translateY(-6px)→就位） | 检索结果唯一动效（粒子从星域聚拢） |
 | 去重星图 | 两行圆粒（10px，lit=primary glow / dim=border） | browse 详情（讲「同内容只存一次」） |
 | 计数入场 | data-count + rAF ease-out 900ms | 同步大数字（reduced-motion 直落终值） |
 | 网格底纹 | 32px repeating-linear（3.5% 绿） | body 背景（星域坐标网格） |

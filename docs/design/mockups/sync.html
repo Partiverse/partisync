@@ -32,10 +32,27 @@ body {
   color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.65;
   min-height: 100vh;
 }
-body::after {
-  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 999;
-  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
+
+/* v4.3：活星空——两层星组交替闪烁（borgbackup three.js 星空的 CSS 化） */
+@keyframes twinkle-a { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes twinkle-b { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.9; } }
+body::before {
+  content: "";
+  position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(1.5px 1.5px at 15% 42%, hsla(152, 65%, 65%, 0.8) 50%, transparent 51%),
+    radial-gradient(1px 1px at 52% 63%, hsla(45, 65%, 60%, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 82% 12%, hsla(204, 50%, 65%, 0.6) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 29% 77%, hsla(315, 38%, 68%, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 91% 52%, hsla(152, 55%, 70%, 0.6) 50%, transparent 51%);
+  animation: twinkle-a 4s ease-in-out infinite;
 }
+body::after {
+  z-index: 998;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
+  animation: twinkle-b 5.2s ease-in-out infinite;
+}
+
 header { display: flex; align-items: center; gap: 16px; padding: 12px 22px; border-bottom: 1px solid var(--panel-line); background: var(--panel); }
 .wordmark { font-weight: 700; font-size: 14px; color: var(--green); text-shadow: 0 0 10px rgba(34, 208, 69, 0.5); display: flex; align-items: center; gap: 10px; }
 .wordmark .sigil { display: flex; gap: 2px; }
