@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PartiSync · 浏览 — v3 赛博朋克/borgbackup 设计原型</title>
+<style>
+:root {
+  --bg: #020503; --green: #22D045; --green-dim: #14803a; --green-dark: #0a3d1c;
+  --panel: rgba(8, 18, 10, 0.82); --panel-line: rgba(34, 208, 69, 0.22);
+  --text: #d7e8da; --text-dim: #8aa892; --amber: #d7a015;
+  --mono: ui-monospace, Menlo, Monaco, "Cascadia Mono", "Segoe UI Mono", monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0 !important; }
+body {
+  background:
+    radial-gradient(1px 1px at 8% 14%, hsla(152, 70%, 70%, 0.7) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 21% 68%, hsla(152, 55%, 62%, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 33% 31%, hsla(160, 40%, 75%, 0.4) 50%, transparent 51%),
+    radial-gradient(2px 2px at 47% 82%, hsla(45, 70%, 65%, 0.35) 50%, transparent 51%),
+    radial-gradient(1px 1px at 58% 9%, hsla(152, 60%, 68%, 0.55) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 69% 55%, hsla(204, 50%, 65%, 0.4) 50%, transparent 51%),
+    radial-gradient(1px 1px at 77% 24%, hsla(315, 40%, 70%, 0.45) 50%, transparent 51%),
+    radial-gradient(2px 2px at 88% 71%, hsla(152, 65%, 60%, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 94% 38%, hsla(152, 45%, 70%, 0.4) 50%, transparent 51%),
+    radial-gradient(1px 1px at 12% 90%, hsla(204, 45%, 68%, 0.4) 50%, transparent 51%),
+    radial-gradient(1px 1px at 41% 47%, hsla(315, 35%, 72%, 0.35) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 64% 88%, hsla(45, 60%, 62%, 0.3) 50%, transparent 51%),
+    repeating-linear-gradient(0deg, transparent 0 31px, rgba(34, 208, 69, 0.035) 31px 32px),
+    repeating-linear-gradient(90deg, transparent 0 31px, rgba(34, 208, 69, 0.035) 31px 32px),
+    var(--bg);
+  color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.65;
+  min-height: 100vh;
+}
+
+/* v4.3：活星空——两层星组交替闪烁（borgbackup three.js 星空的 CSS 化） */
+@keyframes twinkle-a { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes twinkle-b { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.9; } }
+body::before {
+  content: "";
+  position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(1.5px 1.5px at 15% 42%, hsla(152, 65%, 65%, 0.8) 50%, transparent 51%),
+    radial-gradient(1px 1px at 52% 63%, hsla(45, 65%, 60%, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 82% 12%, hsla(204, 50%, 65%, 0.6) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 29% 77%, hsla(315, 38%, 68%, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 91% 52%, hsla(152, 55%, 70%, 0.6) 50%, transparent 51%);
+  animation: twinkle-a 4s ease-in-out infinite;
+}
+body::after {
+  z-index: 998;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
+  animation: twinkle-b 5.2s ease-in-out infinite;
+}
+
+header { display: flex; align-items: center; gap: 16px; padding: 12px 22px; border-bottom: 1px solid var(--panel-line); background: var(--panel); }
+.wordmark { font-weight: 700; font-size: 14px; color: var(--green); text-shadow: 0 0 10px rgba(34, 208, 69, 0.5); display: flex; align-items: center; gap: 10px; }
+.wordmark .sigil { display: flex; gap: 2px; }
+.wordmark .sigil i { width: 8px; height: 8px; background: var(--green); box-shadow: 0 0 6px rgba(34, 208, 69, 0.6); }
+.wordmark .sigil i:nth-child(2) { background: var(--green-dim); box-shadow: none; }
+.wordmark small { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+nav { display: flex; gap: 2px; margin-left: auto; }
+nav a { color: var(--text-dim); text-decoration: none; padding: 5px 12px; font-size: 12.5px; border: 1px solid transparent; }
+nav a:hover { color: var(--green); border-color: var(--panel-line); }
+nav a[aria-current] { color: var(--green); border: 1px solid var(--green); text-shadow: 0 0 8px rgba(34, 208, 69, 0.5); }
+.crumbs { padding: 13px 22px 9px; font-size: 12px; color: var(--text-dim); }
+.crumbs b { color: var(--green); font-weight: 400; }
+.crumbs span { margin: 0 6px; color: var(--green-dim); }
+.crumbs::before { content: "partisync@local:~$ cd "; color: var(--text-dim); }
+.stage { display: flex; align-items: flex-start; padding: 0 22px 56px; gap: 18px; }
+.panel { background: var(--panel); border: 1px solid var(--panel-line); }
+table { border-collapse: collapse; flex: 1; min-width: 0; }
+th { text-align: left; font-weight: 400; font-size: 11px; color: var(--text-dim); padding: 8px 12px; border-bottom: 1px solid var(--green-dim); }
+td { padding: 9px 12px; border-bottom: 1px solid var(--panel-line); font-size: 13px; }
+tr:last-child td { border-bottom: 0; }
+td.size, td.mtime { color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 12px; }
+td.fp { font-size: 11px; color: var(--fp); white-space: nowrap; }
+td.fp i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; background: var(--fp); border-radius: 50%; box-shadow: 0 0 5px var(--fp); }
+tr.row { cursor: pointer; }
+tr.row:hover td { background: rgba(34, 208, 69, 0.06); }
+tr.row[aria-selected] td { background: var(--green-dark); }
+td.icon { width: 20px; color: var(--text-dim); }
+aside.detail { width: 340px; flex-shrink: 0; margin-left: 2px; padding: 16px 18px 20px; position: sticky; top: 14px; }
+aside.detail .section-tag { margin-bottom: 10px; }
+aside.detail h2 { font-size: 14.5px; font-weight: 700; color: var(--text); line-height: 1.45; }
+aside.detail .path-line { font-size: 11px; color: var(--text-dim); margin: 4px 0 15px; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 12px; }
+dt { color: var(--text-dim); }
+dd { color: var(--text); }
+dd.mono { font-size: 11px; word-break: break-all; color: var(--fp, var(--green)); }
+.fingerprint { margin: 15px 0; padding: 10px 12px; background: rgba(2, 5, 3, 0.7); border: 1px solid var(--panel-line); }
+.fingerprint .label { font-size: 10.5px; color: var(--text-dim); margin-bottom: 6px; }
+.fingerprint .label::before { content: "// "; color: var(--green); }
+.fingerprint .strip { display: flex; height: 6px; gap: 2px; }
+.fingerprint .strip i { flex: 1; }
+.fingerprint .hash { font-size: 10.5px; margin-top: 6px; word-break: break-all; color: var(--text-dim); }
+.transcript { margin-top: 13px; }
+.transcript .label { font-size: 10.5px; color: var(--text-dim); margin-bottom: 4px; }
+.transcript .label::before { content: "// "; color: var(--green); }
+.transcript blockquote {
+  font-size: 12px; color: var(--text-dim);
+  border-left: 2px solid var(--green-dim); padding-left: 10px;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.section-tag { font-size: 12px; color: var(--green); }
+.section-tag::before { content: "// "; }
+.constellation { margin-top: 15px; }
+.constellation .label { font-size: 10.5px; color: var(--muted-foreground); margin-bottom: 7px; }
+.constellation .label::before { content: "// "; color: var(--primary); }
+.p-row { display: flex; gap: 5px; align-items: center; margin-bottom: 5px; }
+.p-row .p-label { font-family: var(--mono); font-size: 10px; color: var(--muted-foreground); width: 18px; }
+.p-row .p { flex: 1; height: 10px; border-radius: 50%; background: hsl(160 8% 12%); border: 1px solid var(--border); }
+.p-row .p.lit { background: var(--primary); border-color: var(--primary); box-shadow: 0 0 7px hsl(152 70% 52% / 0.5); }
+.p-note { font-size: 10px; color: var(--muted-foreground); margin-top: 6px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wordmark">
+    <span class="sigil"><i></i><i></i><i></i></span>
+    partisync <small>@local:~$ v0.1.0-alpha</small>
+  </div>
+  <nav>
+    <a href="#" aria-current="page">浏览</a>
+    <a href="mockup-search.html">检索</a>
+    <a href="mockup-sync.html">同步</a>
+    <a href="#">重复内容</a>
+    <a href="#">作业</a>
+    <a href="#">扩展</a>
+  </nav>
+</header>
+
+<div class="crumbs">/ Projects / <b>aurora</b> / 交付</div>
+
+<main class="stage">
+  <table class="panel" aria-label="目录条目">
+    <thead><tr><th></th><th>名称</th><th>大小</th><th>修改时间</th><th>内容身份</th></tr></thead>
+    <tbody>
+      <tr class="row"><td class="icon" aria-hidden="true">▸</td><td>会议</td><td class="size">—</td><td class="mtime">2026-09-28</td><td class="fp">—</td></tr>
+      <tr class="row" aria-selected="true" style="--fp: #22D045"><td class="icon" aria-hidden="true">·</td><td>2026-Q3 项目验收报告.docx</td><td class="size">2.1 MB</td><td class="mtime">09-30 14:22</td><td class="fp"><i></i>9f3a2c1d</td></tr>
+      <tr class="row" style="--fp: #4ab8d8"><td class="icon" aria-hidden="true">·</td><td>扫描件_盖章版.pdf</td><td class="size">8.4 MB</td><td class="mtime">09-30 11:03</td><td class="fp"><i></i>c4d92e07</td></tr>
+      <tr class="row" style="--fp: #c85fd4"><td class="icon" aria-hidden="true">·</td><td>meeting-notes-0912.md</td><td class="size">14 KB</td><td class="mtime">09-28 18:40</td><td class="fp"><i></i>1e6b40f9</td></tr>
+      <tr class="row" style="--fp: #7ac03a"><td class="icon" aria-hidden="true">·</td><td>结项清单.xlsx</td><td class="size">86 KB</td><td class="mtime">09-27 10:15</td><td class="fp"><i></i>3a88d5b2</td></tr>
+    </tbody>
+  </table>
+
+  <aside class="detail panel" aria-label="条目详情">
+    <div class="section-tag">detail</div>
+    <h2>2026-Q3 项目验收报告.docx</h2>
+    <div class="path-line">~/Projects/aurora/交付</div>
+    <dl>
+      <dt>大小</dt><dd>2.1 MB</dd>
+      <dt>修改</dt><dd>2026-09-30 14:22</dd>
+      <dt>类型</dt><dd>文档</dd>
+      <dt>块</dt><dd>3 块 · 2 引用</dd>
+    </dl>
+    <div class="fingerprint" style="--fp: #22D045">
+      <div class="label">内容身份（blake3）——指纹色由此派生</div>
+      <div class="strip">
+        <i style="background:#22D045"></i><i style="background:#14803a"></i><i style="background:#7ac03a"></i><i style="background:#4ab8d8"></i><i style="background:#2a9a50"></i><i style="background:#57c9c0"></i><i style="background:#9adf6a"></i><i style="background:#c85fd4"></i>
+      </div>
+      <div class="hash">9f3a2c1d…e84107bb</div>
+    </div>
+    <div class="transcript">
+      <div class="label">转写/OCR 文本（前 4 行）</div>
+      <blockquote>经三方评审，项目验收通过条件已全部满足，本报告作为 aurora 二期结项依据。遗留事项两件，见附录 B……</blockquote>
+    </div>
+    <div class="constellation">
+      <div class="label">// 去重星图——同内容粒子只占一次存储</div>
+      <div class="p-row"><span class="p-label">v2</span><i class="p lit"></i><i class="p lit"></i><i class="p dim"></i><i class="p lit"></i><i class="p dim"></i><i class="p lit"></i><i class="p dim"></i><i class="p dim"></i></div>
+      <div class="p-row"><span class="p-label">v1</span><i class="p dim"></i><i class="p dim"></i><i class="p lit"></i><i class="p dim"></i><i class="p lit"></i><i class="p dim"></i><i class="p lit"></i><i class="p dim"></i></div>
+      <div class="p-note">亮 = 新增存储 · 暗 = 复用已有粒子（引用 +1）</div>
+    </div>
+  </aside>
+</main>
+</body>
+</html>

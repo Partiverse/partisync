@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PartiSync · 组件状态画廊 — 设计审计补充（v4.1）</title>
+<style>
+/* tokens（v4.1 补齐 destructive/secondary/input——审计 §3-1） */
+:root {
+  --bg: #020503; --green: #22D045; --green-dim: #14803a; --green-dark: #0a3d1c;
+  --panel: rgba(8, 18, 10, 0.82); --panel-line: rgba(34, 208, 69, 0.22);
+  --text: #d7e8da; --text-dim: #8aa892; --amber: #d7a015;
+  --destructive: hsl(0 72% 56%);
+  --secondary: hsl(160 8% 12%);
+  --input: hsl(160 6% 16%);
+  --mono: ui-monospace, Menlo, Monaco, "Cascadia Mono", "Segoe UI Mono", monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0 !important; }
+body {
+  background:
+    repeating-linear-gradient(0deg, transparent 0 31px, rgba(34, 208, 69, 0.035) 31px 32px),
+    repeating-linear-gradient(90deg, transparent 0 31px, rgba(34, 208, 69, 0.035) 31px 32px),
+    var(--bg);
+  color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.65;
+  min-height: 100vh; padding: 24px;
+}
+.wrap { max-width: 880px; margin: 0 auto 60px; }
+.section-tag { font-size: 12px; color: var(--green); margin: 30px 0 12px; }
+.section-tag::before { content: "// "; }
+.section-tag:first-child { margin-top: 0; }
+.demo { background: var(--panel); border: 1px solid var(--panel-line); padding: 18px 20px; margin-bottom: 14px; }
+.demo .cap { font-size: 11px; color: var(--text-dim); margin-bottom: 12px; }
+.demo .cap::before { content: "▸ "; color: var(--green-dim); }
+/* Button variants（shadcn 对齐） */
+.btn { font-family: var(--mono); font-size: 12.5px; padding: 7px 16px; cursor: pointer; border: 1px solid transparent; margin-right: 10px; }
+.btn.primary { background: var(--green); color: #021006; border-color: var(--green); }
+.btn.primary:hover { background: hsl(140 65% 45%); }
+.btn.secondary { background: var(--secondary); color: var(--text); border-color: var(--border, var(--panel-line)); }
+.btn.ghost { background: transparent; color: var(--text); border-color: var(--panel-line); }
+.btn.destructive { background: transparent; color: var(--destructive); border-color: var(--destructive); }
+.btn.destructive:hover { background: hsl(0 72% 56% / 0.12); }
+/* Skeleton（检索加载中） */
+.skel-row { display: flex; gap: 13px; align-items: flex-start; padding: 12px 12px 12px 14px; border-bottom: 1px solid var(--panel-line); position: relative; }
+.skel-row::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; background: var(--green-dark); }
+.skel { background: linear-gradient(90deg, hsl(160 8% 10%) 25%, hsl(160 20% 14%) 50%, hsl(160 8% 10%) 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
+.skel.fp { width: 64px; height: 20px; flex-shrink: 0; }
+.skel .col { flex: 1; }
+.skel .l1 { height: 13px; width: 45%; margin-bottom: 8px; }
+.skel .l2 { height: 10px; width: 30%; margin-bottom: 8px; }
+.skel .l3 { height: 10px; width: 80%; }
+/* Empty state（检索无结果——动作邀请） */
+.empty { text-align: left; padding: 30px 20px; }
+.empty .sig { font-size: 26px; color: var(--green-dim); margin-bottom: 10px; }
+.empty h3 { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.empty p { font-size: 12.5px; color: var(--text-dim); margin-bottom: 14px; }
+.empty code { color: var(--green); }
+/* Toast（操作反馈） */
+.toast-row { display: flex; flex-direction: column; gap: 10px; }
+.toast {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--panel-line); background: var(--panel);
+  padding: 9px 14px; font-size: 12.5px;
+}
+.toast.ok { border-color: var(--green-dim); }
+.toast.ok::before { content: "■"; color: var(--green); font-size: 9px; }
+.toast.err { border-color: hsl(0 72% 56% / 0.5); }
+.toast.err::before { content: "✕"; color: var(--destructive); font-size: 9px; }
+.toast time { margin-left: auto; font-size: 10px; color: var(--text-dim); }
+/* Dialog（破坏性确认） */
+.dialog-demo { position: relative; min-height: 150px; background: hsl(160 5% 3% / 0.8); display: flex; align-items: center; justify-content: center; }
+.dialog {
+  width: 420px; background: var(--panel); border: 1px solid var(--destructive);
+  padding: 18px 20px;
+  box-shadow: 0 0 30px hsl(0 72% 56% / 0.15);
+}
+.dialog h4 { font-size: 13.5px; color: var(--destructive); margin-bottom: 8px; }
+
+.dialog p { font-size: 12.5px; color: var(--text-dim); margin-bottom: 16px; }
+.dialog .row { display: flex; justify-content: flex-end; gap: 10px; }
+/* Destructive 警示条（与 amber 冲突警示分离） */
+.warns { display: flex; flex-direction: column; gap: 10px; }
+.warn { padding: 9px 14px; font-size: 12.5px; border: 1px solid var(--panel-line); background: var(--panel); }
+.warn.conflict { border-color: hsl(38 78% 46% / 0.5); }
+.warn.conflict { border-color: hsl(38 78% 46% / 0.5); }
+.warn.error { border-color: hsl(0 72% 56% / 0.5); }
+.warn.error { border-color: hsl(0 72% 56% / 0.5); }
+/* cursor 分页控件 */
+.pager { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-dim); }
+.pager button { font-family: var(--mono); font-size: 12px; padding: 5px 12px; background: var(--secondary); color: var(--text); border: 1px solid var(--panel-line); cursor: pointer; }
+.pager button:hover { border-color: var(--green-dim); color: var(--green); }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="section-tag">states —— 组件状态画廊（设计审计 v4.1 补充：loading / empty / toast / dialog / destructive / pagination / button variants）</div>
+
+  <div class="section-tag">1. Skeleton —— 检索加载中</div>
+  <div class="demo">
+    <div class="cap">检索中（语义模式），shimmer 禁动于 reduced-motion</div>
+    <div class="skel-row"><div class="skel fp"></div><div class="col"><div class="skel l1"></div><div class="skel l2"></div><div class="skel l3"></div></div></div>
+    <div class="skel-row"><div class="skel fp"></div><div class="col"><div class="skel l1" style="width:60%"></div><div class="skel l2"></div><div class="skel l3" style="width:70%"></div></div></div>
+  </div>
+
+  <div class="section-tag">2. Empty —— 检索无结果（动作邀请）</div>
+  <div class="demo">
+    <div class="cap">空态给动作，不给情绪</div>
+    <div class="empty">
+      <div class="sig">⌖</div>
+      <h3>没有找到「量子纠缠 散热器」</h3>
+      <p>换个更短的关键词，或切到「语义」模式放宽匹配。</p>
+      <p>本机还没有索引文件？运行 <code>partisync index &lt;路径&gt;</code> 开始。</p>
+    </div>
+  </div>
+
+  <div class="section-tag">3. Button variants —— shadcn 对齐（primary/secondary/ghost/destructive）</div>
+  <div class="demo">
+    <div class="cap">破坏性操作独立语义色（不再与冲突 amber 混用）</div>
+    <button class="btn primary">检索</button>
+    <button class="btn secondary">切到语义</button>
+    <button class="btn ghost">高级筛选</button>
+    <button class="btn destructive">删除索引</button>
+  </div>
+
+  <div class="section-tag">4. Toast —— 操作反馈（成功/失败）</div>
+  <div class="demo">
+    <div class="cap">同一动作全流程同名：按钮「推送」→ toast「已推送」</div>
+    <div class="toast-row">
+      <div class="toast ok"><span aria-hidden="true">■</span> 已推送到 2 台设备 <time>刚刚</time></div>
+      <div class="toast err"><span aria-hidden="true">✕</span> 推送失败：对端不可达，将在 30s 后自动重试 <time>刚刚</time></div>
+    </div>
+  </div>
+
+  <div class="section-tag">5. Dialog —— 破坏性操作确认</div>
+  <div class="demo">
+    <div class="cap">写路径操作前置（对账语义任务接入后启用）</div>
+    <div class="dialog-demo">
+      <div class="dialog" role="alertdialog" aria-label="确认删除">
+        <h4><span aria-hidden="true">⚠&#xFE0E;</span> 删除索引？</h4>
+        <p>将移除 1,284 条索引记录与检索数据。原始文件与 CAS 内容不受影响。此操作不可撤销。</p>
+        <div class="row">
+          <button class="btn ghost">取消</button>
+          <button class="btn destructive">确认删除</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-tag">6. 警示语义分离 —— conflict（amber）≠ error（destructive）</div>
+  <div class="demo">
+    <div class="cap">amber = 数据冲突态（同步面）；destructive = 操作错误态（全局）</div>
+    <div class="warns">
+      <div class="warn conflict"><span aria-hidden="true">◆ </span>冲突 · 验收会录音转写.txt —— 两台设备都改了此文件，需要选择保留版本</div>
+      <div class="warn error"><span aria-hidden="true">■ </span>错误 · 索引写入失败：磁盘空间不足（剩余 0 B），已暂停扫描作业</div>
+    </div>
+  </div>
+
+  <div class="section-tag">7. Pagination —— keyset cursor 分页控件</div>
+  <div class="demo">
+    <div class="cap">对应 list_children / search 的 cursor 续读（后端已支持）</div>
+    <div class="pager">
+      <button>← 上一页</button>
+      <span>第 3 页 · 每页 50 条</span>
+      <button>下一页 →</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>
