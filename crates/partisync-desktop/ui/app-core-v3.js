@@ -276,10 +276,46 @@ async function doExtCall() {
   try {
     const r = await call("mcp_call", { tool, args });
     const payload = r?.structuredContent ?? r;
-    $("ext-output").textContent = JSON.stringify(payload, null, 2);
+    const out = JSON.stringify(payload, null, 2);
+    $("ext-output").textContent = out;
+    extHistory.unshift({ at: Date.now(), tool, input: raw || "（空）", output: out, ok: true });
   } catch (e) {
-    $("ext-output").textContent = "调用失败：" + (e?.msg ?? String(e));
+    const msg = e?.msg ?? String(e);
+    $("ext-output").textContent = "调用失败：" + msg;
+    extHistory.unshift({ at: Date.now(), tool, input: raw || "（空）", output: msg, ok: false });
   }
+  if (extHistory.length > 20) extHistory.length = 20;
+  renderExtHistory();
+}
+
+// ── G2. 扩展调用历史（M8-WP05-T04：会话内最近 20 次入参/出参，纯前端态） ──
+let extHistory = [];
+
+function trunc(s, n) {
+  s = String(s ?? "");
+  return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+function renderExtHistory() {
+  const box = $("ext-history");
+  if (!extHistory.length) {
+    box.innerHTML = `<div class="empty">本次会话还没有扩展调用——在上方选工具后点「调用」</div>`;
+    return;
+  }
+  box.innerHTML = `<table class="panel-table"><thead><tr><th style="width:90px">时间</th><th style="width:130px">工具</th><th style="width:56px">状态</th><th>入参 / 出参</th></tr></thead><tbody>${
+    extHistory.map((h, i) => `
+      <tr data-hist="${i}" title="点击回看本次入参/出参"><td class="size">${new Date(h.at).toLocaleTimeString("zh-CN", { hour12: false })}</td>
+      <td class="fp">${h.tool}</td>
+      <td class="${h.ok ? "hist-ok" : "hist-err"}">${h.ok ? "OK" : "ERR"}</td>
+      <td class="hist-io">in ${trunc(h.input, 70)} · out ${trunc(h.output, 90)}</td></tr>`).join("")}</tbody></table>`;
+  box.querySelectorAll("tr[data-hist]").forEach(tr => {
+    tr.onclick = () => {
+      const h = extHistory[+tr.dataset.hist];
+      openExtCall(h.tool);
+      $("ext-input").value = h.input === "（空）" ? "" : h.input;
+      $("ext-output").textContent = h.output;
+    };
+  });
 }
 
 // ── F. 同步（M8-WP05-T03：sync_stats/sync_recent 只读呈现；H3 5s 轮询） ──
