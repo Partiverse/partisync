@@ -95,6 +95,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             ipc::list,
             ipc::search,
             ipc::search_hybrid,
+            ipc::asset_detail,
             ipc::cas_stats,
             ipc::duplicates,
             ipc::jobs,

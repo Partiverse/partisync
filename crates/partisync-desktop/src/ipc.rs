@@ -156,6 +156,29 @@ pub async fn search_hybrid(
         .collect())
 }
 
+/// 条目详情 IPC（M8-WP05-T02；SPEC §2.2）：同 content_id 全部路径 +
+/// 大小/时间（详情面板数据源）。空 vec = content_id 不存在。
+#[derive(Debug, Serialize)]
+pub struct AssetDetail {
+    pub content_id: String,
+    pub size: u64,
+    pub copies: Vec<EntryRow>,
+}
+
+/// 条目详情（按 content_id 反查全部路径）。
+#[tauri::command]
+pub async fn asset_detail(
+    state: State<'_, AppState>,
+    args: ListArgs,
+) -> DesktopResult<AssetDetail> {
+    let rows = state.store.entries_by_content(&args.prefix).await?;
+    Ok(AssetDetail {
+        content_id: args.prefix,
+        size: rows.first().map(|r| r.size).unwrap_or(0).max(0) as u64,
+        copies: rows,
+    })
+}
+
 /// 块库统计（chunk-level dedup + saved_bytes）。
 #[tauri::command]
 pub async fn cas_stats(state: State<'_, AppState>) -> DesktopResult<CasStats> {

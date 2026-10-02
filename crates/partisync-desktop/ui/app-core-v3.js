@@ -97,7 +97,7 @@ async function browse(path) {
   $("rows").innerHTML = rows.length ? rows.map(e => {
     const dir = e.kind === 1;
     const fp = e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : "";
-    return `<tr class="${dir ? "row-dir" : "row-file"}"${dir ? ` data-path="${e.path}" style="cursor:pointer"` : ""}${fp ? ` ${fp.replace('style="', 'style="')}` : ""}>
+    return `<tr class="${dir ? "row-dir" : "row-file"}"${dir ? ` data-path="${e.path}" style="cursor:pointer"` : ` data-cid="${e.content_id}" data-name="${e.name}" style="cursor:pointer"`}${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>
       <td class="icon" aria-hidden="true">${dir ? "▸" : "·"}</td>
       <td>${e.name}</td><td class="size">${dir ? "—" : sizeFmt(e.size)}</td>
       <td class="mtime">${timeFmt(e.mtime_ns)}</td>
@@ -106,13 +106,48 @@ async function browse(path) {
   $("rows").querySelectorAll("tr[data-path]").forEach(tr => {
     tr.onclick = () => browse(tr.dataset.path);
   });
+  // 文件行点击 → 详情面板（M8-WP05-T02；dir 行保持进目录）
+  $("rows").querySelectorAll("tr.row-file[data-cid]").forEach(tr => {
+    tr.onclick = () => showDetail(tr.dataset.cid, tr.dataset.name);
+  });
+}
+
+// ── B2. 条目详情面板（M8-WP05-T02；SPEC §2.2） ──
+async function showDetail(contentId, name) {
+  const panel = $("detail-panel");
+  panel.style.display = "";
+  panel.innerHTML = `<div class="section-tag">detail</div>
+    <div class="empty">加载中…</div>`;
+  let d;
+  try {
+    d = await call("asset_detail", { prefix: contentId });
+  } catch (e) {
+    panel.innerHTML = `<div class="empty">详情加载失败（${e?.kind ?? "?"}）</div>`;
+    return;
+  }
+  const fp = fpOf(contentId);
+  const copies = d.copies.map(c =>
+    `<li>${c.path} <span class="dim">· ${sizeFmt(c.size)}</span></li>`).join("");
+  panel.innerHTML = `
+    <h2>${name}</h2>
+    <dl>
+      <dt>大小</dt><dd>${sizeFmt(d.size)}</dd>
+      <dt>副本</dt><dd>${d.copies.length} 处</dd>
+    </dl>
+    <div class="fingerprint" style="--fp: ${fp}">
+      <div class="label">内容身份（blake3）——指纹色由此派生</div>
+      <div class="strip">${Array.from({length: 8}, (_, i) =>
+        `<i style="background: hsl(${(i * 47 + parseInt(contentId.slice(0, 2), 16) * 137.508) % 360} 55% 55%)"></i>`).join("")}</div>
+      <div class="hash">${contentId.slice(0, 16)}…</div>
+    </div>
+    <div class="copies"><div class="label">副本路径</div><ul>${copies || "<li>—</li>"}</ul></div>`;
 }
 
 // ── C. 检索（旗舰；三态全覆盖——设计审计硬约束） ──
 function searchCommand() {
-  // 含转写文本 = BM25 通道透传（N4 零后端增量）；语义 = search_hybrid
+  // 含转写文本 = BM25 通道透传（N4：include_transcript 已在后端常开，
+  // 转写命中走同一 search IPC；开关仅为语义标注）。
   if (searchMode === "hybrid") return "search_hybrid";
-  if ($("mode-transcript").checked) return "search_transcript_placeholder";
   return "search";
 }
 
