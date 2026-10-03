@@ -17,16 +17,17 @@
 | unlink（二期，M8-WP07-T02） | **写回日志路径**：先日志（`.partisync-writeback/wal.jsonl` append）→ 应用到 backing → 压实 | 目录 → `EPERM`；不存在 → `ENOENT`；apply 失败 backing 原状（P16） |
 | rmdir（二期，M8-WP07-T02） | 同上日志路径 | 仅空目录（非空 `ENOTEMPTY`，拒绝先于日志写入） |
 | rename（二期，M8-WP07-T02） | 同上日志路径；同挂载点内跨目录允许，目录拓扑仍由同步管线管理 | 源不存在 → `ENOENT`；目标非空目录 → `ENOTEMPTY`；`.partisync-writeback/` 涉入 → `EACCES` |
+| 已存在文件写打开 → release（二期 T03） | **整文件替换**：写入 `.partisync-writeback/staging/` 暂存（预填原内容，顺序追加契约不变），release 时 WAL Replace 先落盘 + 原子 rename 到位（无半提交） | 同路径暂存持有期间第二写打开 `EBUSY`（后写者拒绝——落锤 Q1）；crash 相位由 P16 覆盖 |
+| truncate（setattr size，二期 T03） | 整文件替换特例：暂存持有期 = staging 截断（内核 O_TRUNC = open→setattr(0) 序列，fuser 判例）；独立调用 = 原子 Replace 到 size（0 = 清空写） | perm/uid/gid/时间戳形式仍 `EPERM` |
+| flush（二期 T03） | close 时同步应用整文件替换（WAL Replace + 原子 rename）——**close 返回时 backing 即新内容**；release 兜底重放（Replace 幂等）。多次 flush（dup fd）安全 | flush 可多次触发；Replace 幂等 |
 
 ## 显式拒绝的操作（拒绝先于任何破坏性效果——P15）
 
 | 操作 | errno |
 |---|---|
-| 已存在文件写打开（`O_WRONLY`/`O_RDWR`，含 append） | `EACCES` |
 | mkdir / mknod / symlink | `EPERM`（目录拓扑由同步管线管理——二期不变） |
-| setattr 全部形式（truncate/perm/uid/gid/时间戳） | `EPERM` |
+| setattr perm/uid/gid/时间戳形式 | `EPERM`（truncate 形式已开放见支持表） |
 | `.partisync-writeback/` 涉入的一切写操作 | `EACCES` |
-| 已存在文件任何修改路径 | 不存在（写打开层已前置拒绝；整文件替换 overlay 归 T03） |
 
 ## 权限模型（ADR-0026 前置条件 1 处置）
 
@@ -45,5 +46,6 @@
 - **内容寻址适配**：CAS 中的对象不可变——挂载面天然「读多写少、新版本
   即新文件」，与 mountpoint-s3 对 S3 对象的语义映射同构。
 - **覆盖/改名/删除**：一期显式拒绝；二期（M8-WP07）unlink/rmdir/rename
-  走本地写回日志（差异化方案，调研方案 **§5.13**——原 §3.3 引用为勘误，
-  随 M8-WP07 修订），已存在文件整文件替换 overlay 归 T03。
+  走本地写回日志 + 已存在文件整文件替换 overlay（差异化方案，调研方案
+  **§5.13**——原 §3.3 引用为勘误，随 M8-WP07 修订）——mountpoint-s3
+  明确不做、PartiSync 以本地索引可做。
