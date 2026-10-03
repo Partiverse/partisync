@@ -276,6 +276,80 @@ async fn root_mismatch_rejects_assembly() {
     }
 }
 
+/// P11 冲突探针（SPEC M9-WP01 §3）：装配层写的路径被远端（直写、不同
+/// 属主）并发创建 → 双端 push 后两者皆可寻址（base + conflict 后缀）
+/// + 血缘落档 `sync_conflict`——装配层与 CLI 直写走同一条
+/// `apply_remote_entry` 冲突路径（M2-WP02 P11 语义零新增代码）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn p11_conflict_both_addressable_via_wiring() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let backing = tmp.path().join("backing");
+    std::fs::create_dir_all(&backing).expect("dir");
+    std::fs::write(backing.join("dup.txt"), b"from-mount").expect("file");
+
+    let db_a = tmp.path().join("a.db");
+    let tx = spawn_session(opts(&backing, &db_a)).await;
+    tx.send(FuseWriteEvent::Upsert {
+        path: "dup.txt".into(),
+    })
+    .expect("send");
+
+    let store_a = Store::open(&db_a).await.expect("store a");
+    wait_until(|| {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                store_a
+                    .entry_by_path("/dup.txt")
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+        })
+    })
+    .await;
+
+    // 远端（peer）独立创建同路径：peer 自有 device=peer-b——add_entry
+    // owner 盖章判例 ⇒ base 行 owner=peer-b ≠ 来方 partifuse ⇒ 冲突分支
+    let peer_db = tmp.path().join("peer.db");
+    let peer = Store::open(&peer_db).await.expect("peer");
+    peer.seed_device_volume("peer-b", "对端", "peer-fp")
+        .await
+        .expect("seed peer");
+    peer.add_entry(
+        None,
+        "dup.txt",
+        "/dup.txt",
+        EntryKind::File,
+        3,
+        42,
+        None,
+        None,
+    )
+    .await
+    .expect("peer direct write");
+
+    session::push(&store_a, &peer).await.expect("push");
+    // base 保留（远端自有行）+ 来方挂 conflict 后缀（不同内容 ≠ 幂等复用）
+    let conflict_row = peer
+        .entry_by_path("/dup.txt.conflict-partifuse")
+        .await
+        .expect("q");
+    assert!(
+        conflict_row.is_some(),
+        "P11：来方冲突行必须以 conflict 后缀可寻址"
+    );
+    assert!(
+        peer.entry_by_path("/dup.txt").await.expect("q").is_some(),
+        "P11：base 行必须保留"
+    );
+    let blood = peer.list_conflicts(100).await.expect("conflicts");
+    assert!(
+        blood.iter().any(|c| c.base_path == "/dup.txt"),
+        "P11：冲突血缘必须落档 sync_conflict"
+    );
+}
+
 /// 对照实验（T03 探针定位）：同 wp01_wiring 结构 + **tick(bisync) 并发**——
 /// 若容器内本测试同样「serve 自见、外部 pool 不可见」，则钉在 tick 与
 /// 应用路径的交互而非挂载面。
