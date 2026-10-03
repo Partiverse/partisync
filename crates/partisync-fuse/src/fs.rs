@@ -18,6 +18,8 @@ use fuser::{
     TimeOrNow,
 };
 
+use crate::writeback::{self, WriteBackOp, WAL_DIR};
+
 const TTL: Duration = Duration::from_secs(1);
 
 /// 打开的写句柄：新文件顺序写游标（offset 必须等于 cur_len）。
@@ -61,15 +63,37 @@ pub struct PartiFuse {
     backing: PathBuf,
     table: Mutex<InoTable>,
     writes: Mutex<HashMap<u64, WriteHandle>>,
+    /// 写回日志（M8-WP07-T02；P16：先日志后应用 + 重放幂等）。
+    writeback: writeback::WriteBackLog,
 }
 
 impl PartiFuse {
     pub fn new(backing: PathBuf) -> Self {
+        // 崩溃恢复：重放 crash 前未应用的写回日志（幂等）。恢复失败 =
+        // fail-fast 拒绝挂载（不静默丢弃未应用操作——P16 语义）。
+        let writeback = writeback::WriteBackLog::open(&backing)
+            .and_then(|log| {
+                log.recover()?;
+                Ok(log)
+            })
+            .expect("写回日志初始化/恢复失败（.partisync-writeback 不可用或重放出错）");
         Self {
             backing,
             table: Mutex::new(InoTable::new()),
             writes: Mutex::new(HashMap::new()),
+            writeback,
         }
+    }
+
+    /// 是否写回日志内部路径（挂载面上隐藏 + 写操作拒绝）。
+    fn is_internal(rel: &Path) -> bool {
+        rel.starts_with(WAL_DIR)
+    }
+
+    /// 相对路径 → 日志用 '/' 分隔字符串（unix 分隔符即 '/'；反斜杠是
+    /// 合法文件名字符，不转换）。
+    fn rel_str(rel: &Path) -> String {
+        rel.to_string_lossy().into_owned()
     }
 
     fn backing_path(&self, ino: INodeNo) -> Option<PathBuf> {
@@ -79,6 +103,12 @@ impl PartiFuse {
             .paths
             .get(&ino.0)
             .map(|rel| self.backing.join(rel))
+    }
+
+    /// 表内**相对**路径（写回日志只能存相对路径——绝对路径进 WAL 会在
+    /// `rel()` 重建时错位，容器探针实证的集成缺陷）。
+    fn rel_path(&self, ino: INodeNo) -> Option<PathBuf> {
+        self.table.lock().unwrap().paths.get(&ino.0).cloned()
     }
 
     fn attr_from(md: &fs::Metadata, ino: INodeNo) -> FileAttr {
@@ -119,6 +149,11 @@ impl Filesystem for PartiFuse {
             return;
         };
         let rel = parent_rel.join(name);
+        if Self::is_internal(&rel) {
+            // 写回日志目录在挂载面不可见（落锤 Q2）
+            reply.error(Errno::EACCES);
+            return;
+        }
         let abs = self.backing.join(&rel);
         match fs::symlink_metadata(&abs) {
             Ok(md) if md.is_file() || md.is_dir() => {
@@ -388,6 +423,10 @@ impl Filesystem for PartiFuse {
                 .strip_prefix(&self.backing)
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|_| PathBuf::from(&name));
+            // 写回日志目录在挂载面上隐藏（落锤 Q2；T04 readdir 口径沿此）
+            if Self::is_internal(&rel) {
+                continue;
+            }
             let child_ino = table.get_or_alloc(&rel);
             entries.push((child_ino, kind, name));
         }
@@ -400,28 +439,138 @@ impl Filesystem for PartiFuse {
         reply.ok();
     }
 
-    // ── 显式拒绝面（P15）：EPERM 优先于默认 ENOSYS——语义是「本面不支持
-    // 且不允许」，不是「未实现」 ──
+    // ── 写回面（M8-WP07-T02；SPEC §2.1）：unlink/rmdir/rename 经日志
+    // 路径——先日志后应用（P16），预处理拒绝先于任何破坏性效果（P15）。
+    // mkdir/mknod/symlink 维持 EPERM（目录拓扑由同步管线管理） ──
 
-    fn unlink(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EPERM);
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let Some(parent_rel) = self.rel_path(parent) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let rel = parent_rel.join(name);
+        if Self::is_internal(&rel) {
+            reply.error(Errno::EACCES);
+            return;
+        }
+        let abs = self.backing.join(&rel);
+        match fs::symlink_metadata(&abs) {
+            Ok(md) if md.is_dir() => {
+                reply.error(Errno::EPERM); // POSIX unlink 目录 = EPERM
+                return;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+        }
+        let op = WriteBackOp::Unlink {
+            path: Self::rel_str(&rel),
+        };
+        match self.writeback.execute(&op) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e.into()),
+        }
     }
 
-    fn rmdir(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EPERM);
+    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let Some(parent_rel) = self.rel_path(parent) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let rel = parent_rel.join(name);
+        if Self::is_internal(&rel) {
+            reply.error(Errno::EACCES);
+            return;
+        }
+        let abs = self.backing.join(&rel);
+        // 预处理：仅空目录可删（拒绝先于日志写入——P15）
+        match fs::symlink_metadata(&abs) {
+            Ok(md) if !md.is_dir() => {
+                reply.error(Errno::ENOTDIR);
+                return;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+        }
+        match fs::read_dir(&abs) {
+            Ok(mut rd) => {
+                if rd.next().is_some() {
+                    reply.error(Errno::ENOTEMPTY);
+                    return;
+                }
+            }
+            Err(_) => {
+                reply.error(Errno::EACCES);
+                return;
+            }
+        }
+        let op = WriteBackOp::Rmdir {
+            path: Self::rel_str(&rel),
+        };
+        match self.writeback.execute(&op) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e.into()),
+        }
     }
 
     fn rename(
         &self,
         _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
-        _newparent: INodeNo,
-        _newname: &OsStr,
+        parent: INodeNo,
+        name: &OsStr,
+        newparent: INodeNo,
+        newname: &OsStr,
         _flags: fuser::RenameFlags,
         reply: ReplyEmpty,
     ) {
-        reply.error(Errno::EPERM);
+        let Some(parent_rel) = self.rel_path(parent) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let Some(newparent_rel) = self.rel_path(newparent) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let rel = parent_rel.join(name);
+        let newrel = newparent_rel.join(newname);
+        if Self::is_internal(&rel) || Self::is_internal(&newrel) {
+            reply.error(Errno::EACCES);
+            return;
+        }
+        let abs = self.backing.join(&rel);
+        let newabs = self.backing.join(&newrel);
+        // 预处理：源必须存在；目标是目录时须为空目录或不同类型拒绝
+        // （rename 目录覆盖目录走内核原子语义，文件覆盖目录由内核
+        // EISDIR 拒绝——无半提交）。
+        match fs::symlink_metadata(&abs) {
+            Ok(_) => {}
+            Err(_) => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+        }
+        if let Ok(md) = fs::symlink_metadata(&newabs) {
+            if md.is_dir() {
+                let empty = fs::read_dir(&newabs).is_ok_and(|mut rd| rd.next().is_none());
+                if !empty {
+                    reply.error(Errno::ENOTEMPTY);
+                    return;
+                }
+            }
+        }
+        let op = WriteBackOp::Rename {
+            from: Self::rel_str(&rel),
+            to: Self::rel_str(&newrel),
+        };
+        match self.writeback.execute(&op) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e.into()),
+        }
     }
 
     fn mkdir(
