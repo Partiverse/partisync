@@ -210,3 +210,27 @@ CREATE TABLE IF NOT EXISTS sidecar_items (
     PRIMARY KEY (content_id, stage)
 );
 CREATE INDEX IF NOT EXISTS idx_sidecar_status ON sidecar_items(status);
+
+-- v16（M9-WP02，ADR-0029）：可验证记忆层——memory 实体 + 独立二叉证明树根快照
+-- memory_id = blake3("M\x1f"+content+tags/metadata canonical)（内容寻址 ⇒ 同身份二次写幂等）；
+-- hlc = 本行最后生效写入的 oplog HLC key（LWW 水位，沿 tag.updated_hlc 判例；
+--   memory_write 落笔即回填）。deleted 预留位（一期恒 0，tombstone 挂条件触发）。
+CREATE TABLE IF NOT EXISTS memory (
+    memory_id     TEXT PRIMARY KEY,
+    content       TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,     -- blake3(content) hex（verify 列级校验面）
+    tags          TEXT NOT NULL,     -- canonical JSON array
+    metadata      TEXT NOT NULL,     -- canonical JSON object（默认 {}）
+    created_ns    INTEGER NOT NULL,
+    origin_device TEXT NOT NULL,
+    hlc           TEXT,
+    deleted       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_memory_created ON memory(created_ns);
+-- 证明树根快照（派生值：可由 memory 表全量重算；重算 ≠ 快照 = 篡改/损坏检出，P20-c）
+CREATE TABLE IF NOT EXISTS memory_root (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    root         TEXT NOT NULL,
+    memory_count INTEGER NOT NULL,
+    updated_ns   INTEGER NOT NULL
+);
