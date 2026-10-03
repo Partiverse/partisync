@@ -190,20 +190,51 @@ fn walk_path(leaves: &[[u8; 32]], index: usize, path: &mut Vec<[u8; 32]>) {
     }
 }
 
-/// 包含性验证（自包含：只需叶哈希 + 路径 + 索引 + 根）。
+/// 包含性验证（自包含：叶哈希 + 路径 + 叶索引 + 叶总数 + 根；不需数据库）。
+///
+/// RFC 9162 §2.1.3.2 双游标 (fn, sn) 算法：k 分裂与索引位非对齐（n=40 时
+/// idx=32 落顶层右子树但为偶数），单凭奇偶判左右不成立——`fn == sn`
+/// （奇右界）情形须按 RFC 走「sibling 在左 + 额外右移」路径。
 #[must_use]
-pub fn verify_inclusion(leaf: &[u8; 32], path: &[[u8; 32]], index: usize, root: &[u8; 32]) -> bool {
-    let mut node = *leaf;
-    let mut idx = index;
-    for sibling in path {
-        node = if idx.is_multiple_of(2) {
-            combine(&node, sibling)
-        } else {
-            combine(sibling, &node)
-        };
-        idx /= 2;
+pub fn verify_inclusion(
+    leaf: &[u8; 32],
+    path: &[[u8; 32]],
+    index: usize,
+    leaf_count: usize,
+    root: &[u8; 32],
+) -> bool {
+    if leaf_count == 0 || index >= leaf_count {
+        return false;
     }
-    node == *root
+    let mut node = *leaf;
+    let mut fnr = index;
+    let mut sn = leaf_count - 1;
+    for sibling in path {
+        if fnr.is_multiple_of(2) && fnr != sn {
+            // 偶索引且非奇右界：sibling 在右
+            node = combine(&node, sibling);
+            fnr >>= 1;
+            sn >>= 1;
+        } else {
+            // LSB 置位（奇叶，sibling 在左）或 fn == sn（奇右界，左子树整块在左）
+            node = combine(sibling, &node);
+            if fnr.is_multiple_of(2) {
+                // RFC 9162：fn == sn 且 LSB 未置位 → 右移至 LSB 置位或 0，再右移一位
+                fnr >>= 1;
+                sn >>= 1;
+                while fnr != 0 && fnr.is_multiple_of(2) {
+                    fnr >>= 1;
+                    sn >>= 1;
+                }
+                fnr >>= 1;
+                sn >>= 1;
+            } else {
+                fnr >>= 1;
+                sn >>= 1;
+            }
+        }
+    }
+    fnr == 0 && sn == 0 && node == *root
 }
 
 fn combine(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
