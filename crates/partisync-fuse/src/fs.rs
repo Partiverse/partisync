@@ -26,6 +26,19 @@ const TTL: Duration = Duration::from_secs(1);
 struct WriteHandle {
     path: PathBuf,
     cur_len: u64,
+    /// overlay 暂存会话（M8-WP07-T03）：Some = 已存在文件的整文件替换
+    /// 会话（写入 staging，release 时原子 rename 到位）。
+    overlay: Option<OverlaySession>,
+}
+
+/// 整文件替换暂存会话。
+struct OverlaySession {
+    /// staging blob 绝对路径。
+    staging: PathBuf,
+    /// WAL 暂存名（release 时随 Replace 日志项下发）。
+    staging_name: String,
+    /// 目标相对路径（日志/holder 键）。
+    target_rel: String,
 }
 
 struct InoTable {
@@ -34,6 +47,15 @@ struct InoTable {
     /// 路径 → ino（路径规范化后复用）
     by_path: HashMap<PathBuf, u64>,
     next: u64,
+}
+
+/// 诊断日志（容器探针调试用；`PARTIFUSE_DBG_LOG` 未设时零开销静默）。
+pub(crate) fn dbg_log(msg: impl std::fmt::Display) {
+    if let Ok(path) = std::env::var("PARTIFUSE_DBG_LOG") {
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = std::io::Write::write_all(&mut f, format!("{msg}\n").as_bytes());
+        }
+    }
 }
 
 impl InoTable {
@@ -57,6 +79,23 @@ impl InoTable {
         self.by_path.insert(rel.to_path_buf(), ino);
         ino
     }
+
+    /// rename 后同步表（内核缓存 inode 号在 rename 后不变——不同步则
+    /// open(旧 ino) 解析到旧 rel，backing 已无此文件 → ENOENT，容器
+    /// 探针实证）。
+    fn rename_entry(&mut self, old: &Path, new: &Path) {
+        if let Some(ino) = self.by_path.remove(old) {
+            self.paths.insert(ino, new.to_path_buf());
+            self.by_path.insert(new.to_path_buf(), ino);
+        }
+    }
+
+    /// unlink/rmdir 后清理表项（inode 复用时不得指向已删除路径）。
+    fn remove_entry(&mut self, rel: &Path) {
+        if let Some(ino) = self.by_path.remove(rel) {
+            self.paths.remove(&ino);
+        }
+    }
 }
 
 pub struct PartiFuse {
@@ -65,10 +104,21 @@ pub struct PartiFuse {
     writes: Mutex<HashMap<u64, WriteHandle>>,
     /// 写回日志（M8-WP07-T02；P16：先日志后应用 + 重放幂等）。
     writeback: writeback::WriteBackLog,
+    /// overlay 暂存 holder（落锤 Q1：同路径暂存持有期间第二写打开
+    /// EBUSY）。键 = 目标相对路径。
+    overlay_holders: Mutex<std::collections::BTreeSet<String>>,
+    /// overlay 暂存 blob 计数（staging 文件名唯一化）。
+    staging_seq: std::sync::atomic::AtomicU64,
 }
 
 impl PartiFuse {
     pub fn new(backing: PathBuf) -> Self {
+        // 挂载线程 panic 输出在容器下不可见（stderr 被吞）——hook 写
+        // dbg_log（PARTIFUSE_DBG_LOG 未设时转发默认行为）。
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            prev(info);
+        }));
         // 崩溃恢复：重放 crash 前未应用的写回日志（幂等）。恢复失败 =
         // fail-fast 拒绝挂载（不静默丢弃未应用操作——P16 语义）。
         let writeback = writeback::WriteBackLog::open(&backing)
@@ -82,12 +132,22 @@ impl PartiFuse {
             table: Mutex::new(InoTable::new()),
             writes: Mutex::new(HashMap::new()),
             writeback,
+            overlay_holders: Mutex::new(std::collections::BTreeSet::new()),
+            staging_seq: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
     /// 是否写回日志内部路径（挂载面上隐藏 + 写操作拒绝）。
     fn is_internal(rel: &Path) -> bool {
         rel.starts_with(WAL_DIR)
+    }
+
+    fn apply_overlay_replace(&self, target_rel: &str, staging_name: &str) -> std::io::Result<()> {
+        let op = WriteBackOp::Replace {
+            path: target_rel.to_string(),
+            staging: staging_name.to_string(),
+        };
+        self.writeback.execute(&op)
     }
 
     /// 相对路径 → 日志用 '/' 分隔字符串（unix 分隔符即 '/'；反斜杠是
@@ -144,7 +204,10 @@ impl Filesystem for PartiFuse {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        let Some(parent_rel) = self.backing_path(parent) else {
+        // 表键统一用**相对**路径（T03 修复：lookup 原走 backing_path
+        // 绝对链、写回 handler 走 rel_path 相对链——键形态不一致导致
+        // rename_entry/remove_entry 永不命中，容器探针实证）。
+        let Some(parent_rel) = self.rel_path(parent) else {
             reply.error(Errno::ENOENT);
             return;
         };
@@ -183,7 +246,7 @@ impl Filesystem for PartiFuse {
     fn setattr(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         _mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
@@ -198,13 +261,108 @@ impl Filesystem for PartiFuse {
         _flags: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        // P15：truncate/perm/时间戳全部显式拒绝——不允许任何破坏性 setattr
-        let _ = size;
-        reply.error(Errno::EPERM);
+        // M8-WP07-T03：truncate = 整文件替换特例（SPEC §2.1）——原子
+        // 替换为原内容截断到 size（size 0 = 清空写）；其余 setattr 形式
+        // （perm/时间戳）维持拒绝（一期口径）。
+        let Some(size) = size else {
+            reply.error(Errno::EPERM);
+            return;
+        };
+        let Some(rel) = self.rel_path(ino) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if Self::is_internal(&rel) {
+            reply.error(Errno::EACCES);
+            return;
+        }
+        let target_rel = Self::rel_str(&rel);
+        // fuser 判例：O_TRUNC 走 open → setattr(size) 序列。若该路径
+        // 已有 overlay 会话（内核紧随 open 的 truncate），在 staging 上
+        // 截断（后续 release 整文件替换生效）——非 EBUSY。
+        if self.overlay_holders.lock().unwrap().contains(&target_rel) {
+            let mut writes = self.writes.lock().unwrap();
+            let Some(h) = writes.get_mut(&ino.0) else {
+                reply.error(Errno::EBUSY);
+                return;
+            };
+            let Some(o) = h.overlay.as_ref() else {
+                reply.error(Errno::EBUSY);
+                return;
+            };
+            // set_len 直接 resize（保留前 size 字节）——不可用
+            // truncate(true)+set_len 组合（先清零会把预填内容变零，容器
+            // 探针实证 [0,0]）。
+            if fs::OpenOptions::new()
+                .write(true)
+                .open(&o.staging)
+                .and_then(|f| f.set_len(size))
+                .is_err()
+            {
+                reply.error(Errno::EIO);
+                return;
+            }
+            h.cur_len = h.cur_len.min(size);
+            // attr 以 staging 现状为准（backing 在 release 前保持旧内容）
+            match fs::symlink_metadata(&o.staging) {
+                Ok(md) => {
+                    let mut attr = Self::attr_from(&md, ino);
+                    attr.size = size;
+                    attr.blocks = size.div_ceil(512);
+                    reply.attr(&TTL, &attr);
+                }
+                Err(_) => reply.error(Errno::EIO),
+            }
+            return;
+        }
+        let abs = self.backing.join(&rel);
+        let md = match fs::symlink_metadata(&abs) {
+            Ok(md) if md.is_file() => md,
+            Ok(_) => {
+                reply.error(Errno::EPERM);
+                return;
+            }
+            Err(_) => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+        };
+        let staging_name = format!("{ino}-t");
+        let staging = self.writeback.staging_path(&staging_name);
+        // 预填 = 原内容截断到 size（整文件替换特例的内容语义）
+        let pre = match fs::read(&abs) {
+            Ok(mut buf) => {
+                buf.truncate(size as usize);
+                buf
+            }
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        if fs::write(&staging, &pre).is_err() {
+            reply.error(Errno::EIO);
+            return;
+        }
+        let op = WriteBackOp::Replace {
+            path: target_rel,
+            staging: staging_name,
+        };
+        match self.writeback.execute(&op) {
+            Ok(()) => {
+                let new_len = pre.len() as u64;
+                let mut attr = Self::attr_from(&md, ino);
+                attr.size = new_len;
+                attr.blocks = new_len.div_ceil(512);
+                reply.attr(&TTL, &attr);
+            }
+            Err(e) => reply.error(e.into()),
+        }
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let Some(abs) = self.backing_path(ino) else {
+            dbg_log("[DBG] open NO-PATH");
             reply.error(Errno::ENOENT);
             return;
         };
@@ -224,10 +382,61 @@ impl Filesystem for PartiFuse {
             }
             return;
         }
-        // 已存在文件：只读。写打开显式拒绝（mountpoint-s3 语义——
-        // 对象不可覆盖/追加改写；改写走新版本新文件）。
+        // 写打开已存在文件 → overlay 暂存会话（M8-WP07-T03；SPEC §2.1
+        // 「写打开已存在文件」行）：写入 staging，release 时整文件替换。
+        // 落锤 Q1：同路径已有未 release 暂存 → EBUSY（不排队不覆盖）。
+        // 注（fuser 判例）：O_TRUNC 被 ABI strip（lib.rs:569），内核对
+        // O_TRUNC 走 open → setattr(size=0) 序列——截断语义在 setattr
+        // 分支落地（staging 截断，非 EBUSY）。
         if flags.acc_mode() != OpenAccMode::O_RDONLY {
-            reply.error(Errno::EACCES);
+            let rel = match self.rel_path(ino) {
+                Some(r) => r,
+                None => {
+                    reply.error(Errno::ENOENT);
+                    return;
+                }
+            };
+            let target_rel = Self::rel_str(&rel);
+            {
+                let mut holders = self.overlay_holders.lock().unwrap();
+                if !holders.insert(target_rel.clone()) {
+                    reply.error(Errno::EBUSY);
+                    return;
+                }
+            }
+            let seq = self
+                .staging_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let staging_name = format!("{}-{seq}.staged", ino.0);
+            let staging = self.writeback.staging_path(&staging_name);
+            // 预填 backing 现内容（「打开-截短-改尾」编辑器模式安全；
+            // 内核随后的 setattr(size) 在 staging 上截断）
+            dbg_log(format!(
+                "[DBG] open-w copying {} -> {}",
+                abs.display(),
+                staging.display()
+            ));
+            let cur_len = match fs::copy(&abs, &staging) {
+                Ok(n) => n,
+                Err(_) => {
+                    self.overlay_holders.lock().unwrap().remove(&target_rel);
+                    reply.error(Errno::EIO);
+                    return;
+                }
+            };
+            self.writes.lock().unwrap().insert(
+                ino.0,
+                WriteHandle {
+                    path: abs,
+                    cur_len,
+                    overlay: Some(OverlaySession {
+                        staging,
+                        staging_name,
+                        target_rel,
+                    }),
+                },
+            );
+            reply.opened(FileHandle(ino.0), fuser::FopenFlags::empty());
             return;
         }
         reply.opened(FileHandle(ino.0), fuser::FopenFlags::empty());
@@ -309,6 +518,7 @@ impl Filesystem for PartiFuse {
             WriteHandle {
                 path: abs,
                 cur_len: 0,
+                overlay: None,
             },
         );
         reply.created(
@@ -338,12 +548,15 @@ impl Filesystem for PartiFuse {
             return;
         };
         // 顺序写契约：offset 必须 == 当前长度（追加），否则 EINVAL。
-        // 新文件创建后不可回写/跳写——写一次成型（SEMANTICS.md）。
+        // 新文件写直落 backing；overlay 会话（已存在文件替换）写 staging。
         if offset != h.cur_len {
             reply.error(Errno::EINVAL);
             return;
         }
-        let mut file = match fs::OpenOptions::new().append(true).open(&h.path) {
+        let mut file = match fs::OpenOptions::new()
+            .append(true)
+            .open(h.overlay.as_ref().map_or(&h.path, |o| &o.staging))
+        {
             Ok(f) => f,
             Err(_) => {
                 reply.error(Errno::EIO);
@@ -359,15 +572,39 @@ impl Filesystem for PartiFuse {
         }
     }
 
+    /// overlay 整文件替换（P16 协议）：WAL Replace 先落盘 → staging
+    /// rename 到位（同 FS 原子，无半提交）→ 压实。apply 失败 → backing
+    /// 原状 + 回滚日志。幂等：blob 不在（已应用）时 no-op——flush 可
+    /// 多次触发、release 兜底重放均安全。
     fn flush(
         &self,
         _req: &Request,
         _ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         _lock_owner: fuser::LockOwner,
         reply: ReplyEmpty,
     ) {
-        // 写路径为直写（append 直落后备文件），无缓存 flush 语义
+        // FUSE 判例：release 异步（内核 close 不等 release）——overlay
+        // 整文件替换必须在 **flush（同步）** 应用，保证 close 返回时
+        // backing 已是新内容（close 后一致性，mountpoint-s3 判例翻转：
+        // 它 close 后对象才出现，我们 close 后 backing 即新）。flush 可
+        // 多次触发（dup fd）——Replace 幂等。release 兜底重放（fd 泄漏
+        // 路径）。写会话保持开启（其他 dup fd 可继续写，再 flush 再替换）。
+        let overlay = {
+            let writes = self.writes.lock().unwrap();
+            writes
+                .get(&fh.0)
+                .and_then(|h| h.overlay.as_ref())
+                .map(|o| (o.target_rel.clone(), o.staging_name.clone()))
+        };
+        if let Some((target_rel, staging_name)) = overlay {
+            if self
+                .apply_overlay_replace(&target_rel, &staging_name)
+                .is_err()
+            {
+                // 替换失败：backing 原状（P16），release 兜底会再试
+            }
+        }
         reply.ok();
     }
 
@@ -381,7 +618,20 @@ impl Filesystem for PartiFuse {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.writes.lock().unwrap().remove(&fh.0);
+        let handle = self.writes.lock().unwrap().remove(&fh.0);
+        if let Some(h) = handle {
+            if let Some(o) = h.overlay {
+                // 兜底：flush 已应用过则 Replace 幂等 no-op（blob 不在）；
+                // 无 flush 路径（fd 泄漏后强制 umount）在此完成最终替换。
+                if self
+                    .apply_overlay_replace(&o.target_rel, &o.staging_name)
+                    .is_err()
+                {
+                    // 兜底替换失败：backing 原状，下次 recover/flush 再试
+                }
+                self.overlay_holders.lock().unwrap().remove(&o.target_rel);
+            }
+        }
         reply.ok();
     }
 
@@ -469,7 +719,10 @@ impl Filesystem for PartiFuse {
             path: Self::rel_str(&rel),
         };
         match self.writeback.execute(&op) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                self.table.lock().unwrap().remove_entry(&rel);
+                reply.ok();
+            }
             Err(e) => reply.error(e.into()),
         }
     }
@@ -513,7 +766,10 @@ impl Filesystem for PartiFuse {
             path: Self::rel_str(&rel),
         };
         match self.writeback.execute(&op) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                self.table.lock().unwrap().remove_entry(&rel);
+                reply.ok();
+            }
             Err(e) => reply.error(e.into()),
         }
     }
@@ -568,7 +824,10 @@ impl Filesystem for PartiFuse {
             to: Self::rel_str(&newrel),
         };
         match self.writeback.execute(&op) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                self.table.lock().unwrap().rename_entry(&rel, &newrel);
+                reply.ok();
+            }
             Err(e) => reply.error(e.into()),
         }
     }

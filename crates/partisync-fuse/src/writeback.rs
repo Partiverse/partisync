@@ -36,7 +36,14 @@ pub enum WriteBackOp {
     Rmdir { path: String },
     /// 同挂载点内改名（跨目录允许；目录拓扑仍由同步管线管理）。
     Rename { from: String, to: String },
+    /// 整文件替换（M8-WP07-T03）：`staging` 为 WAL_DIR/staging/ 下相对
+    /// 文件名（crash 相位：blob 已在暂存区，日志先于 rename 落盘）。
+    /// 重放幂等：staging blob 在 → rename 到位；不在 = 已生效。
+    Replace { path: String, staging: String },
 }
+
+/// 暂存区目录名（WAL_DIR 下；整文件替换的写回暂存，不进 CAS chunk 库）。
+pub const STAGING_DIR: &str = "staging";
 
 /// 一条日志项（seq 单调；压实只删已应用项，seq 永不重排）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,7 +67,7 @@ impl WriteBackLog {
     /// 日志目录/文件不可创建或不可读 → `io::Error`（挂载失败，fail-fast）。
     pub fn open(backing: &Path) -> io::Result<Self> {
         let dir = backing.join(WAL_DIR);
-        fs::create_dir_all(&dir)?;
+        fs::create_dir_all(dir.join(STAGING_DIR))?;
         let wal = dir.join(WAL_FILE);
         let next_seq = match fs::read_to_string(&wal) {
             Ok(text) => text
@@ -140,6 +147,28 @@ impl WriteBackLog {
                 }
                 fs::rename(&f, &t).or_else(not_found_ok)
             }
+            WriteBackOp::Replace { path, staging } => {
+                let s = self
+                    .backing
+                    .join(WAL_DIR)
+                    .join(STAGING_DIR)
+                    .join(rel(staging));
+                let t = self.backing.join(rel(path));
+                crate::fs::dbg_log(format!(
+                    "[DBG] apply Replace s={} s_exists={} t_len={:?}",
+                    s.display(),
+                    fs::symlink_metadata(&s).is_ok(),
+                    fs::symlink_metadata(&t).map(|m| m.len()).ok()
+                ));
+                if fs::symlink_metadata(&s).is_err() {
+                    // blob 不在 = rename 已发生（重放/重复应用）= 已生效
+                    return Ok(());
+                }
+                if let Some(parent) = t.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::rename(&s, &t).or_else(not_found_ok)
+            }
         }
     }
 
@@ -168,7 +197,8 @@ impl WriteBackLog {
         }
     }
 
-    /// 崩溃恢复：重放全部日志项（幂等），成功后压实为空。
+    /// 崩溃恢复：重放全部日志项（幂等），成功后压实为空，并清扫暂存区
+    /// 孤儿 blob（「暂存中未落盘日志」相位——backing 本就未动，直接删除）。
     /// 返回重放条数。
     ///
     /// # Errors
@@ -183,7 +213,27 @@ impl WriteBackLog {
         if n > 0 {
             self.compact_applied(&entries.iter().map(|e| e.seq).collect())?;
         }
+        self.sweep_staging()?;
         Ok(n)
+    }
+
+    /// 清扫暂存区：WAL 已压实为空 → 全部 blob 均为孤儿（应用完成的残留
+    /// 或「暂存中 crash」的丢弃写），删除。孤儿清理失败不阻塞挂载
+    /// （下次 recover 再试）。
+    fn sweep_staging(&self) -> io::Result<()> {
+        let dir = self.backing.join(WAL_DIR).join(STAGING_DIR);
+        let Ok(rd) = fs::read_dir(&dir) else {
+            return Ok(());
+        };
+        for e in rd.flatten() {
+            let _ = fs::remove_file(e.path());
+        }
+        Ok(())
+    }
+
+    /// 暂存区 blob 路径（overlay 写会话用；`name` 由调用方生成唯一名）。
+    pub fn staging_path(&self, name: &str) -> PathBuf {
+        self.backing.join(WAL_DIR).join(STAGING_DIR).join(name)
     }
 
     fn read_all(&self) -> io::Result<Vec<WalEntry>> {
