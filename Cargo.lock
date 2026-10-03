@@ -7556,6 +7556,8 @@ version = "0.1.0"
 dependencies = [
  "fuser",
  "partisync-cas",
+ "partisync-graph",
+ "partisync-sync",
  "proptest",
  "serde",
  "serde_json",
