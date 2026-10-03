@@ -15,6 +15,7 @@ use partisync_fuse::PartiFuse;
 
 const EPERM: i32 = 1;
 const EACCES: i32 = 13;
+const EBUSY: i32 = 16;
 const EEXIST: i32 = 17;
 
 /// 挂载一个 PartiFuse 实例，返回 (挂载点, BackgroundSession)。
@@ -85,24 +86,25 @@ fn probe_mount_lifecycle_and_semantics() {
     f.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"ifuse", "随机读 offset=End-5");
 
-    // ── ③ 仍拒绝面逐项 errno（P15 延续；写回面开放项见 ⑦）──
-    // T02 起 unlink/rmdir/rename 走写回日志路径（SPEC M8-WP07 §2.1），
-    // 旧 EPERM 断言移交 ⑦ 的「生效」断言；本节保持「仍拒绝」操作。
+    // ── ③ 仍拒绝面逐项 errno（P15 延续；写回面开放项见 ⑦⑧）──
+    // T02 起 unlink/rmdir/rename 走写回日志路径；T03 起已存在文件写打开
+    // 进 overlay（见 ⑧）——旧 EACCES 断言移交 ⑧。
     expect_errno(fs::create_dir(mp.join("d")), EPERM, "mkdir");
     expect_errno(
         std::os::unix::fs::symlink("/etc/hostname", mp.join("l")),
         EPERM,
         "symlink",
     );
+    // perm 形式 setattr 仍拒绝（truncate 形式开放见 ⑧）
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = fs::symlink_metadata(mp.join("a.txt"))
+        .expect("md")
+        .permissions();
+    perm.set_mode(0o600);
     expect_errno(
-        fs::OpenOptions::new().write(true).open(mp.join("a.txt")),
-        EACCES,
-        "已存在文件写打开",
-    );
-    expect_errno(
-        fs::OpenOptions::new().append(true).open(mp.join("a.txt")),
-        EACCES,
-        "已存在文件 append 打开",
+        fs::set_permissions(mp.join("a.txt"), perm),
+        EPERM,
+        "chmod（perm setattr）",
     );
 
     // ── ④ 拒绝后完整性（P15 核心）──
@@ -126,11 +128,7 @@ fn probe_mount_lifecycle_and_semantics() {
         b"part1-part2-",
         "顺序写应直落后备文件"
     );
-    expect_errno(
-        fs::OpenOptions::new().append(true).open(mp.join("new.bin")),
-        EACCES,
-        "release 后写打开",
-    );
+    // release 后写打开：T03 起允许（新 overlay 会话），语义见 ⑧。
 
     // ── ⑥ O_EXCL 语义 ──
     expect_errno(
@@ -181,4 +179,78 @@ fn probe_mount_lifecycle_and_semantics() {
         EACCES,
         "写回日志目录 rename 应 EACCES（探针自纠错判例：unlink 对目录被 VFS 前置拦，须用可达 handler）",
     );
+
+    // ── ⑧ overlay 整文件替换（M8-WP07-T03；SPEC §2.1「写打开已存在文件」）──
+    // a. 写打开已存在文件（T02 时 EACCES → 现进入 overlay 会话）：预填
+    //    原内容，跳写到 cur_len 之外 EINVAL；release 整文件替换。
+    // b. Q1 并发：持有期间第二写打开 → EBUSY。
+    // c. truncate(size) 特例：holder 持有期在 staging 截断；独立调用走
+    //    原子 Replace。
+    // d. crash 相位：release 前 backing 保持旧内容（无半提交）。
+    let old = fs::read(backing.join("renamed.bin")).expect("read old");
+    let mut w1 = fs::OpenOptions::new()
+        .write(true)
+        .open(mp.join("renamed.bin"))
+        .expect("写打开已存在文件应进入 overlay（T03 开放）");
+    // 预填游标：追加位置 = 原长度（顺序写契约不变）
+    w1.seek(SeekFrom::Start(old.len() as u64)).unwrap();
+    w1.write_all(b"-appended").unwrap();
+    // release 前 backing 必须仍是旧内容（无半提交）
+    assert_eq!(
+        fs::read(backing.join("renamed.bin")).unwrap(),
+        old,
+        "release 前 backing 应保持旧内容（overlay 无半提交）"
+    );
+    // b. 并发第二写打开 → EBUSY（w1 未 drop = 未 release）
+    expect_errno(
+        fs::OpenOptions::new()
+            .write(true)
+            .open(mp.join("renamed.bin")),
+        EBUSY,
+        "同路径暂存持有期间第二写打开（Q1：后写者 EBUSY）",
+    );
+    drop(w1); // release → 整文件替换生效
+    let mut expect_new = old.clone();
+    expect_new.extend_from_slice(b"-appended");
+    assert_eq!(
+        fs::read(backing.join("renamed.bin")).unwrap(),
+        expect_new,
+        "release 后 backing 应为 overlay 新内容（整文件替换）"
+    );
+    // 释放后重开 → EBUSY 消失（可再次进入 overlay）
+    let mut w2 = fs::OpenOptions::new()
+        .write(true)
+        .open(mp.join("renamed.bin"))
+        .expect("release 后重开应允许");
+    w2.seek(SeekFrom::Start(0)).unwrap();
+    // c. truncate 特例：O_TRUNC 打开 = open 后 setattr(size=0)——清空写
+    drop(w2);
+    let mut w3 = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(mp.join("renamed.bin"))
+        .expect("O_TRUNC 写打开（open+setattr(0) 序列）");
+    w3.write_all(b"fresh").unwrap();
+    drop(w3);
+    assert_eq!(
+        fs::read(backing.join("renamed.bin")).unwrap(),
+        b"fresh",
+        "O_TRUNC 后写入 = 清空写整文件替换"
+    );
+    // c2. 独立 truncate(size)（无 holder）：原子 Replace 到 size
+    fs::File::options()
+        .write(true)
+        .open(mp.join("renamed.bin"))
+        .and_then(|f| f.set_len(2))
+        .expect("独立 truncate(2)");
+    assert_eq!(
+        fs::read(backing.join("renamed.bin")).unwrap(),
+        b"fr",
+        "truncate(2) = 原内容截断（整文件替换特例）"
+    );
+    // staging 无残留（apply 完成即清）
+    let staging = backing.join(".partisync-writeback").join("staging");
+    if let Ok(rd) = fs::read_dir(&staging) {
+        assert!(rd.count() == 0, "staging 不应有残留 blob");
+    }
 }
