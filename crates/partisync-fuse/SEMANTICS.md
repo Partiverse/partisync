@@ -9,20 +9,24 @@
 
 | 操作 | 语义 | 约束 |
 |---|---|---|
-| 目录列举（readdir） | 后备目录实时视图 | 无 `.`/`..` 条目（内核自行解析） |
+| 目录列举（readdir） | 后备目录实时视图 | 无 `.`/`..` 条目（内核自行解析）；`.partisync-writeback/` 写回日志目录**不出现** |
 | 随机读（read） | 已存在文件任意 offset 读 | `O_RDONLY` 打开 |
 | 新建文件（create） | `O_CREAT\|O_EXCL` 强制——存在同名即 `EEXIST` | 仅新文件 |
 | 新文件顺序写（write） | **仅追加**：offset 必须等于当前长度，跳写/回写 `EINVAL` | release（close）后不可再写打开 |
-| getattr/lookup | 实时 `symlink_metadata` | symlink 等不支持类型显式 `EPERM` |
+| getattr/lookup | 实时 `symlink_metadata` | symlink 等不支持类型显式 `EPERM`；`.partisync-writeback/` 路径 `EACCES` |
+| unlink（二期，M8-WP07-T02） | **写回日志路径**：先日志（`.partisync-writeback/wal.jsonl` append）→ 应用到 backing → 压实 | 目录 → `EPERM`；不存在 → `ENOENT`；apply 失败 backing 原状（P16） |
+| rmdir（二期，M8-WP07-T02） | 同上日志路径 | 仅空目录（非空 `ENOTEMPTY`，拒绝先于日志写入） |
+| rename（二期，M8-WP07-T02） | 同上日志路径；同挂载点内跨目录允许，目录拓扑仍由同步管线管理 | 源不存在 → `ENOENT`；目标非空目录 → `ENOTEMPTY`；`.partisync-writeback/` 涉入 → `EACCES` |
 
 ## 显式拒绝的操作（拒绝先于任何破坏性效果——P15）
 
 | 操作 | errno |
 |---|---|
 | 已存在文件写打开（`O_WRONLY`/`O_RDWR`，含 append） | `EACCES` |
-| unlink / rmdir / rename / mkdir / mknod / symlink | `EPERM` |
+| mkdir / mknod / symlink | `EPERM`（目录拓扑由同步管线管理——二期不变） |
 | setattr 全部形式（truncate/perm/uid/gid/时间戳） | `EPERM` |
-| 已存在文件任何修改路径 | 不存在（写打开层已前置拒绝） |
+| `.partisync-writeback/` 涉入的一切写操作 | `EACCES` |
+| 已存在文件任何修改路径 | 不存在（写打开层已前置拒绝；整文件替换 overlay 归 T03） |
 
 ## 权限模型（ADR-0026 前置条件 1 处置）
 
@@ -40,5 +44,6 @@
 
 - **内容寻址适配**：CAS 中的对象不可变——挂载面天然「读多写少、新版本
   即新文件」，与 mountpoint-s3 对 S3 对象的语义映射同构。
-- **覆盖/改名/删除**：一期不做（显式拒绝）；差异化方案（本地写回日志 +
-  overlay，调研方案 §3.3）留二期独立 WP。
+- **覆盖/改名/删除**：一期显式拒绝；二期（M8-WP07）unlink/rmdir/rename
+  走本地写回日志（差异化方案，调研方案 **§5.13**——原 §3.3 引用为勘误，
+  随 M8-WP07 修订），已存在文件整文件替换 overlay 归 T03。
