@@ -15,6 +15,7 @@
 | 0.2 | 2026-09-30 | 草案→已接受；前置条件处置表（§决策节末） | 用户拍板 2026-09-30 |
 | 0.3 | 2026-10-03 | **前置条件 3 承接启动**：写回日志落地（unlink/rmdir/rename 经 `.partisync-writeback/` JSONL 日志路径，先日志后应用 + 重放幂等 = P16 转正；SEMANTICS.md 同步修订）——overlay 整文件替换 / 索引接线 / by-hash 归 T03–T05 | SPEC M8-WP07（批准 PR #59）；PR 本卡 |
 | 0.4 | 2026-10-03 | **前置条件 3 全量落地收口**：整文件替换 overlay（EBUSY 并发 + truncate 特例 + flush 同步语义）+ 索引接线 e2e（挂载写 = CLI 写 Merkle 同根）+ by-hash 只读命名空间（EROFS + readdir 受限）+ bench 报告——**WP07 关账**；写回失败语义「backing 保持原状」实证（P15 延续） | SPEC M8-WP07 §3 全勾（#106–#109 + T05 PR）；PR 本卡 |
+| 0.5 | 2026-10-03 | **前置条件 3 延伸：写路径接线**（挂载写进 sync 管线）——事件源=apply 成功点（WAL 压实不留痕，R5 落锤）+ 折叠契约（provider/path 前导 `/`/Rename 带 size）+ 同根校验先于挂载 + crash 丢失窗口由 bisync 全量对账兜底（SEMANTICS §同步接线节）；mkdir 拒绝面无目录事件（父目录链按需物化） | SPEC M9-WP01 §2（批准 PR #115）；PR 本卡 |
 
 ## 背景
 
