@@ -5,9 +5,14 @@
 
 use std::path::Path;
 
+use crate::memory::{
+    canonical_json, canonical_tags, content_digest, memory_identity, MemoryRootSnapshot, MemoryRow,
+    MemoryWriteOutcome, VerifyReport,
+};
 use partisync_core::error::{PartisyError, Severity};
 use partisync_core::Ulid;
 use serde::Serialize;
+use serde_json::Value;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
@@ -2019,6 +2024,180 @@ impl Store {
         .map_err(|e| db_err("写 kdf_salt", e))?;
         Ok(())
     }
+
+    // ── 可验证记忆层（M9-WP02，ADR-0029）─────────────────────────────────
+
+    /// 写入一条记忆（SPEC M9-WP02 §2.2）：内容寻址幂等 + 根快照更新 +
+    /// oplog 记录（entity="memory"，domain=1 共享域）一次完成。
+    ///
+    /// 行 `hlc` = 本笔 oplog 键（本端时钟单调 ⇒ 恒为 LWW 胜者，沿 tag
+    /// 回填判例的等价形态：写入即回填）。oplog 行先于 memory 行落库——
+    /// 崩溃窗口内 oplog 先行，重放/远端应用幂等补行（P6/P8）。
+    ///
+    /// # Errors
+    /// metadata 非 JSON object / device 未登记 / DB 错误 → Fatal。
+    pub async fn memory_write(
+        &self,
+        content: &str,
+        tags: &[String],
+        metadata: &Value,
+    ) -> Result<MemoryWriteOutcome, PartisyError> {
+        if !metadata.is_object() {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some("memory metadata 必须为 JSON object".into()),
+            });
+        }
+        let tags_c = canonical_tags(tags);
+        let meta_c = canonical_json(metadata);
+        let id = memory_identity(content, &tags_c, &meta_c);
+        if self.memory_by_id(&id).await?.is_some() {
+            return Ok(MemoryWriteOutcome {
+                memory_id: id,
+                deduplicated: true,
+            });
+        }
+        let origin = self.device_id().await?;
+        let payload = serde_json::json!({
+            "memory_id": id,
+            "content": content,
+            "content_hash": content_digest(content),
+            "tags": tags_c,
+            "metadata": meta_c,
+            "created_ns": self.now_ns(),
+            "origin_device": origin,
+        });
+        let key = self
+            .record_oplog(
+                "default",
+                1,
+                "memory",
+                &id,
+                "upsert",
+                &origin,
+                &payload.to_string(),
+            )
+            .await?;
+        sqlx::query(
+            "INSERT INTO memory
+                (memory_id, content, content_hash, tags, metadata, created_ns, origin_device, hlc, deleted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(&id)
+        .bind(content)
+        .bind(content_digest(content))
+        .bind(&tags_c)
+        .bind(&meta_c)
+        .bind(payload["created_ns"].as_i64().unwrap_or(0))
+        .bind(&origin)
+        .bind(&key)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("写 memory", e))?;
+        self.refresh_memory_root().await?;
+        Ok(MemoryWriteOutcome {
+            memory_id: id,
+            deduplicated: false,
+        })
+    }
+
+    /// 按 id 取 memory 行。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn memory_by_id(&self, id: &str) -> Result<Option<MemoryRow>, PartisyError> {
+        sqlx::query_as::<_, MemoryRow>("SELECT * FROM memory WHERE memory_id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| db_err("查 memory", e))
+    }
+
+    /// 全部 memory 行（memory_id 升序——证明树叶序，P20-a 确定性输入）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn memory_rows(&self) -> Result<Vec<MemoryRow>, PartisyError> {
+        sqlx::query_as::<_, MemoryRow>("SELECT * FROM memory ORDER BY memory_id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| db_err("列 memory", e))
+    }
+
+    /// 证明树根快照（`memory_root` 表；首写前为 None）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn memory_root_snapshot(&self) -> Result<Option<MemoryRootSnapshot>, PartisyError> {
+        sqlx::query_as::<_, MemoryRootSnapshot>(
+            "SELECT root, memory_count, updated_ns FROM memory_root WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("查 memory_root", e))
+    }
+
+    /// 全量重算证明树根并落快照（写后调用；根为派生值——崩溃后重算即恢复，
+    /// SPEC §6-R3；10⁵ 叶亚秒级口径，增量树挂 ADR-0029 重估触发器）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn refresh_memory_root(&self) -> Result<MemoryRootSnapshot, PartisyError> {
+        let rows = self.memory_rows().await?;
+        let hashes: Vec<[u8; 32]> = rows.iter().map(crate::memory::leaf_hash).collect();
+        let root = hex32(&crate::memory::tree_root(&hashes));
+        let snapshot = MemoryRootSnapshot {
+            root,
+            memory_count: rows.len() as i64,
+            updated_ns: self.now_ns(),
+        };
+        sqlx::query(
+            "INSERT INTO memory_root (id, root, memory_count, updated_ns) VALUES (1, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                 root = excluded.root, memory_count = excluded.memory_count,
+                 updated_ns = excluded.updated_ns",
+        )
+        .bind(&snapshot.root)
+        .bind(snapshot.memory_count)
+        .bind(snapshot.updated_ns)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("更新 memory_root", e))?;
+        Ok(snapshot)
+    }
+
+    /// 可验证性全检（SPEC §2.4 `memory_verify` 语义）：快照根 vs 全量重算根 +
+    /// 逐行 content_hash 列级校验（P20-c：篡改/损坏报不一致，不静默通过）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn verify_memory(&self) -> Result<VerifyReport, PartisyError> {
+        let rows = self.memory_rows().await?;
+        let content_mismatches: Vec<String> = rows
+            .iter()
+            .filter(|r| content_digest(&r.content) != r.content_hash)
+            .map(|r| r.memory_id.clone())
+            .collect();
+        let hashes: Vec<[u8; 32]> = rows.iter().map(crate::memory::leaf_hash).collect();
+        let recomputed_root = hex32(&crate::memory::tree_root(&hashes));
+        let snapshot = self.memory_root_snapshot().await?;
+        let root_ok = match &snapshot {
+            None => rows.is_empty(),
+            Some(s) => s.root == recomputed_root && s.memory_count as usize == rows.len(),
+        };
+        Ok(VerifyReport {
+            snapshot_root: snapshot.map(|s| s.root),
+            recomputed_root,
+            memory_count: rows.len(),
+            ok: root_ok && content_mismatches.is_empty(),
+            content_mismatches,
+        })
+    }
+}
+
+/// 32 字节 → hex（64 字符小写）。
+fn hex32(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 use std::str::FromStr as _;
