@@ -181,3 +181,54 @@ pub async fn record_tag_unlink(
         .await?;
     Ok(())
 }
+
+/// 记录一次 memory upsert 变更（共享域；SPEC M9-WP02 §2.5）。
+///
+/// `memory_write` 单入口已自带 oplog（store.rs），本函数为通用捕获臂：
+/// 读落笔后的行重组 payload（origin_device 保留原创建者——oplog origin
+/// 仍为本机，语义同 entry 捕获的 owner/origin 分离），oplog 键即 LWW
+/// 水位，随即经 `apply_remote_memory` 回填行上（沿 `record_tag_upsert`
+/// 判例）并刷新根快照。
+///
+/// # Errors
+/// memory 不存在 → Fatal；device 未登记 / DB 错误 → Fatal。
+pub async fn record_memory_upsert(store: &Store, memory_id: &str) -> Result<(), PartisyError> {
+    let row = store
+        .memory_by_id(memory_id)
+        .await?
+        .ok_or_else(|| fatal(format!("捕获目标不存在: memory {memory_id}")))?;
+    let origin = store.device_id().await?;
+    let payload = serde_json::json!({
+        "memory_id": row.memory_id,
+        "content": row.content,
+        "content_hash": row.content_hash,
+        "tags": row.tags,
+        "metadata": row.metadata,
+        "created_ns": row.created_ns,
+        "origin_device": row.origin_device,
+    });
+    let key = store
+        .record_oplog(
+            "default",
+            1,
+            "memory",
+            &row.memory_id,
+            "upsert",
+            &origin,
+            &payload.to_string(),
+        )
+        .await?;
+    store
+        .apply_remote_memory(
+            &row.memory_id,
+            &row.content,
+            &row.content_hash,
+            &row.tags,
+            &row.metadata,
+            row.created_ns,
+            &row.origin_device,
+            &key,
+        )
+        .await?;
+    Ok(())
+}

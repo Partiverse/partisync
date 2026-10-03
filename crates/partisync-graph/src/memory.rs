@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// memory 行（graph store `memory` 表视图）。
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
 pub struct MemoryRow {
     pub memory_id: String,
     pub content: String,
