@@ -73,4 +73,17 @@ ignore = [
     # 声明。撤销条件见 ADR-0025「重新评估条件触发记录」四条。
     "RUSTSEC-2026-0315", # ADR-0025 修订 6（wasmtime 47.0.4；fuel 未启用）
     "RUSTSEC-2026-0316", # ADR-0025 修订 6（wasmtime 47.0.4；无 resource/record）
+    # ADR-0028（2026-10-03 起草，待签字）：wasmtime 47.0.4 同一修复波次
+    # 三公告（0325 tag imports GC / 0326 try_call GC rooting / 0327
+    # async-lifted callback 栈溢出；Solution 均 ≥48.0.4），47.x 线内
+    # 无补丁，48/49 与 rust-toolchain 1.94 pin 不兼容（M6-WP04-T02
+    # 实测）。**漏洞路径均不可达**：本仓未启用 wasmtime `async`/`gc`/
+    # `exception-handling` feature（Cargo.toml features 集实证）、WIT
+    # 面无 resource/record（ADR-0025 修订 6 实证）、ext-host 零
+    # async-lift 用法（grep 实证，ADR-0028 背景节）。撤销条件（双触发
+    # 任一）：①ext-host 引入 async-lift/gc/exception 用法——先升级后
+    # 接线；②toolchain 升级使 ≥48.0.4 可达——顺路升级并撤销。
+    "RUSTSEC-2026-0325", # ADR-0028（wasmtime 47.0.4；tags 未启用）
+    "RUSTSEC-2026-0326", # ADR-0028（wasmtime 47.0.4；gc/try_call 未启用）
+    "RUSTSEC-2026-0327", # ADR-0028（wasmtime 47.0.4；async-lift 路径不可达）
 ]
