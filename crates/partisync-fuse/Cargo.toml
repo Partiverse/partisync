@@ -32,3 +32,8 @@ workspace = true
 # M8-WP07-T02：P16 重放幂等 proptest（≥1000 例）+ 临时 backing 目录。
 proptest = { workspace = true }
 tempfile = "3"
+# M8-WP07-T05：索引接线 e2e（挂载写 = CLI 写同根校验）——sync/graph 为
+# workspace 既有依赖（铁律 8 核对通过）。
+partisync-sync = { path = "../partisync-sync", version = "0.1.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+tokio = { workspace = true }
