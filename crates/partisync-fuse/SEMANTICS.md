@@ -20,6 +20,7 @@
 | 已存在文件写打开 → release（二期 T03） | **整文件替换**：写入 `.partisync-writeback/staging/` 暂存（预填原内容，顺序追加契约不变），release 时 WAL Replace 先落盘 + 原子 rename 到位（无半提交） | 同路径暂存持有期间第二写打开 `EBUSY`（后写者拒绝——落锤 Q1）；crash 相位由 P16 覆盖 |
 | truncate（setattr size，二期 T03） | 整文件替换特例：暂存持有期 = staging 截断（内核 O_TRUNC = open→setattr(0) 序列，fuser 判例）；独立调用 = 原子 Replace 到 size（0 = 清空写） | perm/uid/gid/时间戳形式仍 `EPERM` |
 | flush（二期 T03） | close 时同步应用整文件替换（WAL Replace + 原子 rename）——**close 返回时 backing 即新内容**；release 兜底重放（Replace 幂等）。多次 flush（dup fd）安全 | flush 可多次触发；Replace 幂等 |
+| by-hash 只读命名空间（二期 T04） | `by-hash/blake3/<digest>`：lookup/getattr/read **直连 CAS**；目录视图与 by-hash 同挂载并存；`--cas` 未装配时整树 `ENOENT` | digest 不存在 → `ENOENT`；**任何写类操作 → `EROFS`**；blake3 层 readdir 受限空列表（R6 lookup-only 导航）；CAS 读 IO 错误同 ENOENT 形（登记） |
 
 ## 显式拒绝的操作（拒绝先于任何破坏性效果——P15）
 
@@ -28,6 +29,7 @@
 | mkdir / mknod / symlink | `EPERM`（目录拓扑由同步管线管理——二期不变） |
 | setattr perm/uid/gid/时间戳形式 | `EPERM`（truncate 形式已开放见支持表） |
 | `.partisync-writeback/` 涉入的一切写操作 | `EACCES` |
+| `by-hash/**` 涉入的一切写操作 | `EROFS`（内容寻址不可变——P15 延续） |
 
 ## 权限模型（ADR-0026 前置条件 1 处置）
 

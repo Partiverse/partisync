@@ -15,6 +15,7 @@ use partisync_fuse::PartiFuse;
 
 const EPERM: i32 = 1;
 const EACCES: i32 = 13;
+const EROFS: i32 = 30;
 const EBUSY: i32 = 16;
 const EEXIST: i32 = 17;
 
@@ -253,4 +254,118 @@ fn probe_mount_lifecycle_and_semantics() {
     if let Ok(rd) = fs::read_dir(&staging) {
         assert!(rd.count() == 0, "staging 不应有残留 blob");
     }
+}
+
+/// ⑨ by-hash 只读命名空间（M8-WP07-T04；SPEC §2.2）——环境门控同主探针。
+#[test]
+fn probe_by_hash_namespace() {
+    use partisync_cas::content_hash;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let dir = std::env::temp_dir().join(format!("partifuse-bh-{}", std::process::id()));
+    let backing = dir.join("backing");
+    let cas = dir.join("cas");
+    let mp = dir.join("mnt");
+    fs::create_dir_all(&backing).expect("backing dir");
+    fs::create_dir_all(&mp).expect("mountpoint dir");
+    let store = rt
+        .block_on(partisync_cas::ChunkStore::open(&cas))
+        .expect("CAS open");
+    let session = match partisync_fuse::spawn_mount(
+        PartiFuse::with_cas(backing.clone(), Some(std::sync::Arc::new(store))),
+        &mp,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[SKIP] 环境不可挂载（{e}）——探针跳过，报告按「未执行」登记");
+            return;
+        }
+    };
+    let mut ready = false;
+    for _ in 0..50 {
+        if fs::read_dir(&mp).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !ready {
+        eprintln!("[SKIP] 挂载后 5s 未就绪");
+        return;
+    }
+    let _ = session;
+
+    // ① 内容入 CAS + digest 命中读（read 全量 + 偏移）
+    let payload = b"by-hash payload 123";
+    let digest = content_hash(payload);
+    rt.block_on(async {
+        partisync_cas::ChunkStore::open(&cas)
+            .await
+            .expect("reopen cas")
+            .put(payload)
+            .await
+            .expect("put");
+    });
+    let hp = mp.join("by-hash").join("blake3").join(&digest);
+    assert_eq!(
+        fs::read(&hp).expect("digest 命中读"),
+        payload,
+        "by-hash read 应直连 CAS"
+    );
+    let mut f = fs::File::open(&hp).expect("open by-hash 只读");
+    f.seek(SeekFrom::Start(8)).unwrap();
+    let mut buf = [0u8; 5];
+    f.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"paylo", "by-hash 偏移读（payload[8..13]）");
+
+    // ② 目录视图并存：by-hash 目录与真实文件同挂载
+    fs::write(backing.join("real.txt"), b"real").expect("seed");
+    let listing: Vec<String> = fs::read_dir(&mp)
+        .expect("readdir")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        listing.contains(&"real.txt".to_string()) && listing.contains(&"by-hash".to_string()),
+        "目录视图与 by-hash 应并存"
+    );
+    // blake3 层 readdir 受限（R6：不枚举 digest）
+    let algo_listing: Vec<String> = fs::read_dir(mp.join("by-hash").join("blake3"))
+        .expect("readdir blake3")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        algo_listing.is_empty(),
+        "blake3 层 readdir 应受限（lookup-only 导航）"
+    );
+
+    // ③ digest 不存在 → ENOENT
+    let bogus = "0".repeat(64);
+    assert!(
+        fs::File::open(mp.join("by-hash").join("blake3").join(&bogus)).is_err(),
+        "不存在的 digest 应 ENOENT"
+    );
+
+    // ④ 写类操作一律 EROFS
+    expect_errno(
+        fs::OpenOptions::new().write(true).open(&hp),
+        EROFS,
+        "by-hash 写打开",
+    );
+    expect_errno(fs::remove_file(&hp), EROFS, "by-hash unlink");
+    expect_errno(fs::rename(&hp, mp.join("stolen2")), EROFS, "by-hash rename");
+    expect_errno(
+        fs::File::options()
+            .write(true)
+            .open(&hp)
+            .map(|f| f.set_len(0))
+            .map(|_| ()),
+        EROFS,
+        "by-hash truncate",
+    );
+
+    // ⑤ 拒绝后完整性：CAS 内容原样
+    assert_eq!(fs::read(&hp).expect("read"), payload, "拒绝后 CAS 内容原样");
 }
