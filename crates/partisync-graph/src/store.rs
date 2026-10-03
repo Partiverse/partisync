@@ -2113,6 +2113,69 @@ impl Store {
             .map_err(|e| db_err("查 memory", e))
     }
 
+    /// 应用远端 memory upsert（SPEC M9-WP02 §2.5）：共享域 HLC LWW，
+    /// 行 `hlc` ≥ 来键即落选（沿 [`Store::apply_remote_tag`] 判例）。
+    /// 应用成功即重算根快照——叶含 created_ns/origin_device，LWW 胜者行
+    /// 双端一致 ⇒ 根收敛（hlc 不进叶，应用侧簿记不影响承诺）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_remote_memory(
+        &self,
+        memory_id: &str,
+        content: &str,
+        content_hash: &str,
+        tags: &str,
+        metadata: &str,
+        created_ns: i64,
+        origin_device: &str,
+        hlc_key: &str,
+    ) -> Result<bool, PartisyError> {
+        let existing = self.memory_by_id(memory_id).await?;
+        if let Some(row) = existing {
+            if row.hlc.as_deref().is_some_and(|h| h >= hlc_key) {
+                return Ok(false);
+            }
+            sqlx::query(
+                "UPDATE memory
+                 SET content = ?, content_hash = ?, tags = ?, metadata = ?,
+                     created_ns = ?, origin_device = ?, hlc = ?
+                 WHERE memory_id = ?",
+            )
+            .bind(content)
+            .bind(content_hash)
+            .bind(tags)
+            .bind(metadata)
+            .bind(created_ns)
+            .bind(origin_device)
+            .bind(hlc_key)
+            .bind(memory_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("应用远端 memory", e))?;
+        } else {
+            sqlx::query(
+                "INSERT INTO memory
+                    (memory_id, content, content_hash, tags, metadata, created_ns, origin_device, hlc, deleted)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            )
+            .bind(memory_id)
+            .bind(content)
+            .bind(content_hash)
+            .bind(tags)
+            .bind(metadata)
+            .bind(created_ns)
+            .bind(origin_device)
+            .bind(hlc_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("应用远端 memory", e))?;
+        }
+        self.refresh_memory_root().await?;
+        Ok(true)
+    }
+
     /// 全部 memory 行（memory_id 升序——证明树叶序，P20-a 确定性输入）。
     ///
     /// # Errors

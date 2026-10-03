@@ -226,6 +226,22 @@ async fn apply_row(
             count_and_relay(dst, row, applied, stats).await?;
             Ok(applied)
         }
+        ("memory", "upsert") => {
+            let applied = dst
+                .apply_remote_memory(
+                    payload["memory_id"].as_str().unwrap_or_default(),
+                    payload["content"].as_str().unwrap_or_default(),
+                    payload["content_hash"].as_str().unwrap_or_default(),
+                    payload["tags"].as_str().unwrap_or_default(),
+                    payload["metadata"].as_str().unwrap_or_default(),
+                    payload["created_ns"].as_i64().unwrap_or(0),
+                    payload["origin_device"].as_str().unwrap_or("unknown"),
+                    &row.hlc,
+                )
+                .await?;
+            count_and_relay(dst, row, applied, stats).await?;
+            Ok(applied)
+        }
         _ => Ok(false), // 未知实体：v1 忽略（向后兼容）
     }
 }

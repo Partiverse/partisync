@@ -325,6 +325,43 @@ fn p20b_exhaustive_across_tree_sizes() {
     }
 }
 
+/// 根重算性能记录（SPEC §3：10⁴ 叶全量重算 ≤1s，本机记值入任务卡，
+/// 不作 CI 门——沿 WP01 bench 判例）。直插持久层绕过 memory_write
+/// （避免逐笔 refresh 的 O(n²)），测的是 refresh_memory_root 全量重算面。
+#[tokio::test]
+async fn perf_root_recompute_10k_leaves() {
+    let store = seeded_store().await;
+    let mut tx = store.pool_ref().begin().await.expect("开事务");
+    for i in 0..10_000i64 {
+        let content = format!("perf-{i}: 根重算性能探针行");
+        let tags = r#"["perf"]"#;
+        let metadata = "{}";
+        let id = memory_identity(&content, tags, metadata);
+        sqlx::query(
+            "INSERT INTO memory
+                (memory_id, content, content_hash, tags, metadata, created_ns, origin_device, hlc, deleted)
+             VALUES (?, ?, ?, ?, ?, ?, 'dev-a', NULL, 0)",
+        )
+        .bind(&id)
+        .bind(&content)
+        .bind(partisync_cas_content_digest(&content))
+        .bind(tags)
+        .bind(metadata)
+        .bind(1_700_000_000_000_000_000i64 + i)
+        .execute(&mut *tx)
+        .await
+        .expect("直插 perf 行");
+    }
+    tx.commit().await.expect("提交事务");
+
+    let t0 = std::time::Instant::now();
+    let snap = store.refresh_memory_root().await.expect("重算");
+    let ms = t0.elapsed().as_millis();
+    assert_eq!(snap.memory_count, 10_000);
+    assert!(ms <= 1000, "10⁴ 叶根重算 {ms}ms 超 1s 口径");
+    eprintln!("10⁴ 叶 refresh_memory_root 全量重算: {ms} ms");
+}
+
 /// blake3(content) hex（与 store 列级哈希同源口径）。
 fn partisync_cas_content_digest(content: &str) -> String {
     blake3::hash(content.as_bytes()).to_hex().to_string()
