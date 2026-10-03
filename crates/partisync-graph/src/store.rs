@@ -1364,6 +1364,21 @@ impl Store {
             .map_err(|e| db_err("列水位", e))
     }
 
+    /// WAL checkpoint（TRUNCATE）：把 WAL 页合回主库并截断（M9-WP01-T03
+    /// 容器探针判例：写方主动 checkpoint 是跨连接可见性的确定性保证——
+    /// 容器内多 pool 场景 WAL 只读视图可能出现长延迟不可见，run3-14 十轮
+    /// 证据；ops 面亦可用于长写会话后的定期收口）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn wal_checkpoint(&self) -> Result<(), PartisyError> {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("WAL checkpoint", e))?;
+        Ok(())
+    }
+
     /// 登记卷指纹列表（M9-WP01-T01）：装配层同根校验用——graph 库绑定
     /// 的卷指纹与待挂载 backing 不一致即拒绝装配（SPEC M9-WP01 §2.1）。
     ///

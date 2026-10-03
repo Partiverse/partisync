@@ -275,3 +275,39 @@ async fn root_mismatch_rejects_assembly() {
         Ok(_) => panic!("同根校验必须拒绝异卷装配"),
     }
 }
+
+/// 对照实验（T03 探针定位）：同 wp01_wiring 结构 + **tick(bisync) 并发**——
+/// 若容器内本测试同样「serve 自见、外部 pool 不可见」，则钉在 tick 与
+/// 应用路径的交互而非挂载面。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn diag_tick_visibility_control() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let backing = tmp.path().join("backing");
+    std::fs::create_dir_all(&backing).expect("dir");
+    std::fs::write(backing.join("f.txt"), b"hello").expect("file");
+
+    let db_a = tmp.path().join("a.db");
+    let db_b = tmp.path().join("b.db");
+    let opts = WiringOpts {
+        backing: backing.clone(),
+        graph_db: db_a.clone(),
+        peer_db: Some(db_b.clone()),
+        tick_ms: 20,
+    };
+    let session = WiringSession::init(&opts).await.expect("init");
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(session.serve(rx));
+    tx.send(FuseWriteEvent::Upsert {
+        path: "f.txt".into(),
+    })
+    .expect("send");
+
+    for _ in 0..200 {
+        let store = Store::open(&db_a).await.expect("open");
+        if store.entry_by_path("/f.txt").await.ok().flatten().is_some() {
+            return; // 可见 = tick 不破坏外部可见性
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("tick 并发下外部 pool 10s 不可见");
+}

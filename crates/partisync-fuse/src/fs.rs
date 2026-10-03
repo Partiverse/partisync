@@ -761,8 +761,13 @@ impl Filesystem for PartiFuse {
                 overlay: None,
             },
         );
+        // 事件路径必须 backing 相对——create 的 rel 经 backing_path()
+        // 构造是绝对路径（join 语义，M8 时代直写 fs 恰好兼容）；strip
+        // backing 前缀还原相对口径（T03 容器探针抓出：绝对路径事件把
+        // 整条目录链灌进 graph）。
+        let event_rel = rel.strip_prefix(&self.backing).unwrap_or(rel.as_path());
         self.emit(crate::events::FuseWriteEvent::Upsert {
-            path: Self::rel_str(&rel),
+            path: Self::rel_str(event_rel),
         });
         reply.created(
             &TTL,

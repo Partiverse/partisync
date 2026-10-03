@@ -48,6 +48,8 @@ pub struct WiringSession {
     applier: GraphApplier,
     backing: PathBuf,
     seq: Arc<AtomicU64>,
+    /// 已完整处理（图应用 + capture）的事件数——排空等待面（探针/测试）。
+    applied: Arc<AtomicU64>,
 }
 
 impl WiringSession {
@@ -69,7 +71,20 @@ impl WiringSession {
             store,
             backing: opts.backing.clone(),
             seq: Arc::new(AtomicU64::new(1)),
+            applied: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// store 只读访问器（探针/调用方断言用；GraphApplier::store_ref 同款）。
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// 已处理事件计数器的克隆句柄（排空等待面：探针等待
+    /// `applied_events >= 发出数` 后再断言/checkpoint——纯原子无 DB）。
+    #[must_use]
+    pub fn applied_counter(&self) -> Arc<AtomicU64> {
+        self.applied.clone()
     }
 
     /// 事件消费循环：折叠 → 应用 → capture，直到通道关闭（umount 后
@@ -80,39 +95,44 @@ impl WiringSession {
     /// 走 stderr，丢失窗口由 bisync 全量对账兜底。
     pub async fn serve(self, mut rx: UnboundedReceiver<FuseWriteEvent>) -> Result<(), String> {
         while let Some(event) = rx.recv().await {
-            if let Err(e) = self.apply_event(event).await {
-                eprintln!("[partifuse-wiring] 事件应用失败（留待对账）: {e}");
+            let records = match fold(&self.store, &self.backing, &event, &self.seq).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[partifuse-wiring] 折叠失败（留待对账）: {e}");
+                    continue;
+                }
+            };
+            for record in &records {
+                if let Err(e) = self.applier.apply_event(record).await {
+                    eprintln!("[partifuse-wiring] graph 应用失败: {e}");
+                }
             }
+            if let Err(e) = self.capture_event(&event).await {
+                eprintln!("[partifuse-wiring] capture 失败（留待对账）: {e}");
+            }
+            self.applied.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
 
-    /// 单事件：折叠 → GraphApplier 应用 → capture 写 oplog。
-    async fn apply_event(&self, event: FuseWriteEvent) -> Result<(), String> {
-        let records = fold(&self.store, &self.backing, &event, &self.seq).await?;
-        for record in &records {
-            self.applier
-                .apply_event(record)
-                .await
-                .map_err(|e| format!("graph 应用失败: {e}"))?;
-        }
-        // capture（图谱变更 → oplog；origin = 本机 device，capture 现行机制）
+    /// capture（图谱变更 → oplog；origin = 本机 device，capture 现行机制）。
+    async fn capture_event(&self, event: &FuseWriteEvent) -> Result<(), String> {
         match event {
             FuseWriteEvent::Upsert { path } => {
-                capture::record_entry_upsert(&self.store, &rec_path(&path))
+                capture::record_entry_upsert(&self.store, &rec_path(path))
                     .await
                     .map_err(|e| format!("capture upsert 失败: {e}"))?;
             }
             FuseWriteEvent::Remove { path } => {
-                capture::record_entry_remove(&self.store, &rec_path(&path))
+                capture::record_entry_remove(&self.store, &rec_path(path))
                     .await
                     .map_err(|e| format!("capture remove 失败: {e}"))?;
             }
             FuseWriteEvent::Rename { from, to } => {
-                capture::record_entry_remove(&self.store, &rec_path(&from))
+                capture::record_entry_remove(&self.store, &rec_path(from))
                     .await
                     .map_err(|e| format!("capture rename(from) 失败: {e}"))?;
-                capture::record_entry_upsert(&self.store, &rec_path(&to))
+                capture::record_entry_upsert(&self.store, &rec_path(to))
                     .await
                     .map_err(|e| format!("capture rename(to) 失败: {e}"))?;
             }
