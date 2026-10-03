@@ -267,6 +267,13 @@ const CONFLICT_SCAN_LIMIT: u32 = 10_000;
 /// 处理——全库 oplog 行均视为本机 origin， 前端呈现「尚未与其他设备
 /// 同步」。
 ///
+/// **F1 口径（M9-WP01-T04）**：`devices` / `last_sync_ns` 改由持久
+/// `sync_watermark` 表派生（`Store::watermarks`，push 逐行
+/// `note_applied` 只增、不被 ACK trim）——旧口径从 `pending_oplog`
+/// 现算，push ACK 裁剪后归零（M8-WP05-ui-report D1/F1）。
+/// `last_sync_ns` 从水位 HLC 键 phys 段（定宽 hex 毫秒，`hlc.rs`
+/// `to_key` 契约）换算纳秒。
+///
 /// # Errors
 /// DB 错误 → `DesktopError::Internal`（`{kind:"Internal"}`，H1）。
 #[tauri::command]
@@ -277,8 +284,6 @@ pub async fn sync_stats(state: State<'_, AppState>) -> DesktopResult<SyncStatsVi
         .await
         .unwrap_or_else(|_| "device-local".into());
     let rows = state.store.pending_oplog().await?;
-    let mut devices = std::collections::BTreeSet::new();
-    let mut last_sync_ns = None;
     let mut applied = 0u64;
     let mut skipped_self_origin = 0u64;
     for r in &rows {
@@ -287,8 +292,24 @@ pub async fn sync_stats(state: State<'_, AppState>) -> DesktopResult<SyncStatsVi
             continue;
         }
         applied += 1;
-        devices.insert(r.origin_device.as_str());
-        last_sync_ns = last_sync_ns.max(Some(r.at_ns));
+    }
+    // F1：设备面/最近对账时间 = 持久水位（远端 origin → last_hlc），
+    // 不随 ACK trim 归零；self origin 行不经 note_applied（push 跳过
+    // 分支），仍按 self_device 过滤兜底。
+    let mut devices = 0u64;
+    let mut last_sync_ns = None;
+    for (device, last_hlc) in state.store.watermarks().await? {
+        if device == self_device {
+            continue;
+        }
+        devices += 1;
+        let phys_ns = last_hlc
+            .split('-')
+            .next()
+            .and_then(|p| u64::from_str_radix(p, 16).ok())
+            .and_then(|ms| i64::try_from(ms).ok())
+            .and_then(|ms| ms.checked_mul(1_000_000));
+        last_sync_ns = last_sync_ns.max(phys_ns);
     }
     // 口径对齐 sync 域类型（skipped_lww 恒 0： LWW 落选行不入库）。
     let session = SyncSessionStats {
@@ -303,7 +324,7 @@ pub async fn sync_stats(state: State<'_, AppState>) -> DesktopResult<SyncStatsVi
         skipped_self: session.skipped_self_origin,
         skipped_lww: session.skipped_lww,
         conflicts,
-        devices: devices.len() as u64,
+        devices,
         last_sync_ns,
     })
 }
