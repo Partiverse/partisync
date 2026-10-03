@@ -13,12 +13,12 @@ sqlx = { workspace = true }
 walkdir = { workspace = true }
 notify = { workspace = true } # ADR-0005：文件事件源
 blake3 = { workspace = true } # M2-WP03 merkle.rs 状态叶哈希
+serde_json = { workspace = true } # M9-WP02 memory canonical JSON + oplog payload
 tokio = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

@@ -6,12 +6,14 @@
 pub mod indexer;
 pub mod jobs;
 pub mod journal;
+pub mod memory;
 pub mod merkle;
 pub mod remote_index;
 pub mod store;
 pub mod watch;
 
 pub use journal::{apply_pending, record, Applied, EventKind, JournalEvent};
+pub use memory::{MemoryRootSnapshot, MemoryRow, MemoryWriteOutcome, VerifyReport};
 pub use store::{
     ApplyConflict, ApplyOutcome, ConflictRow, DupGroup, EntryKind, EntryRow, EntryState,
     EntryVersionRow, PairingSessionRow, SpaceCryptoRow, Stats, Store, TagRow,
