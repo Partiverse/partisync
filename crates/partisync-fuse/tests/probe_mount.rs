@@ -85,18 +85,10 @@ fn probe_mount_lifecycle_and_semantics() {
     f.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"ifuse", "随机读 offset=End-5");
 
-    // ── ③ 拒绝面逐项 errno（P15 全量：spike 4 项 + 补齐 3 项）──
-    expect_errno(fs::remove_file(mp.join("a.txt")), EPERM, "unlink");
-    expect_errno(
-        fs::rename(mp.join("a.txt"), mp.join("b.txt")),
-        EPERM,
-        "rename",
-    );
+    // ── ③ 仍拒绝面逐项 errno（P15 延续；写回面开放项见 ⑦）──
+    // T02 起 unlink/rmdir/rename 走写回日志路径（SPEC M8-WP07 §2.1），
+    // 旧 EPERM 断言移交 ⑦ 的「生效」断言；本节保持「仍拒绝」操作。
     expect_errno(fs::create_dir(mp.join("d")), EPERM, "mkdir");
-    // 后备侧预置目录（挂载面透传可见）——rmdir 真实目录路径，
-    // 保证调用到达 FUSE rmdir handler（EPERM 在 handler 层，P15）
-    fs::create_dir(backing.join("subdir")).expect("seed subdir");
-    expect_errno(fs::remove_dir(mp.join("subdir")), EPERM, "rmdir 真实目录");
     expect_errno(
         std::os::unix::fs::symlink("/etc/hostname", mp.join("l")),
         EPERM,
@@ -153,4 +145,40 @@ fn probe_mount_lifecycle_and_semantics() {
     // 跳写（offset != cur_len → EINVAL）说明：页缓存下 VFS 不可构造到达
     // 该检查的调用序列（SEMANTICS.md 登记「防线前置」）——探针以 ③⑤⑥
     // 覆盖同语义链的可达面。
+
+    // ── ⑦ 写回面（M8-WP07-T02；SPEC §2.1 + P16）──
+    // unlink 经日志路径生效（先日志后应用）：
+    fs::remove_file(mp.join("a.txt")).expect("unlink 经写回日志应生效");
+    assert!(
+        !backing.join("a.txt").exists(),
+        "unlink 后 backing 应无 a.txt"
+    );
+    // rmdir 空目录生效；非空目录 ENOTEMPTY（拒绝先于日志写入）
+    fs::create_dir(backing.join("subdir")).expect("seed subdir");
+    fs::remove_dir(mp.join("subdir")).expect("rmdir 空目录经写回日志应生效");
+    fs::create_dir(backing.join("subfull")).expect("seed");
+    fs::write(backing.join("subfull/x"), b"1").expect("seed");
+    match fs::remove_dir(mp.join("subfull")) {
+        Ok(_) => panic!("非空 rmdir 应被拒"),
+        Err(e) => assert_eq!(e.raw_os_error(), Some(39), "非空 rmdir = ENOTEMPTY"),
+    }
+    // rename 生效（同挂载点内，跨目录允许）
+    fs::rename(mp.join("new.bin"), mp.join("renamed.bin")).expect("rename 经写回日志应生效");
+    assert!(!backing.join("new.bin").exists() && backing.join("renamed.bin").exists());
+    // 写回日志目录在挂载面不可见 + 不可写回（落锤 Q2）
+    let listing: Vec<String> = fs::read_dir(&mp)
+        .expect("readdir")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !listing
+            .iter()
+            .any(|n| n.starts_with(".partisync-writeback")),
+        "readdir 不应暴露写回日志目录"
+    );
+    expect_errno(
+        fs::rename(mp.join(".partisync-writeback"), mp.join("stolen")),
+        EACCES,
+        "写回日志目录 rename 应 EACCES（探针自纠错判例：unlink 对目录被 VFS 前置拦，须用可达 handler）",
+    );
 }
