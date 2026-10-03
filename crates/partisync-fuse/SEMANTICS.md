@@ -43,6 +43,31 @@
   用户可见）。单用户场景安全；多用户部署须评估暴露面（ADR-0026 §后果
   R2 评审项）。
 
+## 同步接线（M9-WP01；gateway 装配层 `--graph`）
+
+默认（无 `--graph`）行为与二期全等：挂载写只落 backing + WAL，不进同步
+管线。`--graph <db>` 激活装配层后语义如下（SPEC M9-WP01 §2）：
+
+- **事件源 = apply 成功点**：WAL `execute()` 采用 append → apply → 压实
+  协议（P16），压实后日志不留痕——事件在 apply 成功分支发出
+  （create / flush 替换 / setattr truncate / unlink / rmdir / rename），
+  不从日志回读。mkdir 为拒绝面（EPERM），无目录事件；目录行由
+  GraphApplier 父目录链按需物化。
+- **折叠契约**（wiring_e2e / P19 判据）：provider=`partifuse`、path 带
+  前导 `/`、Rename 折叠为 Removed(from)+Created(to) 且 Created 必带
+  backing 终态 size（丢 size = 叶哈希漂移）。
+- **已知丢失窗口**：apply 成功与事件发出之间 crash → 事件丢失（graph/
+  oplog 缺该变更）。兜底 = bisync 全量对账（Merkle 差分下钻，P7）——
+  不做事件持久化重放（WAL 已压实，重放源不存在）；窗口宽度为单次
+  syscall 间隙，风险接受。
+- **事件过期降级**：折叠时以 backing 终态 metadata 为准——事件对应的
+  路径已被后续操作覆盖（metadata 不可得）→ 该事件折叠为空序列，
+  以最新事件为准。
+- **同根校验**：graph 库登记卷指纹（backing 规范路径）与待挂载 backing
+  不一致 → 装配失败，挂载不启动（fail-fast）。
+- **装配层故障不阻塞挂载面**：单事件应用失败走 stderr 留待对账；bisync
+  tick 单轮失败下轮重试。挂载面可用性优先于同步即时性。
+
 ## 设计意图
 
 - **内容寻址适配**：CAS 中的对象不可变——挂载面天然「读多写少、新版本
