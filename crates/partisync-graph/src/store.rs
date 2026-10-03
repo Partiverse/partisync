@@ -1364,6 +1364,18 @@ impl Store {
             .map_err(|e| db_err("列水位", e))
     }
 
+    /// 登记卷指纹列表（M9-WP01-T01）：装配层同根校验用——graph 库绑定
+    /// 的卷指纹与待挂载 backing 不一致即拒绝装配（SPEC M9-WP01 §2.1）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn volume_fingerprints(&self) -> Result<Vec<String>, PartisyError> {
+        sqlx::query_scalar("SELECT fingerprint FROM volume")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| db_err("列卷指纹", e))
+    }
+
     /// 本店时钟顶（HLC key 形式）——「本机是否又产生了新写入」的对账判据。
     /// 无键 ⇒ 本机尚未做任何写入（首次对账与 fresh joiner 校验）。
     ///

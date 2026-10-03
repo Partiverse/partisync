@@ -20,8 +20,10 @@
 
 mod fs;
 
+pub mod events;
 pub mod writeback;
 
+pub use events::FuseWriteEvent;
 pub use fs::PartiFuse;
 
 /// 挂载入口（阻塞直到 umount）。`partifuse` bin 与 gateway 组装共用。

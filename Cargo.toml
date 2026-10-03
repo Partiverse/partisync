@@ -29,8 +29,8 @@ repository = "https://example.invalid/partisync" # 占位：仓库远端待定�
 proptest = "1"
 getrandom = "0.2" # ADR-0001
 criterion = "0.8" # SPEC M0-WP00（D2 基准基建）
-# ADR-0002（M0 元数据批次） + M6-WP03-T05 增 process feature（tokio::process::Command 异步子进程）
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "fs", "signal", "process"] }
+# ADR-0002（M0 元数据批次） + M6-WP03-T05 增 process feature（tokio::process::Command 异步子进程） + M9-WP01-T01 增 time feature（装配层 bisync tick interval）
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "fs", "signal", "process", "time"] }
 axum = "0.8"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 blake3 = "1.8"
