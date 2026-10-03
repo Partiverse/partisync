@@ -15,6 +15,15 @@ path = "src/main.rs"
 
 [dependencies]
 fuser = { workspace = true }
+# M8-WP07-T02（写回日志）：WAL JSONL 序列化——workspace 既有顶层依赖
+# （serde 主仓多处使用），非新增顶层（铁律 8 核对通过）。
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# M8-WP07-T02：P16 重放幂等 proptest（≥1000 例）+ 临时 backing 目录。
+proptest = { workspace = true }
+tempfile = "3"

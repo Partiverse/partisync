@@ -7555,6 +7555,10 @@ name = "partisync-fuse"
 version = "0.1.0"
 dependencies = [
  "fuser",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
