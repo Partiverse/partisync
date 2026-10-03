@@ -18,7 +18,35 @@ use fuser::{
     TimeOrNow,
 };
 
+use std::sync::Arc;
+
+use partisync_cas::ChunkStore;
+
 use crate::writeback::{self, WriteBackOp, WAL_DIR};
+
+/// by-hash 虚拟树节点分类。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ByHashKind {
+    /// `by-hash` 目录。
+    HashRoot,
+    /// `by-hash/blake3` 目录。
+    Algo,
+    /// `by-hash/blake3/<digest>` 内容文件。
+    Digest(String),
+}
+
+/// by-hash 虚拟命名空间根（SPEC M8-WP07 §2.2）：挂载根下
+/// `by-hash/blake3/<digest>` 直连 CAS 只读。
+const BY_HASH: &str = "by-hash";
+const BY_HASH_ALGO: &str = "blake3";
+/// digest 合法形态：blake3 hex = 64 个小写十六进制字符。
+fn is_digest(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+const EROFS: i32 = 30;
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -109,24 +137,35 @@ pub struct PartiFuse {
     overlay_holders: Mutex<std::collections::BTreeSet<String>>,
     /// overlay 暂存 blob 计数（staging 文件名唯一化）。
     staging_seq: std::sync::atomic::AtomicU64,
+    /// CAS 直连（M8-WP07-T04 by-hash；None = 未装配，虚拟树返回 ENOENT）。
+    cas: Option<Arc<ChunkStore>>,
+    /// CAS 异步 API 的专用 runtime（fuser handler 为同步线程）。
+    cas_rt: tokio::runtime::Runtime,
+    /// by-hash 打开文件的内容缓存（open 时取一次，read 直读）。
+    cas_reads: Mutex<HashMap<u64, Arc<Vec<u8>>>>,
 }
 
 impl PartiFuse {
     pub fn new(backing: PathBuf) -> Self {
-        // 挂载线程 panic 输出在容器下不可见（stderr 被吞）——hook 写
-        // dbg_log（PARTIFUSE_DBG_LOG 未设时转发默认行为）。
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            prev(info);
-        }));
-        // 崩溃恢复：重放 crash 前未应用的写回日志（幂等）。恢复失败 =
-        // fail-fast 拒绝挂载（不静默丢弃未应用操作——P16 语义）。
+        Self::with_cas(backing, None)
+    }
+
+    /// 带 CAS 装配（by-hash 命名空间激活；gateway/`partifuse --cas` 用）。
+    ///
+    /// # Panics
+    /// 写回日志初始化/恢复失败（同 [`Self::new`]）或 CAS runtime 创建失败。
+    pub fn with_cas(backing: PathBuf, cas: Option<Arc<ChunkStore>>) -> Self {
         let writeback = writeback::WriteBackLog::open(&backing)
             .and_then(|log| {
                 log.recover()?;
                 Ok(log)
             })
             .expect("写回日志初始化/恢复失败（.partisync-writeback 不可用或重放出错）");
+        let cas_rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("CAS runtime 创建失败");
         Self {
             backing,
             table: Mutex::new(InoTable::new()),
@@ -134,12 +173,94 @@ impl PartiFuse {
             writeback,
             overlay_holders: Mutex::new(std::collections::BTreeSet::new()),
             staging_seq: std::sync::atomic::AtomicU64::new(1),
+            cas,
+            cas_rt,
+            cas_reads: Mutex::new(HashMap::new()),
         }
     }
 
     /// 是否写回日志内部路径（挂载面上隐藏 + 写操作拒绝）。
     fn is_internal(rel: &Path) -> bool {
         rel.starts_with(WAL_DIR)
+    }
+
+    /// by-hash 虚拟树分类（None = 不在虚拟树）：
+    /// `HashRoot`（by-hash）/ `Algo`（by-hash/blake3）/ `Digest`（具体内容）。
+    fn by_hash_kind(rel: &Path) -> Option<ByHashKind> {
+        let parts: Vec<_> = rel
+            .iter()
+            .map(|c| c.to_string_lossy().into_owned())
+            .collect();
+        match parts.as_slice() {
+            [b] if b == BY_HASH => Some(ByHashKind::HashRoot),
+            [b, a] if b == BY_HASH && a == BY_HASH_ALGO => Some(ByHashKind::Algo),
+            [b, a, d] if b == BY_HASH && a == BY_HASH_ALGO && is_digest(d) => {
+                Some(ByHashKind::Digest(d.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// 虚拟目录 attr（by-hash 与 blake3 层）。
+    fn vdir_attr(ino: INodeNo) -> FileAttr {
+        let now = UNIX_EPOCH;
+        FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileType::Directory,
+            perm: 0o555,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
+        }
+    }
+
+    /// 写类操作对 by-hash 虚拟树返回 EROFS（SPEC §2.2）。
+    fn vdir_write_errno(rel: &Path) -> Option<Errno> {
+        Self::by_hash_kind(rel).map(|_| Errno::from_i32(EROFS))
+    }
+
+    /// CAS 是否装配（by-hash 虚拟树是否激活）。
+    fn cas_available(&self) -> bool {
+        self.cas.is_some()
+    }
+
+    /// CAS 内容文件 attr（只读、uid/gid 挂载进程、nlink 1）。
+    fn cas_file_attr(size: u64, ino: INodeNo) -> FileAttr {
+        let now = UNIX_EPOCH;
+        FileAttr {
+            ino,
+            size,
+            blocks: size.div_ceil(512),
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileType::RegularFile,
+            perm: 0o444,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
+        }
+    }
+
+    /// CAS 内容按 digest 读取（block_on 专用 runtime）。读失败（含
+    /// digest 不存在）一律 `None` → 调用方映射 ENOENT（脚本视角
+    /// 「digest 无效 = 无内容」语义；IO 错误同形登记 SEMANTICS）。
+    fn cas_get(&self, digest: &str) -> Option<Vec<u8>> {
+        let cas = self.cas.as_ref()?;
+        self.cas_rt.block_on(async { cas.get(digest).await.ok() })
     }
 
     fn apply_overlay_replace(&self, target_rel: &str, staging_name: &str) -> std::io::Result<()> {
@@ -217,6 +338,30 @@ impl Filesystem for PartiFuse {
             reply.error(Errno::EACCES);
             return;
         }
+        // by-hash 虚拟树（M8-WP07-T04）：合成条目，digest 不存在 → ENOENT
+        if let Some(kind) = Self::by_hash_kind(&rel) {
+            if !self.cas_available() {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+            let ino = self.table.lock().unwrap().get_or_alloc(&rel);
+            match kind {
+                ByHashKind::Digest(d) => match self.cas_get(&d) {
+                    Some(bytes) => {
+                        let size = bytes.len() as u64;
+                        self.cas_reads.lock().unwrap().insert(ino, Arc::new(bytes));
+                        reply.entry(
+                            &TTL,
+                            &Self::cas_file_attr(size, INodeNo(ino)),
+                            fuser::Generation(0),
+                        );
+                    }
+                    None => reply.error(Errno::ENOENT),
+                },
+                _ => reply.entry(&TTL, &Self::vdir_attr(INodeNo(ino)), fuser::Generation(0)),
+            }
+            return;
+        }
         let abs = self.backing.join(&rel);
         match fs::symlink_metadata(&abs) {
             Ok(md) if md.is_file() || md.is_dir() => {
@@ -233,6 +378,22 @@ impl Filesystem for PartiFuse {
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        // by-hash 虚拟树 getattr（T04）
+        if let Some(rel) = self.rel_path(ino) {
+            if let Some(kind) = Self::by_hash_kind(&rel) {
+                match kind {
+                    ByHashKind::Digest(d) => {
+                        let Some(bytes) = self.cas_get(&d) else {
+                            reply.error(Errno::ENOENT);
+                            return;
+                        };
+                        reply.attr(&TTL, &Self::cas_file_attr(bytes.len() as u64, ino));
+                    }
+                    _ => reply.attr(&TTL, &Self::vdir_attr(ino)),
+                }
+                return;
+            }
+        }
         let Some(abs) = self.backing_path(ino) else {
             reply.error(Errno::ENOENT);
             return;
@@ -277,6 +438,10 @@ impl Filesystem for PartiFuse {
             return;
         }
         let target_rel = Self::rel_str(&rel);
+        if let Some(e) = Self::vdir_write_errno(&rel) {
+            reply.error(e);
+            return;
+        }
         // fuser 判例：O_TRUNC 走 open → setattr(size) 序列。若该路径
         // 已有 overlay 会话（内核紧随 open 的 truncate），在 staging 上
         // 截断（后续 release 整文件替换生效）——非 EBUSY。
@@ -361,6 +526,26 @@ impl Filesystem for PartiFuse {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        // by-hash 内容文件（T04）：只读打开（内容缓存一次）；写打开 EROFS
+        if let Some(rel) = self.rel_path(ino) {
+            if let Some(ByHashKind::Digest(d)) = Self::by_hash_kind(&rel) {
+                if flags.acc_mode() != OpenAccMode::O_RDONLY {
+                    reply.error(Errno::from_i32(EROFS));
+                    return;
+                }
+                match self.cas_get(&d) {
+                    Some(bytes) => {
+                        self.cas_reads
+                            .lock()
+                            .unwrap()
+                            .insert(ino.0, Arc::new(bytes));
+                        reply.opened(FileHandle(ino.0), fuser::FopenFlags::empty());
+                    }
+                    None => reply.error(Errno::ENOENT),
+                }
+                return;
+            }
+        }
         let Some(abs) = self.backing_path(ino) else {
             dbg_log("[DBG] open NO-PATH");
             reply.error(Errno::ENOENT);
@@ -453,6 +638,14 @@ impl Filesystem for PartiFuse {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyData,
     ) {
+        // by-hash 内容读（T04）：open 时的缓存切片
+        let cas_bytes = self.cas_reads.lock().unwrap().get(&ino.0).cloned();
+        if let Some(bytes) = cas_bytes {
+            let start = (offset as usize).min(bytes.len());
+            let end = (start + size as usize).min(bytes.len());
+            reply.data(&bytes[start..end]);
+            return;
+        }
         let Some(abs) = self.backing_path(ino) else {
             reply.error(Errno::ENOENT);
             return;
@@ -490,6 +683,12 @@ impl Filesystem for PartiFuse {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+        if let Some(parent_rel) = self.rel_path(parent) {
+            if let Some(e) = Self::vdir_write_errno(&parent_rel.join(name)) {
+                reply.error(e);
+                return;
+            }
+        }
         let Some(parent_rel) = self.backing_path(parent) else {
             reply.error(Errno::ENOENT);
             return;
@@ -647,6 +846,29 @@ impl Filesystem for PartiFuse {
             reply.error(Errno::ENOENT);
             return;
         };
+        // by-hash 虚拟树 readdir（T04/R6 受限口径）：by-hash → [blake3]；
+        // blake3 层不枚举 digest（lookup-only 导航）
+        if let Some(rel) = self.rel_path(ino) {
+            match Self::by_hash_kind(&rel) {
+                Some(ByHashKind::HashRoot) => {
+                    let ino = self
+                        .table
+                        .lock()
+                        .unwrap()
+                        .get_or_alloc(&Path::new(BY_HASH).join(BY_HASH_ALGO));
+                    if offset == 0 {
+                        let _ = reply.add(INodeNo(ino), 1, FileType::Directory, BY_HASH_ALGO);
+                    }
+                    reply.ok();
+                    return;
+                }
+                Some(ByHashKind::Algo) | Some(ByHashKind::Digest(_)) => {
+                    reply.ok(); // 受限空列表（R6：digest 目录 lookup-only）
+                    return;
+                }
+                None => {}
+            }
+        }
         if !abs.is_dir() {
             reply.error(Errno::ENOTDIR);
             return;
@@ -680,6 +902,11 @@ impl Filesystem for PartiFuse {
             let child_ino = table.get_or_alloc(&rel);
             entries.push((child_ino, kind, name));
         }
+        // 根目录合成 by-hash 虚拟条目（T04；真实同名条目优先已入列）
+        if abs == self.backing && !entries.iter().any(|(_, _, n)| n == BY_HASH) {
+            let ino = table.get_or_alloc(Path::new(BY_HASH));
+            entries.push((ino, FileType::Directory, BY_HASH.to_string()));
+        }
         drop(table);
         for (i, (child_ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
             if reply.add(INodeNo(*child_ino), (i + 1) as u64, *kind, name.as_str()) {
@@ -701,6 +928,10 @@ impl Filesystem for PartiFuse {
         let rel = parent_rel.join(name);
         if Self::is_internal(&rel) {
             reply.error(Errno::EACCES);
+            return;
+        }
+        if let Some(e) = Self::vdir_write_errno(&rel) {
+            reply.error(e);
             return;
         }
         let abs = self.backing.join(&rel);
@@ -735,6 +966,10 @@ impl Filesystem for PartiFuse {
         let rel = parent_rel.join(name);
         if Self::is_internal(&rel) {
             reply.error(Errno::EACCES);
+            return;
+        }
+        if let Some(e) = Self::vdir_write_errno(&rel) {
+            reply.error(e);
             return;
         }
         let abs = self.backing.join(&rel);
@@ -798,6 +1033,10 @@ impl Filesystem for PartiFuse {
             reply.error(Errno::EACCES);
             return;
         }
+        if let Some(e) = Self::vdir_write_errno(&rel).or_else(|| Self::vdir_write_errno(&newrel)) {
+            reply.error(e);
+            return;
+        }
         let abs = self.backing.join(&rel);
         let newabs = self.backing.join(&newrel);
         // 预处理：源必须存在；目标是目录时须为空目录或不同类型拒绝
@@ -835,36 +1074,54 @@ impl Filesystem for PartiFuse {
     fn mkdir(
         &self,
         _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
+        parent: INodeNo,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
+        if let Some(parent_rel) = self.rel_path(parent) {
+            if let Some(e) = Self::vdir_write_errno(&parent_rel.join(name)) {
+                reply.error(e);
+                return;
+            }
+        }
         reply.error(Errno::EPERM);
     }
 
     fn mknod(
         &self,
         _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
+        parent: INodeNo,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         _rdev: u32,
         reply: ReplyEntry,
     ) {
+        if let Some(parent_rel) = self.rel_path(parent) {
+            if let Some(e) = Self::vdir_write_errno(&parent_rel.join(name)) {
+                reply.error(e);
+                return;
+            }
+        }
         reply.error(Errno::EPERM);
     }
 
     fn symlink(
         &self,
         _req: &Request,
-        _parent: INodeNo,
-        _link_name: &OsStr,
+        parent: INodeNo,
+        link_name: &OsStr,
         _target: &Path,
         reply: ReplyEntry,
     ) {
+        if let Some(parent_rel) = self.rel_path(parent) {
+            if let Some(e) = Self::vdir_write_errno(&parent_rel.join(link_name)) {
+                reply.error(e);
+                return;
+            }
+        }
         reply.error(Errno::EPERM);
     }
 }

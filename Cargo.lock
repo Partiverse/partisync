@@ -7555,10 +7555,12 @@ name = "partisync-fuse"
 version = "0.1.0"
 dependencies = [
  "fuser",
+ "partisync-cas",
  "proptest",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -7569,6 +7571,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "partisync-ai",
+ "partisync-cas",
  "partisync-core",
  "partisync-ext-host",
  "partisync-fuse",
