@@ -15,6 +15,11 @@ path = "src/main.rs"
 
 [dependencies]
 fuser = { workspace = true }
+# M8-WP07-T04（/by-hash 命名空间）：CAS 直连读（digest → 内容）+ 专用
+# runtime（fuser handler 同步线程内 block_on CAS 异步 API）。两者均为
+# workspace 既有顶层依赖（铁律 8 核对通过）。
+partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
+tokio = { workspace = true }
 # M8-WP07-T02（写回日志）：WAL JSONL 序列化——workspace 既有顶层依赖
 # （serde 主仓多处使用），非新增顶层（铁律 8 核对通过）。
 serde = { workspace = true }
