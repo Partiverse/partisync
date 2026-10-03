@@ -38,6 +38,9 @@ dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"
+# M9-WP01-T03（真挂载 e2e 探针）：BackgroundSession 存活保挂载——workspace
+# 既有顶层依赖（fuser 经 partisync-fuse 已入图），零新增顶层（铁律 8 通过）。
+fuser = { workspace = true }
 # e2e 测试用 client 侧（serve_client/RoleClient + TokioChildProcess）
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 

@@ -427,7 +427,20 @@ async fn seed_sync_fixture(state: &AppState) {
         )
         .await
         .expect("seed conflict");
+    // F1 口径（M9-WP01-T04）：水位 = 持久 sync_watermark（push
+    // note_applied 产物）；HLC 键 phys 段定宽 hex 毫秒（hlc.rs to_key）。
+    state
+        .store
+        .note_applied(
+            "device-remote",
+            "0000018f5e8c4000-00000001-0000000000000042",
+        )
+        .await
+        .expect("seed watermark");
 }
+
+/// F1 水位键 phys 段的纳秒期望值（0x18f5e8c4000 ms → ns）。
+const SEED_WATERMARK_NS: i64 = 0x18f5e8c4000 * 1_000_000;
 
 /// 种子库统计口径：applied 只数远端 origin；本机行归 skipped_self；
 /// 冲突独立计数；devices = 远端 origin 去重。
@@ -441,7 +454,33 @@ async fn t03_sync_stats_with_seeded_oplog_counts_by_origin() {
     assert_eq!(s.skipped_self, 1);
     assert_eq!(s.conflicts, 1);
     assert_eq!(s.devices, 1);
-    assert!(s.last_sync_ns.is_some());
+    assert_eq!(
+        s.last_sync_ns,
+        Some(SEED_WATERMARK_NS),
+        "F1：水位 HLC phys 段换算"
+    );
+}
+
+/// F1 回归（M9-WP01-T04）：push ACK trim 清空 pending_oplog 后，devices /
+/// last_sync 不归零（改由持久 sync_watermark 派生——M8-WP05-ui-report D1）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_f1_sync_stats_survives_ack_trim() {
+    let (app, _tmp) = make_app().await;
+    let state = app.state::<AppState>();
+    seed_sync_fixture(&state).await;
+    // 模拟对端 ACK：按真实 pending 键全量裁剪
+    let rows = state.store.pending_oplog().await.expect("pending");
+    let keys: Vec<String> = rows.iter().map(|r| r.hlc.clone()).collect();
+    assert!(!keys.is_empty(), "fixture 应有 pending 行");
+    state.store.trim_oplog(&keys).await.expect("trim");
+    let s = sync_stats(state).await.expect("sync_stats after trim");
+    assert_eq!(s.applied, 0, "ACK 后 pending 面（applied）应清空");
+    assert_eq!(s.devices, 1, "F1：ACK trim 后 devices 不得归零");
+    assert_eq!(
+        s.last_sync_ns,
+        Some(SEED_WATERMARK_NS),
+        "F1：ACK trim 后 last_sync 不得归零"
+    );
 }
 
 /// 种子库时间线：oplog 尾部 + 冲突血缘合并，at_ns 降序；payload 解析出
