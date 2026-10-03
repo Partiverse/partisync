@@ -143,6 +143,8 @@ pub struct PartiFuse {
     cas_rt: tokio::runtime::Runtime,
     /// by-hash 打开文件的内容缓存（open 时取一次，read 直读）。
     cas_reads: Mutex<HashMap<u64, Arc<Vec<u8>>>>,
+    /// 装配层事件汇（M9-WP01-T01；None = 未装配，行为与 M8 全等）。
+    events: Option<crate::events::EventSink>,
 }
 
 impl PartiFuse {
@@ -155,6 +157,29 @@ impl PartiFuse {
     /// # Panics
     /// 写回日志初始化/恢复失败（同 [`Self::new`]）或 CAS runtime 创建失败。
     pub fn with_cas(backing: PathBuf, cas: Option<Arc<ChunkStore>>) -> Self {
+        Self::assemble(backing, cas, None)
+    }
+
+    /// 带装配层事件汇（M9-WP01-T01；gateway/`partifuse --graph` 用）。
+    /// 挂载写 apply 成功 → 事件发汇端；收端掉线时事件丢弃（发送
+    /// 静默失败——挂载面永不因装配层阻塞，丢失窗口由 bisync 全量
+    /// 对账兜底，SEMANTICS §同步接线节登记）。
+    ///
+    /// # Panics
+    /// 同 [`Self::with_cas`]。
+    pub fn with_wiring(
+        backing: PathBuf,
+        cas: Option<Arc<ChunkStore>>,
+        events: crate::events::EventSink,
+    ) -> Self {
+        Self::assemble(backing, cas, Some(events))
+    }
+
+    fn assemble(
+        backing: PathBuf,
+        cas: Option<Arc<ChunkStore>>,
+        events: Option<crate::events::EventSink>,
+    ) -> Self {
         let writeback = writeback::WriteBackLog::open(&backing)
             .and_then(|log| {
                 log.recover()?;
@@ -176,6 +201,15 @@ impl PartiFuse {
             cas,
             cas_rt,
             cas_reads: Mutex::new(HashMap::new()),
+            events,
+        }
+    }
+
+    /// 事件发汇（apply 成功分支调用；收端掉线静默丢弃——见
+    /// [`Self::with_wiring`]）。
+    fn emit(&self, event: crate::events::FuseWriteEvent) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(event);
         }
     }
 
@@ -268,7 +302,11 @@ impl PartiFuse {
             path: target_rel.to_string(),
             staging: staging_name.to_string(),
         };
-        self.writeback.execute(&op)
+        self.writeback.execute(&op).inspect(|()| {
+            self.emit(crate::events::FuseWriteEvent::Upsert {
+                path: target_rel.to_string(),
+            });
+        })
     }
 
     /// 相对路径 → 日志用 '/' 分隔字符串（unix 分隔符即 '/'；反斜杠是
@@ -510,11 +548,14 @@ impl Filesystem for PartiFuse {
             return;
         }
         let op = WriteBackOp::Replace {
-            path: target_rel,
+            path: target_rel.clone(),
             staging: staging_name,
         };
         match self.writeback.execute(&op) {
             Ok(()) => {
+                self.emit(crate::events::FuseWriteEvent::Upsert {
+                    path: target_rel.clone(),
+                });
                 let new_len = pre.len() as u64;
                 let mut attr = Self::attr_from(&md, ino);
                 attr.size = new_len;
@@ -720,6 +761,9 @@ impl Filesystem for PartiFuse {
                 overlay: None,
             },
         );
+        self.emit(crate::events::FuseWriteEvent::Upsert {
+            path: Self::rel_str(&rel),
+        });
         reply.created(
             &TTL,
             &Self::attr_from(&md, INodeNo(ino)),
@@ -952,6 +996,9 @@ impl Filesystem for PartiFuse {
         match self.writeback.execute(&op) {
             Ok(()) => {
                 self.table.lock().unwrap().remove_entry(&rel);
+                self.emit(crate::events::FuseWriteEvent::Remove {
+                    path: Self::rel_str(&rel),
+                });
                 reply.ok();
             }
             Err(e) => reply.error(e.into()),
@@ -1003,6 +1050,9 @@ impl Filesystem for PartiFuse {
         match self.writeback.execute(&op) {
             Ok(()) => {
                 self.table.lock().unwrap().remove_entry(&rel);
+                self.emit(crate::events::FuseWriteEvent::Remove {
+                    path: Self::rel_str(&rel),
+                });
                 reply.ok();
             }
             Err(e) => reply.error(e.into()),
@@ -1058,13 +1108,19 @@ impl Filesystem for PartiFuse {
                 }
             }
         }
+        let from_str = Self::rel_str(&rel);
+        let to_str = Self::rel_str(&newrel);
         let op = WriteBackOp::Rename {
-            from: Self::rel_str(&rel),
-            to: Self::rel_str(&newrel),
+            from: from_str.clone(),
+            to: to_str.clone(),
         };
         match self.writeback.execute(&op) {
             Ok(()) => {
                 self.table.lock().unwrap().rename_entry(&rel, &newrel);
+                self.emit(crate::events::FuseWriteEvent::Rename {
+                    from: from_str,
+                    to: to_str,
+                });
                 reply.ok();
             }
             Err(e) => reply.error(e.into()),
