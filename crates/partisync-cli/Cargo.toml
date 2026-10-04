@@ -22,6 +22,7 @@ axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
+sqlx = { workspace = true } # M9-WP03-T06 reindex：entry×content 扫描（workspace 既有 pin，经 graph 传递已在用）
 
 [lints]
 workspace = true
