@@ -23,8 +23,16 @@ window.addEventListener("error", (e) => {
 });
 
 let curPath = "/";
-let searchMode = "bm25"; // bm25 = 关键词；hybrid = 语义（T01 旗舰）
+let searchMode = "bm25"; // bm25 = 关键词；hybrid = 语义（T01 旗舰）；transcript = 含转写（M9-WP03-T01 接线）
 const $ = (id) => document.getElementById(id);
+
+// M9-WP03-T01（SPEC §2.1）：innerHTML 动态插值一律经 esc()——CSP 已挡
+// inline 脚本执行，转义防 markup 破格与属性逃逸（data-path/data-cid 等）。
+function esc(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
 
 function sizeFmt(n) {
   const u = ["B","KB","MB","GB","TB"]; let v = n, i = 0;
@@ -94,20 +102,19 @@ async function browse(path) {
   const crumbs = breadcrumbFor(curPath);
   $("crumbs").innerHTML = crumbs.map((e, i) =>
     i === crumbs.length - 1
-      ? `<b>${e.name}</b>`
-      : `<a href="#" data-path="${e.path}">${e.name}</a>`
+      ? `<b>${esc(e.name)}</b>`
+      : `<a href="#" data-path="${esc(e.path)}">${esc(e.name)}</a>`
   ).join(`<span>▸</span>`);
   $("crumbs").querySelectorAll("a[data-path]").forEach(a => {
     a.onclick = () => browse(a.dataset.path);
   });
   $("rows").innerHTML = rows.length ? rows.map(e => {
     const dir = e.kind === 1;
-    const fp = e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : "";
-    return `<tr class="${dir ? "row-dir" : "row-file"}"${dir ? ` data-path="${e.path}" style="cursor:pointer"` : ` data-cid="${e.content_id}" data-name="${e.name}" style="cursor:pointer"`}${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>
+    return `<tr class="${dir ? "row-dir" : "row-file"}"${dir ? ` data-path="${esc(e.path)}" style="cursor:pointer"` : ` data-cid="${esc(e.content_id)}" data-name="${esc(e.name)}" style="cursor:pointer"`}${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>
       <td class="icon" aria-hidden="true">${dir ? "▸" : "·"}</td>
-      <td>${e.name}</td><td class="size">${dir ? "—" : sizeFmt(e.size)}</td>
+      <td>${esc(e.name)}</td><td class="size">${dir ? "—" : sizeFmt(e.size)}</td>
       <td class="mtime">${timeFmt(e.mtime_ns)}</td>
-      <td class="fp"${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>${e.content_id ? "<i></i>" + e.content_id.slice(0, 8) : "—"}</td></tr>`;
+      <td class="fp"${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>${e.content_id ? "<i></i>" + esc(e.content_id.slice(0, 8)) : "—"}</td></tr>`;
   }).join("") : `<tr><td colspan="5" class="empty">${curPath === "/" ? "本机还没有索引文件——运行 <b>partisync index &lt;路径&gt;</b> 开始建立索引" : "空目录"}</td></tr>`;
   $("rows").querySelectorAll("tr[data-path]").forEach(tr => {
     tr.onclick = () => browse(tr.dataset.path);
@@ -128,14 +135,14 @@ async function showDetail(contentId, name) {
   try {
     d = await call("asset_detail", { prefix: contentId });
   } catch (e) {
-    panel.innerHTML = `<div class="empty">详情加载失败（${e?.kind ?? "?"}）</div>`;
+    panel.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
     return;
   }
   const fp = fpOf(contentId);
   const copies = d.copies.map(c =>
-    `<li>${c.path} <span class="dim">· ${sizeFmt(c.size)}</span></li>`).join("");
+    `<li>${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></li>`).join("");
   panel.innerHTML = `
-    <h2>${name}</h2>
+    <h2>${esc(name)}</h2>
     <dl>
       <dt>大小</dt><dd>${sizeFmt(d.size)}</dd>
       <dt>副本</dt><dd>${d.copies.length} 处</dd>
@@ -151,10 +158,16 @@ async function showDetail(contentId, name) {
 
 // ── C. 检索（旗舰；三态全覆盖——设计审计硬约束） ──
 function searchCommand() {
-  // 含转写文本 = BM25 通道透传（N4：include_transcript 已在后端常开，
-  // 转写命中走同一 search IPC；开关仅为语义标注）。
+  // M9-WP03-T01（SPEC §2.1 N4 开关化）：「含转写文本」radio 显式传
+  // include_transcript=true；关键词/语义不传（None = 后端常开现状语义）。
   if (searchMode === "hybrid") return "search_hybrid";
-  return "search";
+  return "search"; // bm25 与 transcript 同走 BM25 通道
+}
+
+function searchArgs(q) {
+  const args = { q, limit: 50 };
+  if (searchMode === "transcript") args.include_transcript = true;
+  return args;
 }
 
 function searchSkeleton(n) {
@@ -177,25 +190,25 @@ async function doSearch() {
   meta.innerHTML = searchMode === "hybrid"
     ? "语义检索中（首次需加载嵌入模型）…"
     : "检索中…";
-  const cmd = searchMode === "hybrid" ? "search_hybrid" : "search";
+  const cmd = searchCommand();
   try {
-    const rows = await call(cmd, { q, limit: 50 });
-    const modeLabel = searchMode === "hybrid" ? "语义" : "关键词";
+    const rows = await call(cmd, searchArgs(q));
+    const modeLabel = searchMode === "hybrid" ? "语义" : searchMode === "transcript" ? "含转写" : "关键词";
     meta.innerHTML = rows.length
       ? `<b>${rows.length}</b> hits · ${modeLabel}`
       : "";
     $("srows").innerHTML = rows.length ? rows.map(h => {
       const fp = fpOf(h.content_id);
       return `<article class="hit" style="--fp: ${fp}">
-        <span class="fp-badge">${h.content_id.slice(0, 8)}</span>
+        <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
         <div class="body">
-          <div class="name">${h.content_id.slice(0, 8)}…</div>
-          <div class="snippet">${h.highlight || "—"}</div>
+          <div class="name">${esc(h.content_id.slice(0, 8))}…</div>
+          <div class="snippet">${h.highlight ? esc(h.highlight) : "—"}</div>
         </div>
         <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>
         <div class="num">${h.score.toFixed(2)}</div></div>
       </article>`;
-    }).join("") : `<div class="empty">没有找到「${q.slice(0, 24)}」——换个更短的关键词${
+    }).join("") : `<div class="empty">没有找到「${esc(q.slice(0, 24))}」——换个更短的关键词${
       searchMode === "hybrid" ? "" : "，或切到「语义」模式放宽匹配"
     }。</div>`;
   } catch (e) {
@@ -204,7 +217,7 @@ async function doSearch() {
     $("srows").innerHTML = `<div class="empty">
       ${kind === "Index" && searchMode === "hybrid"
         ? "语义检索不可用（嵌入模型加载失败）——切回「关键词」模式仍可检索。"
-        : `检索失败（${kind}）——检查索引目录后重试。`}
+        : `检索失败（${esc(kind)}）——检查索引目录后重试。`}
       </div>`;
   }
 }
@@ -215,10 +228,10 @@ async function loadDups() {
   $("view-dups").innerHTML = groups.length ? groups.map(g => `
     <div class="dup">
       <div class="head">
-        <span class="hash">content:${g.content_id.slice(0, 16)}…</span>
+        <span class="hash">content:${esc(g.content_id.slice(0, 16))}…</span>
         <span class="badge">${g.copies.length} 份副本 · 每份 ${sizeFmt(g.size)}</span>
       </div>
-      <ul>${g.copies.map(c => `<li>${c.path}</li>`).join("")}</ul>
+      <ul>${g.copies.map(c => `<li>${esc(c.path)}</li>`).join("")}</ul>
     </div>`).join("") : `<div class="empty">没有发现重复内容——索引更多文件后这里会自动按内容身份聚合相同文件</div>`;
 }
 
@@ -229,9 +242,9 @@ async function loadJobs() {
     <table class="panel-table"><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>已处理</th><th>checkpoint</th></tr></thead>
     <tbody>${rows.map(r => {
       const cls = r.status === 3 ? "job-status-ok" : r.status === 2 ? "job-status-warn" : r.status === 4 ? "job-status-err" : "";
-      return `<tr><td class="fp">${r.id.slice(0,10)}…</td><td>${r.kind}</td>
-        <td class="${cls}">${r.status_name || r.status}</td>
-        <td class="size">${r.done_files}</td><td class="fp">${r.checkpoint || "—"}</td></tr>`;
+      return `<tr><td class="fp">${esc(r.id.slice(0,10))}…</td><td>${esc(r.kind)}</td>
+        <td class="${cls}">${esc(r.status_name || r.status)}</td>
+        <td class="size">${r.done_files}</td><td class="fp">${esc(r.checkpoint || "—")}</td></tr>`;
     }).join("")}</tbody></table>` : `<div class="empty">暂无作业——运行 <b>partisync index / watch</b> 后这里会显示作业进度</div>`;
 }
 
@@ -247,9 +260,9 @@ async function loadExtTools() {
     $("ext-list").innerHTML = tools.length ? `
     <table class="panel-table"><thead><tr><th>工具</th><th style="width:220px">capabilities</th><th style="width:90px"></th></tr></thead>
     <tbody>${tools.map(t => `
-      <tr data-tool="${t.name}" style="cursor:pointer"><td class="fp">${t.name}</td>
-      <td>${(t.capabilities || []).join(", ") || "（无宿主能力，纯计算）"}</td>
-      <td><button class="btn ghost ext-call-btn" data-tool="${t.name}">调用</button></td></tr>`).join("")}</tbody></table>`
+      <tr data-tool="${esc(t.name)}" style="cursor:pointer"><td class="fp">${esc(t.name)}</td>
+      <td>${esc((t.capabilities || []).join(", ")) || "（无宿主能力，纯计算）"}</td>
+      <td><button class="btn ghost ext-call-btn" data-tool="${esc(t.name)}">调用</button></td></tr>`).join("")}</tbody></table>`
     : `<div class="empty">暂无扩展。放置 &lt;name&gt;.wasm + &lt;name&gt;.json 到 ~/.partisync/extensions 后重启。</div>`;
     const trs = $("ext-list").querySelectorAll("tr[data-tool]");
     trs.forEach(tr => {
@@ -312,9 +325,9 @@ function renderExtHistory() {
   box.innerHTML = `<table class="panel-table"><thead><tr><th style="width:90px">时间</th><th style="width:130px">工具</th><th style="width:56px">状态</th><th>入参 / 出参</th></tr></thead><tbody>${
     extHistory.map((h, i) => `
       <tr data-hist="${i}" title="点击回看本次入参/出参"><td class="size">${new Date(h.at).toLocaleTimeString("zh-CN", { hour12: false })}</td>
-      <td class="fp">${h.tool}</td>
+      <td class="fp">${esc(h.tool)}</td>
       <td class="${h.ok ? "hist-ok" : "hist-err"}">${h.ok ? "OK" : "ERR"}</td>
-      <td class="hist-io">in ${trunc(h.input, 70)} · out ${trunc(h.output, 90)}</td></tr>`).join("")}</tbody></table>`;
+      <td class="hist-io">in ${esc(trunc(h.input, 70))} · out ${esc(trunc(h.output, 90))}</td></tr>`).join("")}</tbody></table>`;
   box.querySelectorAll("tr[data-hist]").forEach(tr => {
     tr.onclick = () => {
       const h = extHistory[+tr.dataset.hist];
@@ -376,13 +389,13 @@ async function loadSync(animate = false) {
     const total = stats.applied + stats.skipped_self;
     if (stats.devices > 0) {
       $("sync-banner-text").innerHTML =
-        `已与 <b>${stats.devices} 台设备</b>保持一致${
-          stats.conflicts ? ` · <span class="conflict-note">${stats.conflicts} 项冲突待处理</span>` : ""}`;
+        `已与 <b>${esc(stats.devices)} 台设备</b>保持一致${
+          stats.conflicts ? ` · <span class="conflict-note">${esc(stats.conflicts)} 项冲突待处理</span>` : ""}`;
       $("sync-banner-time").textContent =
         stats.last_sync_ns ? `最近对账 ${relTime(stats.last_sync_ns)}` : "";
     } else if (total > 0) {
       $("sync-banner-text").innerHTML =
-        `本机已记录 <b>${total.toLocaleString("zh-CN")}</b> 项变更 · 尚未与其他设备同步`;
+        `本机已记录 <b>${esc(total.toLocaleString("zh-CN"))}</b> 项变更 · 尚未与其他设备同步`;
       $("sync-banner-time").textContent = "";
     } else {
       $("sync-banner-text").textContent = "本机还没有同步记录";
@@ -402,17 +415,17 @@ async function loadSync(animate = false) {
         : it.content_id ? fpOf(it.content_id) : "var(--green-dim)";
       const sub = it.conflict
         ? `<span class="conflict">冲突 · 两台设备都改了此文件</span>`
-        : `<span>来自 ${it.origin_device}${it.op === "remove" ? " · 删除" : ""}</span>`;
+        : `<span>来自 ${esc(it.origin_device)}${it.op === "remove" ? " · 删除" : ""}</span>`;
       html += `<div class="sync-item" style="--fp: ${fp}">
         <span class="fp-dot"></span>
-        <div class="what"><b>${it.name}</b>${sub}${it.dir ? `<div class="dir">${it.dir}</div>` : ""}</div>
+        <div class="what"><b>${esc(it.name)}</b>${sub}${it.dir ? `<div class="dir">${esc(it.dir)}</div>` : ""}</div>
         <time>${new Date(it.at_ns / 1e6).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" })}</time>
       </div>`;
     }
     timeline.innerHTML = html;
   } catch (e) {
     const kind = e?.kind ?? "Internal";
-    timeline.innerHTML = `<div class="empty">同步状态加载失败（${kind}）——确认数据库可读后重试。</div>`;
+    timeline.innerHTML = `<div class="empty">同步状态加载失败（${esc(kind)}）——确认数据库可读后重试。</div>`;
     $("sync-banner").classList.remove("alert");
     $("sync-banner-text").textContent = "同步状态不可用";
     $("sync-banner-time").textContent = "";
@@ -438,7 +451,7 @@ $("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
 $("btn-search").onclick = doSearch;
 $("mode-bm25").addEventListener("change", () => { searchMode = "bm25"; if ($("q").value.trim()) doSearch(); });
 $("mode-hybrid").addEventListener("change", () => { searchMode = "hybrid"; if ($("q").value.trim()) doSearch(); });
-$("mode-transcript").addEventListener("change", () => { searchMode = "bm25"; if ($("q").value.trim()) doSearch(); });
+$("mode-transcript").addEventListener("change", () => { searchMode = "transcript"; if ($("q").value.trim()) doSearch(); });
 $("btn-ext-refresh").onclick = loadExtTools;
 $("btn-ext-call").onclick = doExtCall;
 

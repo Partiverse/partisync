@@ -55,6 +55,10 @@ pub struct ListArgs {
 pub struct SearchArgs {
     pub q: String,
     pub limit: Option<u32>,
+    /// 转写文本通道开关（M9-WP03-T01，SPEC §2.1 N4 诚实化）：
+    /// None = 维持后端常开现状（历史语义）；Some(false) = 排除转写命中。
+    #[serde(default)]
+    pub include_transcript: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +98,7 @@ pub async fn search(state: State<'_, AppState>, args: SearchArgs) -> DesktopResu
         .bm25_only(Bm25Query {
             query: args.q,
             limit,
-            include_transcript: true,
+            include_transcript: args.include_transcript.unwrap_or(true),
         })
         .await
         .map_err(|e| DesktopError::Index(e.to_string()))?;
@@ -145,7 +149,7 @@ pub async fn search_hybrid(
                 filters: SearchFilters::default(),
                 limit,
                 vector_kind: HybridVectorKind::TextDense,
-                include_transcript: true,
+                include_transcript: args.include_transcript.unwrap_or(true),
                 use_reranker: false,
             },
         )
