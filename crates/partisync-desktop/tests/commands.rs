@@ -540,3 +540,60 @@ async fn t03_sync_recent_tolerates_invalid_payload_json() {
     assert_eq!(rows[0].dir, "");
     assert!(rows[0].content_id.is_none());
 }
+
+/// M9-WP02-T04： `memory_*` 工具经 `mcp_call` IPC 透传（桌面源码零改动
+/// 判据——工具名是任意字符串参数， 三工具入 MCP 面即自动可达）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_call_memory_tool_passthrough_stub() {
+    let tmp = TempDir::new().expect("tempdir");
+
+    let stub_path = tmp.path().join("stub-memory.sh");
+    std::fs::write(
+        &stub_path,
+        "#!/bin/sh\n\
+         while read line; do\n\
+         case \"$line\" in\n\
+         *'\"method\":\"initialize\"'*) echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"stub\",\"version\":\"0\"}}}' ;;\n\
+         *'\"method\":\"tools/call\"'*) echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"tool\":\"memory_write\",\"passthrough\":true}}' ;;\n\
+         esac\n\
+         done\n",
+    )
+    .expect("write stub");
+    let mut perms = std::fs::metadata(&stub_path).expect("stat").permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    std::fs::set_permissions(&stub_path, perms).expect("chmod");
+
+    let mut state = AppState::open(
+        tmp.path().join("test.db"),
+        tmp.path().join("cas"),
+        tmp.path().join("index"),
+    )
+    .await
+    .expect("open state");
+    state.mcp_sidecar = std::sync::Arc::new(McpSidecar::new(
+        stub_path,
+        PathBuf::from("/tmp/ignored.db"),
+        PathBuf::from("/tmp/ignored_index"),
+    ));
+
+    let app = mock_builder()
+        .manage(state)
+        .build(mock_context(noop_assets()))
+        .expect("build app");
+    let result = mcp_call(
+        app.state::<AppState>(),
+        McpCallArgs {
+            tool: "memory_write".into(),
+            args: json!({"content": "desktop passthrough probe"}),
+        },
+    )
+    .await
+    .expect("mcp_call");
+    assert_eq!(result["ok"], json!(true));
+    assert_eq!(result["tool"], json!("memory_write"));
+    assert_eq!(result["passthrough"], json!(true));
+}

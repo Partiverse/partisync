@@ -43,9 +43,10 @@
 
 ## 验收
 
-- [ ] tools/list 含三工具且 schema 与 §2.4 一致（单测断言）；
-- [ ] 桌面 mcp_call("memory_*") 透传 stub 单测绿，桌面源码零改动；
-- [ ] fmt/clippy/test 三件套全绿；零新增顶层依赖；
-- [ ] 提交挂 Task-ID `M9-WP02-T04`；
+- [x] tools/list 含三工具且 schema 与 §2.4 一致（gateway e2e
+      `wp02_memory_tools_list_and_call_contract` 真实 stdio 握手断言）；
+- [x] 桌面 mcp_call("memory_*") 透传 stub 单测绿，桌面源码零改动；
+- [x] fmt/clippy/test 三件套全绿；零新增顶层依赖；
+- [x] 提交挂 Task-ID `M9-WP02-T04`；
 - [ ] 对抗审查 + 人工终审（新公开 API `Store::from_pool` /
       `memory_search` / `inclusion_proof` + FTS 触发器面）随 PR 执行。
