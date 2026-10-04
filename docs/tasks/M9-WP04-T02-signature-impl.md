@@ -73,6 +73,13 @@
   registry_t04b scan 两处拷贝 `.wasm` 同步拷 `.minisig`（撞名测试验签
   通过后到 `Duplicate`，语义保持）；wp06 直接用 fixture 路径（同名
   `.minisig` 入 fixtures 目录即零改动）。无测试删除/断言放宽。
+- **SPEC §6 清单偏差留痕（实施期实证）**：gateway `mcp.rs` 测试 helper
+  `state_with_demo_ext` 动态拷 `demo_tool.wasm` 至临时目录经产品
+  `load_registry`（产品锚）装载——验签强制下必拒（CI 实证 3 测试红）。
+  修复 = helper 同步拷 `.minisig` + 经 `scan_with_anchors`（测试钥锚）
+  构造注册表（gateway/src/mcp.rs 测试模块，约 +20 行；产品路径
+  `ext.rs:115` 恒走产品锚零改动）。属 T02 实装的直接回归后果，非顺手
+  修；随实装 PR 报备。
 - 签名产出 = minisign CLI（本机 0.12 一次性生成，不进依赖图，ADR-0027
   决策 1 口径）。
 

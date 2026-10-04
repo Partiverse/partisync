@@ -1869,14 +1869,35 @@ mod tests {
             dir.path().join("demo_ext.wasm"),
         )
         .unwrap();
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../partisync-ext-host/tests/fixtures/demo_tool.minisig"),
+            dir.path().join("demo_ext.minisig"),
+        )
+        .unwrap();
         std::fs::write(
             dir.path().join("demo_ext.json"),
             r#"{"tool_name":"demo_echo","capabilities":[]}"#,
         )
         .unwrap();
-        let (registry, scanned_dir) =
-            crate::ext::load_registry(&dir.path().to_path_buf(), None).expect("demo 扩展装载成功");
-        state.install_ext_registry(registry, scanned_dir).await;
+        // [P21]（SPEC M9-WP04）：fixture 签名出自 test-only 钥
+        // （ext-host tests/fixtures/test-signing.pub，注释显式标注非生产
+        // 钥，base64 原样拷贝；产品锚不信任它）——测试经 ext-host 参数
+        // 化锚集入口装载（SPEC §4「测试钥签名路径」）；产品路径
+        // `crate::ext::load_registry` 恒走内嵌发布双钥，不在测试改动面。
+        let anchors = [partisync_ext_host::pubkey_from_base64(
+            "RWQVdtZEx/IGjqq0d6egWWBl2+3QtiS0aNQrpc/F6Tqrt5TAaOdIc72B",
+        )
+        .expect("test-only pubkey base64 合法（fixtures/test-signing.pub 原样）")];
+        let registry = partisync_ext_host::ExtRegistry::scan_with_anchors(
+            dir.path(),
+            &partisync_ext_host::HostState::without_index(),
+            &anchors,
+        )
+        .expect("demo 扩展装载成功");
+        state
+            .install_ext_registry(registry, dir.path().to_path_buf())
+            .await;
         state
     }
 
