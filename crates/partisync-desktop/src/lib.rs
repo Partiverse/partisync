@@ -44,9 +44,13 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 }
 
 fn default_data_dir() -> PathBuf {
+    // M9-WP03-T05（SPEC v0.2 §2.5）：对齐生态既有关键面——gateway MCP
+    // graph.db 默认、CLI `search --index-root` 默认均落 data_local/.partisync；
+    // 旧默认（partisync-desktop 独立空目录）致无参启动全 0 = 用户实测
+    // 「没有任何功能」。旧目录不迁移不删除，`--data-dir` 可指回。
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("partisync-desktop")
+        .join(".partisync")
 }
 
 /// 启动 Tauri 桌面壳。
