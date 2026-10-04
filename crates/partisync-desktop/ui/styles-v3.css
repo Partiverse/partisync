@@ -130,6 +130,14 @@ main { padding: 0 22px 56px; }
   color: var(--green); background: var(--green-dark); border-color: var(--green-dim);
 }
 .mode-switch input { accent-color: var(--green); }
+/* M9-WP03-T03：旗舰检索「含记忆」勾选（默认勾选；记忆通道与资产分区
+   展示、各自内部排序不变——SPEC §2.3 / §6-R2 score 不可比不混排） */
+.mem-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-top: 8px; font-size: 12px; color: var(--text-dim); cursor: pointer;
+}
+.mem-toggle input { accent-color: var(--green); }
+.mem-toggle:has(input:checked) { color: var(--green); }
 .result-meta {
   display: flex; align-items: baseline; gap: 12px;
   font-size: 12px; color: var(--text-dim);

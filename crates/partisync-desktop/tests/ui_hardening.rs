@@ -185,3 +185,73 @@ fn memory_tab_structure_and_dom_id_parity() {
         "记忆面板不得进 5s 轮询（防展开态被打断）"
     );
 }
+
+// ── M9-WP03-T03：旗舰检索记忆通道静态契约（SPEC §2.3 + §3「分区展示
+// 测试」的 JS 展示面；数据流面由 commands.rs
+// `t03_flagship_memory_dual_channel_via_stub_sidecar` 钉住） ──
+
+/// 「含记忆」勾选接线：checkbox 默认勾选 + doSearch 读取 .checked +
+/// 双通道并行 + memory_search payload 恰为 {query}（SPEC §2.3 字面）。
+#[test]
+fn t03_flagship_memory_toggle_wired() {
+    assert!(
+        UI_HTML.contains("id=\"mode-memory\" checked"),
+        "「含记忆」checkbox 必须存在且默认勾选（SPEC §2.3）"
+    );
+    assert!(
+        UI_JS.contains("$(\"mode-memory\").checked"),
+        "doSearch 必须读取「含记忆」勾选状态"
+    );
+    assert!(
+        UI_JS.contains("memCall(\"memory_search\", { query: q })"),
+        "记忆通道必须经 mcp_call memory_search 且 payload 恰为 {{query}}（SPEC §2.3）"
+    );
+    assert!(
+        UI_JS.contains("await Promise.all([call(cmd, searchArgs(q)), memPromise])"),
+        "双通道必须并行发起，且资产通道参数沿 searchArgs 现状（资产区不受影响）"
+    );
+}
+
+/// 分区展示 + 跨通道不混排（§6-R2）：通道名分区标题、记忆行三字段
+/// （content 截断 + tags + score）esc 全覆盖、资产行模板零记忆字段、
+/// 双通道结果不合并数组（各自内部排序不变）。
+#[test]
+fn t03_flagship_memory_sections_and_no_cross_merge() {
+    assert!(
+        UI_JS.contains("资产通道") && UI_JS.contains("记忆通道 · memory_search"),
+        "分区标题必须标明通道名（SPEC §2.3）"
+    );
+    // 记忆行 = content 截断 + tags + score（字符串动态字段一律 esc；
+    // score 数字沿判例不入禁列）。
+    assert!(
+        UI_JS.contains("esc(trunc(m.content, 90))"),
+        "记忆行 content 必须截断且经 esc"
+    );
+    assert!(
+        UI_JS.contains("esc(memTags(m.tags))"),
+        "记忆行 tags 必须经 memTags 解析 + esc"
+    );
+    assert!(
+        UI_JS.contains("(m.score ?? 0).toFixed(2)"),
+        "记忆行必须有 score 展示"
+    );
+    // 资产行模板区间（rows.map(h => { 起至首个闭合）零记忆字段——分区
+    // 不混排的渲染面：资产 hit 卡现状不变。
+    let asset_at = UI_JS.find("rows.map(h => {").expect("资产行渲染存在");
+    let seg = &UI_JS[asset_at..];
+    let close = seg.find("}).join(\"\")").expect("资产行渲染闭合");
+    let asset_tpl = &seg[..close];
+    for banned in ["mem.", "memTags", "memory"] {
+        assert!(
+            !asset_tpl.contains(banned),
+            "资产行模板不得混入记忆通道字段（§6-R2 不混排）：{banned}"
+        );
+    }
+    // 双通道结果不得合并成一个数组再排序（各自内部排序不变，§6-R2）。
+    for banned in ["[...rows, ...mem", "rows.concat(mem", "mem.rows.concat("] {
+        assert!(
+            !UI_JS.contains(banned),
+            "跨通道合并数组被禁用（score 不可比）：{banned}"
+        );
+    }
+}

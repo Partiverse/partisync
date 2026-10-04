@@ -60,6 +60,10 @@
       <label><input type="radio" name="mode" id="mode-hybrid"> 语义</label>
       <label><input type="radio" name="mode" id="mode-transcript"> 含转写文本</label>
     </div>
+    <!-- M9-WP03-T03（SPEC §2.3）：旗舰检索记忆通道——默认勾选，并行调
+         memory_search({query})，与资产命中分区展示（score 不可比不混排，
+         §6-R2）；不进 radiogroup（ARIA 语义：三态 radio 保持独立分组） -->
+    <label class="mem-toggle" title="并行检索记忆通道（memory_search）；与资产分区展示，分数不可比不混排"><input type="checkbox" id="mode-memory" checked> 含记忆</label>
     <div class="result-meta" id="ssearch-meta"></div>
     <div id="srows" class="hits"></div>
   </section>
