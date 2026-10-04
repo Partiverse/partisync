@@ -154,7 +154,14 @@ impl TierBackend for FsBackend {
     }
 
     fn exists(&self, key: &str) -> Result<bool, TierError> {
-        Ok(self.key_path(key).is_file())
+        match std::fs::metadata(self.key_path(key)) {
+            Ok(md) => Ok(md.is_file()),
+            // M9-WP02-T05（SPEC §2.6）：仅 NotFound 伪装「不存在」；
+            // 其他 stat 错误（ENOTDIR/EACCES/IO）显式上浮——吞成 false
+            // 会让 crash_resume 把「查不动」误判「目标缺」而错误回滚。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(TierError::Io("查 tier 存在性", e)),
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -546,7 +553,9 @@ impl TierEngine {
         let pending = self.manifest.list_migrating().await?;
         let mut fixed = 0;
         for loc in pending {
-            let target_has = self.backend(loc.tier).exists(&loc.pack_id).unwrap_or(false);
+            // M9-WP02-T05：exists 的 stat 错误显式上浮（此前 unwrap_or(false)
+            // 把「查不动」伪装「目标缺」→ crash_resume 误回滚）。
+            let target_has = self.backend(loc.tier).exists(&loc.pack_id)?;
             // src_tier 在 Migrating 必填；若缺，保守回滚（标 committed，tier=目标）。
             let src = loc.src_tier.unwrap_or(loc.tier);
             if target_has {
@@ -647,6 +656,34 @@ mod tests {
         engine.migrate("p1", Tier::Cold).await.expect("to cold");
         assert_eq!(engine.tier_of("p1").await.unwrap(), Tier::Cold);
         assert_eq!(engine.read("p1").await.unwrap(), b"payload");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // M9-WP02-T05（SPEC §2.6）：错误注入——stat 错误 ≠ NotFound 面。
+    // 扇出首段路径（root/k1）被同名文件占用时，exists("k1*") 走 stat 得
+    // ENOTDIR：必须 Err(Io) 上浮，不得伪装 Ok(false)（旧行为 is_file() 吞错）。
+    #[test]
+    fn exists_stat_error_surfaced_not_disguised() {
+        let root = tempdir("exists-enotdir");
+        let warm = FsBackend::new(&root.join("warm"), "warm").unwrap();
+        // 常规面：缺失 = Ok(false)，存在 = Ok(true)
+        assert!(!warm.exists("ab12").unwrap());
+        warm.put("ab12", b"data").unwrap();
+        assert!(warm.exists("ab12").unwrap());
+        // 注入面：扇出目录位置被文件占用 → 后续同前缀 key 的 stat 报 ENOTDIR
+        std::fs::write(root.join("warm").join("cd"), b"blocking file").unwrap();
+        match warm.exists("cd34") {
+            Err(TierError::Io(what, e)) => {
+                assert_eq!(what, "查 tier 存在性");
+                assert_ne!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "非 NotFound 才算上浮"
+                );
+            }
+            Ok(false) => panic!("stat 错误被伪装成 Ok(false)——M9-WP02-T05 回归"),
+            other => panic!("异常结果: {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
