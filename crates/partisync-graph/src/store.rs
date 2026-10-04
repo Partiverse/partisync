@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::memory::{
     canonical_json, canonical_tags, content_digest, memory_identity, MemoryRootSnapshot, MemoryRow,
-    MemoryWriteOutcome, VerifyReport,
+    MemorySearchHit, MemorySearchReport, MemoryWriteOutcome, VerifyReport,
 };
 use partisync_core::error::{PartisyError, Severity};
 use partisync_core::Ulid;
@@ -220,6 +220,16 @@ impl Store {
         Self::attach(pool).await
     }
 
+    /// 从既有连接池构造（M9-WP02-T04：gateway MCP 侧车与 `graph_pool`
+    /// 同源共享；迁移幂等重跑——schema IF NOT EXISTS + 防御性补列均幂等）。
+    ///
+    /// # Errors
+    /// 同 [`Store::open`]。
+    pub async fn from_pool(pool: SqlitePool) -> Result<Self, PartisyError> {
+        Self::migrate(&pool).await?;
+        Self::attach(pool).await
+    }
+
     /// 迁移后装配：从 `sync_clock` 恢复 HLC 时钟（M2-WP03）——
     /// 重启后新键严格大于关闭前（修复 WP01 时钟随进程回退的隐患）。
     async fn attach(pool: SqlitePool) -> Result<Self, PartisyError> {
@@ -320,6 +330,42 @@ impl Store {
         let _ = sqlx::raw_sql("ALTER TABLE content ADD COLUMN c2pa TEXT")
             .execute(pool)
             .await;
+        // v17（M9-WP02-T04）：memory 全文检索面。FTS5 为 bundled sqlite 编译期
+        // 已证（libsqlite3-sys 0.37.0 build.rs -DSQLITE_ENABLE_FTS5；版本 3.51.3
+        // 含 trigram tokenizer ≥3.34）。**不在 schema.sql**：非 bundled/裁剪构建
+        // 缺 FTS5 模块时 CREATE VIRTUAL TABLE 失败须静默降级——SPEC §2.4
+        // 「否则 LIKE 兜底」路径才真实可达（检索时查 sqlite_master 判可用）。
+        // trigram 而非 unicode61：CJK 连续串 unicode61 不成词，检索空转。
+        let _ = sqlx::raw_sql(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                memory_id UNINDEXED, content, tokenize = 'trigram')",
+        )
+        .execute(pool)
+        .await;
+        let _ = sqlx::raw_sql(
+            "CREATE TRIGGER IF NOT EXISTS memory_fts_ai AFTER INSERT ON memory BEGIN
+                INSERT INTO memory_fts(rowid, memory_id, content)
+                VALUES (new.rowid, new.memory_id, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memory_fts_au AFTER UPDATE OF content ON memory BEGIN
+                DELETE FROM memory_fts WHERE rowid = old.rowid;
+                INSERT INTO memory_fts(rowid, memory_id, content)
+                VALUES (new.rowid, new.memory_id, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memory_fts_ad AFTER DELETE ON memory BEGIN
+                DELETE FROM memory_fts WHERE rowid = old.rowid;
+            END;",
+        )
+        .execute(pool)
+        .await;
+        // 回填既有行（幂等：仅补 fts 缺行；v17 前建库 / 降级期写入的行）
+        let _ = sqlx::query(
+            "INSERT INTO memory_fts(rowid, memory_id, content)
+             SELECT rowid, memory_id, content FROM memory
+             WHERE rowid NOT IN (SELECT rowid FROM memory_fts)",
+        )
+        .execute(pool)
+        .await;
         Ok(())
     }
 
@@ -2227,6 +2273,140 @@ impl Store {
         .await
         .map_err(|e| db_err("更新 memory_root", e))?;
         Ok(snapshot)
+    }
+
+    /// memory 全文检索（SPEC §2.4 `memory_search`）：一期引擎 = FTS5
+    /// （trigram tokenizer，CJK 子串语义正确）+ LIKE 兜底（FTS 不可用或
+    /// 查询 <3 字符——trigram 最短命中长度）。tag 精确过滤（json_each）、
+    /// memory_id 精确查不走检索路径。score = 匹配秩（FTS 路径 -bm25，
+    /// LIKE/精确路径常量 1.0），结果按 score 降序、次键 created_ns 降序。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn memory_search(
+        &self,
+        query: Option<&str>,
+        tag: Option<&str>,
+        memory_id: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<MemorySearchReport, PartisyError> {
+        if let Some(id) = memory_id {
+            let hits: Vec<MemorySearchHit> = sqlx::query_as(
+                "SELECT memory_id, content, tags, metadata, created_ns, origin_device, 1.0 AS score
+                 FROM memory WHERE memory_id = ? AND deleted = 0",
+            )
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| db_err("memory_search 精确查", e))?;
+            let total = hits.len() as i64;
+            return Ok(MemorySearchReport {
+                results: hits,
+                total,
+            });
+        }
+
+        let like_escape = |s: &str| {
+            s.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        };
+        let fts_ready = match query {
+            Some(q) if q.chars().count() >= 3 => self.memory_fts_available().await?,
+            _ => false,
+        };
+        // 两条路径独立成段（动态拼 SQL 的绑定序：匹配参 → tag → limit/offset）
+        let (rows_sql, count_sql, match_param): (String, String, Option<String>) = if fts_ready {
+            let q = query.unwrap_or_default();
+            let phrase = format!("\"{}\"", q.replace('"', "\"\""));
+            let tag_clause = if tag.is_some() {
+                " AND EXISTS (SELECT 1 FROM json_each(m.tags) je WHERE je.value = ?)"
+            } else {
+                ""
+            };
+            (
+                format!(
+                    "SELECT m.memory_id, m.content, m.tags, m.metadata, m.created_ns, m.origin_device, \
+                            -bm25(memory_fts) AS score \
+                     FROM memory_fts JOIN memory m ON m.rowid = memory_fts.rowid \
+                     WHERE memory_fts MATCH ? AND m.deleted = 0{tag_clause} \
+                     ORDER BY score DESC, m.created_ns DESC LIMIT ? OFFSET ?"
+                ),
+                format!(
+                    "SELECT count(*) FROM memory_fts JOIN memory m ON m.rowid = memory_fts.rowid \
+                     WHERE memory_fts MATCH ? AND m.deleted = 0{tag_clause}"
+                ),
+                Some(phrase),
+            )
+        } else {
+            let (like_clause, pattern) = match query {
+                Some(q) => (" AND content LIKE ? ESCAPE '\\'", Some(like_escape(q))),
+                None => ("", None),
+            };
+            let tag_clause = if tag.is_some() {
+                " AND EXISTS (SELECT 1 FROM json_each(memory.tags) je WHERE je.value = ?)"
+            } else {
+                ""
+            };
+            (
+                format!(
+                    "SELECT memory_id, content, tags, metadata, created_ns, origin_device, 1.0 AS score \
+                     FROM memory WHERE deleted = 0{like_clause}{tag_clause} \
+                     ORDER BY created_ns DESC LIMIT ? OFFSET ?"
+                ),
+                format!("SELECT count(*) FROM memory WHERE deleted = 0{like_clause}{tag_clause}"),
+                pattern,
+            )
+        };
+
+        let run_count = async {
+            // 审计（sqlx SqlSafeStr 门禁）：动态段仅限结构子句（FTS/LIKE 分支
+            // 的表名/别名/子句形状），无任何用户输入拼接——查询值全走 bind。
+            let mut c = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql.clone()));
+            if let Some(p) = &match_param {
+                c = c.bind(p);
+            }
+            if let Some(t) = tag {
+                c = c.bind(t);
+            }
+            c.fetch_one(&self.pool).await
+        };
+        // 同上：动态段无用户输入（审计留痕见 run_count）
+        let mut q = sqlx::query_as::<_, MemorySearchHit>(sqlx::AssertSqlSafe(rows_sql));
+        if let Some(p) = &match_param {
+            q = q.bind(p);
+        }
+        if let Some(t) = tag {
+            q = q.bind(t);
+        }
+        let hits = q
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| db_err("memory_search", e))?;
+        let total = run_count
+            .await
+            .map_err(|e| db_err("memory_search 计数", e))?;
+        Ok(MemorySearchReport {
+            results: hits,
+            total,
+        })
+    }
+
+    /// FTS5 检索面可用性（v17 防御性建表，缺模块构建上恒 false → LIKE）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    async fn memory_fts_available(&self) -> Result<bool, PartisyError> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| db_err("memory_search FTS 可用性", e))?;
+        Ok(n > 0)
     }
 
     /// 可验证性全检（SPEC §2.4 `memory_verify` 语义）：快照根 vs 全量重算根 +
