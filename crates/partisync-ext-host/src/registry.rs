@@ -62,6 +62,12 @@ pub enum LoadError {
     /// 同批扩展工具名撞名（PR #35 审查 P2-3：语义独立于 Instantiate，
     /// gateway 按变体匹配时不会误报实例化失败）。
     Duplicate(String),
+    /// [P21] 同名 `.minisig` 缺失（SPEC M9-WP04 §2.2；无豁免通道）。
+    /// 携带扩展路径定位。
+    Unsigned(String),
+    /// [P21] `.minisig` 格式非法或对全部锚定公钥验证失败（篡改字节 /
+    /// 未知钥签名 / 非 legacy-allowed 算法）。携带扩展路径定位。
+    BadSignature(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -78,6 +84,11 @@ impl std::fmt::Display for LoadError {
             Self::Instantiate(e) => write!(f, "instantiate: {e}"),
             Self::Scan(m) => write!(f, "scan: {m}"),
             Self::Duplicate(m) => write!(f, "duplicate: {m}"),
+            Self::Unsigned(m) => write!(
+                f,
+                "extension not signed (no `<name>.minisig`; loading is verify-mandatory): {m}"
+            ),
+            Self::BadSignature(m) => write!(f, "extension signature invalid: {m}"),
         }
     }
 }
@@ -139,21 +150,77 @@ impl std::fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
+/// [P21] 装载期验签（SPEC M9-WP04 §2.2）：读扩展字节 + 同名 `.minisig`
+/// （`wasm_path.with_extension("minisig")`——对 `.wasm`/`.wat` 同规则，
+/// 签名对象 = 传入编译器的同一文件字节），逐锚钥验证，任一通过即放行。
+///
+/// wasm 字节读取失败归 [`LoadError::Component`]（编译前置 IO，非签名面）；
+/// 缺签 → [`LoadError::Unsigned`]；坏签/未知钥 → [`LoadError::BadSignature`]
+/// （Display 携带路径定位）。
+fn verify_signature(
+    wasm_path: &Path,
+    anchors: &[minisign_verify::PublicKey],
+) -> Result<(), LoadError> {
+    let content = std::fs::read(wasm_path)
+        .map_err(|e| LoadError::Component(format!("read {}: {e}", wasm_path.display())))?;
+    let sig_path = wasm_path.with_extension("minisig");
+    let sig = match minisign_verify::Signature::from_file(&sig_path) {
+        Ok(sig) => sig,
+        // 缺签（NotFound）与坏签分野——[P21] 双变体错误面
+        Err(minisign_verify::Error::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LoadError::Unsigned(wasm_path.display().to_string()));
+        }
+        Err(e) => {
+            return Err(LoadError::BadSignature(format!(
+                "{}: {e}",
+                sig_path.display()
+            )));
+        }
+    };
+    crate::signature::verify(&content, &sig, anchors)
+        .map_err(|e| LoadError::BadSignature(format!("{}: {e}", wasm_path.display())))
+}
+
 impl ExtTool {
-    /// 装载并实例化一个扩展工具。
+    /// 装载并实例化一个扩展工具（产品路径：锚集 = 内嵌发布双钥
+    /// [`crate::signature::ANCHOR_PUBKEYS`]）。
     ///
-    /// 拒绝路径（按序）：manifest 三阶段校验 → [`HostState::preflight`]
-    /// （F-4，fail-closed）→ component 编译 → linker 注入 → 实例化 →
-    /// `call` 导出检查。**拒绝先于任何 host function 暴露**（[P14]）。
+    /// 拒绝路径（按序）：manifest 三阶段校验 → **[P21] 验签**（缺签/
+    /// 坏签在 component 字节进入 wasmtime 编译器之前拒绝）→
+    /// [`HostState::preflight`]（F-4，fail-closed）→ component 编译 →
+    /// linker 注入 → 实例化 → `call` 导出检查。**拒绝先于任何 host
+    /// function 暴露**（[P14]）。无 unsigned 豁免开关。
     pub fn load(
         wasm_path: impl AsRef<Path>,
         manifest_path: impl AsRef<Path>,
         state: HostState,
     ) -> Result<Self, LoadError> {
+        Self::load_with_anchors(
+            wasm_path,
+            manifest_path,
+            state,
+            &crate::signature::anchored_pubkeys(),
+        )
+    }
+
+    /// 锚集参数化的装载入口（[`Self::load`] 的核心体）。
+    ///
+    /// 产品路径恒走 [`Self::load`]（内嵌发布双钥，无任何开关/env/豁免，
+    /// [P21](c) 字面）；参数化面是 SPEC M9-WP04 §2.3「测试面自足」/§4
+    /// 「测试钥签名路径」的实现前提——验签恒强制，仅锚集来源可换（与
+    /// ADR-0030 修订触发「专钥分域」方向兼容），非 unsigned 豁免通道。
+    pub fn load_with_anchors(
+        wasm_path: impl AsRef<Path>,
+        manifest_path: impl AsRef<Path>,
+        state: HostState,
+        anchors: &[minisign_verify::PublicKey],
+    ) -> Result<Self, LoadError> {
+        let wasm_path = wasm_path.as_ref();
         let manifest = Manifest::load(&manifest_path).map_err(LoadError::Manifest)?;
+        verify_signature(wasm_path, anchors)?;
         state.preflight(&manifest).map_err(LoadError::Preflight)?;
         let component =
-            load_component(&wasm_path).map_err(|e| LoadError::Component(e.to_string()))?;
+            load_component(wasm_path).map_err(|e| LoadError::Component(e.to_string()))?;
         let linker: Linker<HostState> =
             linker_for(crate::engine(), &manifest).map_err(|e| LoadError::Linker(e.to_string()))?;
         let mut store = Store::new(crate::engine(), state);
@@ -246,11 +313,11 @@ impl ExtRegistry {
         }
     }
 
-    /// 装载单个扩展并注册。
+    /// 装载单个扩展并注册（产品锚 = 内嵌发布双钥）。
     ///
     /// # Errors
-    /// manifest / preflight / 装载任一失败；或工具名与已注册扩展撞名
-    /// （同批扩展之间的撞名由装载序保证拒绝——内建工具撞名已在
+    /// manifest / 验签 / preflight / 装载任一失败；或工具名与已注册扩展
+    /// 撞名（同批扩展之间的撞名由装载序保证拒绝——内建工具撞名已在
     /// `Manifest::validate` 拒绝）。
     pub fn register(
         &mut self,
@@ -258,7 +325,28 @@ impl ExtRegistry {
         manifest_path: impl AsRef<Path>,
         state: &HostState,
     ) -> Result<(), LoadError> {
-        let tool = ExtTool::load(wasm_path, manifest_path, state.clone())?;
+        Self::register_with_anchors(
+            self,
+            wasm_path,
+            manifest_path,
+            state,
+            &crate::signature::anchored_pubkeys(),
+        )
+    }
+
+    /// 锚集参数化的注册入口（[`Self::register`] 核心体；参数化语义同
+    /// [`ExtTool::load_with_anchors`]——非豁免通道）。
+    ///
+    /// # Errors
+    /// 同 [`Self::register`]。
+    pub fn register_with_anchors(
+        &mut self,
+        wasm_path: impl AsRef<Path>,
+        manifest_path: impl AsRef<Path>,
+        state: &HostState,
+        anchors: &[minisign_verify::PublicKey],
+    ) -> Result<(), LoadError> {
+        let tool = ExtTool::load_with_anchors(wasm_path, manifest_path, state.clone(), anchors)?;
         let name = tool.manifest().tool_name.clone();
         if self.tools.contains_key(&name) {
             // BTreeMap::insert 会静默覆盖——撞名必须显式拒
@@ -271,9 +359,23 @@ impl ExtRegistry {
     }
 
     /// 扫描扩展目录（SPEC §2.2 发现约定：`<dir>/*.json` manifest 驱动，
-    /// 同名 `.wasm` 为 component）。单个扩展装载失败 → 整体失败
-    /// （fail-closed；部分加载会让工具面呈现不可预期的半态）。
+    /// 同名 `.wasm` 为 component；[P21] 起另要求同名 `.minisig` 签名
+    /// 文件，缺签/坏签/孤儿签名均装载期拒）。单个扩展装载失败 → 整体
+    /// 失败（fail-closed；部分加载会让工具面呈现不可预期的半态）。
     pub fn scan(dir: impl AsRef<Path>, state: &HostState) -> Result<Self, LoadError> {
+        Self::scan_with_anchors(dir, state, &crate::signature::anchored_pubkeys())
+    }
+
+    /// 锚集参数化的扫描入口（[`Self::scan`] 核心体；参数化语义同
+    /// [`ExtTool::load_with_anchors`]——非豁免通道）。
+    ///
+    /// # Errors
+    /// 同 [`Self::scan`]。
+    pub fn scan_with_anchors(
+        dir: impl AsRef<Path>,
+        state: &HostState,
+        anchors: &[minisign_verify::PublicKey],
+    ) -> Result<Self, LoadError> {
         let dir = dir.as_ref();
         let mut registry = Self::empty();
         // P2-2：read_dir 迭代中的 IO 错误不吞（与 fail-closed 文档一致）
@@ -295,6 +397,18 @@ impl ExtRegistry {
                     )));
                 }
             }
+            // [P21]（SPEC M9-WP04 §2.2）：孤儿 `.minisig`（有签名无同名
+            // `.wasm`）显式拒——坏文件静默消失会让工具面呈半态（沿孤儿
+            // `.wasm` P2-1 判例）。
+            if p.extension().is_some_and(|x| x == "minisig") {
+                let has_wasm = p.with_extension("wasm").exists();
+                if !has_wasm {
+                    return Err(LoadError::Scan(format!(
+                        "orphan signature (no component): {}",
+                        p.display()
+                    )));
+                }
+            }
         }
         let mut manifests: Vec<_> = entries
             .into_iter()
@@ -307,7 +421,7 @@ impl ExtRegistry {
                 LoadError::Scan(format!("bad manifest name: {}", manifest_path.display()))
             })?;
             let wasm_path = dir.join(format!("{}.wasm", stem.to_string_lossy()));
-            registry.register(&wasm_path, &manifest_path, state)?;
+            registry.register_with_anchors(&wasm_path, &manifest_path, state, anchors)?;
         }
         Ok(registry)
     }
