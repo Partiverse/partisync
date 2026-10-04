@@ -847,3 +847,141 @@ done
         );
     }
 }
+
+// ── M9-WP03-T03：旗舰检索「含记忆」双通道数据流（SPEC §2.3 + §3
+// 「分区展示测试」） ──
+
+/// 检索 tab「含记忆」（默认勾选）双通道：资产通道 `search` IPC 照常命中
+/// （资产区不受影响——勾选只在 UI 层追加并行支路，`searchArgs` 参数面
+/// 不变）；记忆通道 `mcp_call("memory_search", {query})` 请求 payload 恰为
+/// `{query}`（SPEC §2.3 字面，不带 limit/offset）且响应行字段
+/// （content/tags/score）可驱动记忆分区渲染。stub 沿
+/// [`t02_memory_panel_dataflow_via_stub_sidecar`] 模板（请求行旁路落盘 +
+/// 按 `params.name` 回 CallToolResult 形状）；资产面 BM25 直种沿
+/// [`t01_search_include_transcript_toggle_wiring`] 判例。
+///
+/// 分区「展示」面（通道名分区标题 / 记忆行 esc 三字段 / 不合并数组）由
+/// ui_hardening.rs `t03_flagship_memory_sections_and_no_cross_merge` 静态
+/// 探针绑定（R5 落锤：JS 展示面 = Rust 静态契约；本测钉数据流面）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_flagship_memory_dual_channel_via_stub_sidecar() {
+    use partisync_index::search::bm25::IndexedDoc;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let stub_path = tmp.path().join("stub-flagship-memory.sh");
+    let db = tmp.path().join("sidecar.db");
+    std::fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+while read line; do
+  echo "$line" >> "$2.req"
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+  *'"method":"initialize"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"stub","version":"0"}}}' ;;
+  *'"name":"memory_search"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[],"structuredContent":{"results":[{"memory_id":"bb22bb22bb22bb22","content":"旗舰检索记忆探针 <script>alert(1)</script>","tags":"[\"m9\",\"flagship\"]","metadata":{},"created_ns":1728000000000000001,"origin_device":"device-self","score":0.75}],"total":1}}}' ;;
+  esac
+done
+"#,
+    )
+    .expect("write stub");
+    let mut perms = std::fs::metadata(&stub_path).expect("stat").permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    std::fs::set_permissions(&stub_path, perms).expect("chmod");
+
+    let mut state = AppState::open(
+        tmp.path().join("test.db"),
+        tmp.path().join("cas"),
+        tmp.path().join("index"),
+    )
+    .await
+    .expect("open state");
+    state.mcp_sidecar = std::sync::Arc::new(McpSidecar::new(
+        stub_path,
+        db.clone(),
+        tmp.path().join("index"),
+    ));
+    let app = mock_builder()
+        .manage(state)
+        .build(mock_context(noop_assets()))
+        .expect("build app");
+    let st = app.state::<AppState>();
+
+    // 资产通道数据面：BM25 直种（与记忆通道无关的 IPC——分区互不污染的
+    // 前提是资产检索路径零记忆感知）。
+    {
+        let engine = st.index().await.expect("engine");
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "bb110000".into(),
+                filename: "flagship-asset.md".into(),
+                tags: vec![],
+                ocr_text: None,
+                transcript_text: None,
+                updated_ns: 1,
+            })
+            .expect("seed asset doc");
+        engine.commit().expect("commit");
+        engine.bm25_index().reload().expect("reader reload");
+    }
+
+    // 1) 资产通道：search 照常命中（资产区不受「含记忆」影响）。
+    let hits = search(
+        st.clone(),
+        SearchArgs {
+            q: "flagship".into(),
+            limit: Some(10),
+            include_transcript: None,
+        },
+    )
+    .await
+    .expect("asset channel search");
+    assert_eq!(hits.len(), 1, "资产区现状不变：记忆通道不污染资产 IPC");
+    assert_eq!(hits[0].content_id, "bb110000");
+    assert_eq!(hits[0].mode, "bm25");
+
+    // 2) 记忆通道：payload 恰为 {query}；响应行字段驱动记忆分区渲染
+    //    （content 截断 + tags + score 的数据面）。
+    let r = mcp_call(
+        st,
+        McpCallArgs {
+            tool: "memory_search".into(),
+            args: json!({"query": "旗舰"}),
+        },
+    )
+    .await
+    .expect("memory channel memory_search");
+    let payload = &r["structuredContent"];
+    assert_eq!(payload["total"], json!(1), "记忆分区 result-meta 总数");
+    let hit = &payload["results"][0];
+    assert_eq!(
+        hit["content"],
+        json!("旗舰检索记忆探针 <script>alert(1)</script>"),
+        "记忆行 content（UI 侧 trunc+esc 渲染的数据面）"
+    );
+    assert_eq!(hit["tags"], json!("[\"m9\",\"flagship\"]"));
+    assert_eq!(hit["score"], json!(0.75));
+
+    // payload 断言：请求行恰为 {"query": "..."}（initialize 通知同样落盘，
+    // 按 method == "tools/call" 过滤）。
+    let reqlog = std::fs::read_to_string(format!("{}.req", db.display())).expect("req log");
+    let mut reqs: Vec<Value> = reqlog
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<_, _>>()
+        .expect("parse req lines");
+    reqs.retain(|r| r["method"] == "tools/call");
+    assert_eq!(reqs.len(), 1, "旗舰检索记忆通道恰 1 次 memory_search");
+    assert_eq!(reqs[0]["params"]["name"], "memory_search");
+    assert_eq!(
+        reqs[0]["params"]["arguments"],
+        json!({"query": "旗舰"}),
+        "SPEC §2.3：payload 恰为 {{query}}"
+    );
+}

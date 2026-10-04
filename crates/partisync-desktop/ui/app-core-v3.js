@@ -191,13 +191,28 @@ async function doSearch() {
     ? "语义检索中（首次需加载嵌入模型）…"
     : "检索中…";
   const cmd = searchCommand();
+  // M9-WP03-T03（SPEC §2.3）：「含记忆」勾选 → 与资产检索**并行**调
+  // memory_search（payload 恰为 {query}，sidecar 服务端默认 limit/offset）；
+  // 资产通道 IPC 参数不变（资产区现状不变）。双通道各自内部排序不变、
+  // 不合并数组（score 不可比，§6-R2 分区展示）；记忆通道失败不拖垮资产区
+  // （catch → 记忆分区 empty 错误行，error-region 走 call()/mcPayload
+  // 既有链路透传）。
+  const withMem = $("mode-memory").checked;
+  const memPromise = withMem
+    ? memCall("memory_search", { query: q })
+        .then((r) => ({ rows: r.results ?? [], error: false }))
+        .catch(() => ({ rows: [], error: true }))
+    : Promise.resolve(null);
   try {
-    const rows = await call(cmd, searchArgs(q));
+    const [rows, mem] = await Promise.all([call(cmd, searchArgs(q)), memPromise]);
     const modeLabel = searchMode === "hybrid" ? "语义" : searchMode === "transcript" ? "含转写" : "关键词";
-    meta.innerHTML = rows.length
-      ? `<b>${rows.length}</b> hits · ${modeLabel}`
-      : "";
-    $("srows").innerHTML = rows.length ? rows.map(h => {
+    meta.innerHTML = mem
+      ? ((rows.length || mem.rows.length)
+        ? `资产 <b>${rows.length}</b> hits · 记忆 <b>${mem.rows.length}</b> hits · ${modeLabel}+记忆`
+        : "")
+      : (rows.length ? `<b>${rows.length}</b> hits · ${modeLabel}` : "");
+    // 资产分区：行渲染现状不变；含记忆开启时置通道分区标题（§2.3）。
+    const assetRows = rows.length ? rows.map(h => {
       const fp = fpOf(h.content_id);
       return `<article class="hit" style="--fp: ${fp}">
         <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
@@ -211,6 +226,22 @@ async function doSearch() {
     }).join("") : `<div class="empty">没有找到「${esc(q.slice(0, 24))}」——换个更短的关键词${
       searchMode === "hybrid" ? "" : "，或切到「语义」模式放宽匹配"
     }。</div>`;
+    // 记忆分区（§2.3：分区标题标明通道名；行 = content 截断 + tags + score，
+    // 全部动态插值经 esc；空态/错误态沿既有 .empty 样式）。
+    let memSection = "";
+    if (mem) {
+      memSection = `<div class="section-tag">记忆通道 · memory_search</div>` + (mem.error
+        ? `<div class="empty">记忆通道不可用——见顶部错误提示。</div>`
+        : mem.rows.length
+          ? `<table class="panel-table" aria-label="记忆命中"><thead><tr><th>内容</th><th>tags</th><th>score</th></tr></thead><tbody>${
+              mem.rows.map((m) => `
+                <tr class="mem-row"><td>${esc(trunc(m.content, 90))}</td>
+                <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
+                <td class="size">${(m.score ?? 0).toFixed(2)}</td></tr>`).join("")}</tbody></table>`
+          : `<div class="empty">记忆通道无命中。</div>`);
+    }
+    $("srows").innerHTML = (mem ? `<div class="section-tag">资产通道 · ${modeLabel}检索</div>` : "")
+      + assetRows + memSection;
   } catch (e) {
     const kind = e?.kind ?? "Internal";
     meta.innerHTML = "";
