@@ -1,6 +1,7 @@
 //! MCP Server 实现（RMCP 2026-07-28 stateless，SPEC M4-WP03）
 //!
 //! 工具清单：asset_search / asset_read / asset_organize / dataset_export / job_status
+//!          + memory_write / memory_search / memory_verify（M9-WP02-T04）
 //! 传输：stdio（`rmcp::transport::io::stdio()`），无连接状态。
 //!
 //! 错误口径（rmcp 3.4.0 `call_tool` 契约，见 `ServerHandler::call_tool` 文档）：
@@ -295,6 +296,8 @@ pub struct McpServerState {
     index_engine: RwLock<Option<Arc<partisync_index::search::engine::IndexEngine>>>,
     /// Graph SQLite 连接池（读写）。
     graph_pool: SqlitePool,
+    /// memory 工具面 Store（M9-WP02-T04；与 graph_pool 同源共享，懒初始化）。
+    memory_store: tokio::sync::OnceCell<Arc<partisync_graph::Store>>,
     /// WASM 扩展注册表（M7-WP01-T04 第 3 步；`None` = 未装载）。
     ext_registry: crate::ext::SharedRegistry,
 }
@@ -328,9 +331,22 @@ impl McpServerState {
     pub fn from_pool(pool: SqlitePool) -> Self {
         Self {
             index_engine: RwLock::new(None),
-            graph_pool: pool,
+            graph_pool: pool.clone(),
+            memory_store: tokio::sync::OnceCell::new(),
             ext_registry: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// memory 工具面 Store（懒初始化：迁移幂等重跑；首用时建）。
+    async fn graph_store(&self) -> Result<&Arc<partisync_graph::Store>, ErrorData> {
+        self.memory_store
+            .get_or_try_init(|| async {
+                partisync_graph::Store::from_pool(self.graph_pool.clone())
+                    .await
+                    .map(Arc::new)
+            })
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("graph store 初始化失败: {e}"), None))
     }
 
     /// 注入索引引擎（WP02 IndexEngine）。
@@ -444,6 +460,45 @@ fn all_tools() -> Vec<Tool> {
                 }
             })),
         ),
+        // M9-WP02-T04：可验证记忆层三工具（SPEC M9-WP02 §2.4；
+        // tools/list schema = 对外唯一权威契约）。
+        Tool::new(
+            "memory_write",
+            "Write a verifiable memory record (content-addressed, idempotent; leaf of the RFC 6962-style proof tree)",
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Memory content (non-empty, max 64KiB)"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags (max 32 items)"},
+                    "metadata": {"type": "object", "description": "Optional JSON object metadata (max 16KiB)"}
+                },
+                "required": ["content"]
+            })),
+        ),
+        Tool::new(
+            "memory_search",
+            "Search verifiable memories: SQLite full-text (FTS5 trigram) with LIKE fallback; exact tag filter; exact memory_id lookup",
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Full-text query over content"},
+                    "tag": {"type": "string", "description": "Exact tag filter"},
+                    "memory_id": {"type": "string", "description": "Exact memory lookup (overrides query)"},
+                    "limit": {"type": "number", "default": 20, "description": "Max results (default 20)"},
+                    "offset": {"type": "number", "default": 0, "description": "Result offset (default 0)"}
+                }
+            })),
+        ),
+        Tool::new(
+            "memory_verify",
+            "Verify the memory commitment: snapshot root vs recomputed root (no id) or single-leaf inclusion proof (with id). Read-only.",
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "Memory ID for single-leaf inclusion proof; omit for whole-store verification"}
+                }
+            })),
+        ),
         // M7-WP01-T04：扩展列举工具（内建）。桌面壳 UI 经 mcp_call("ext_list")
         // 拿到扩展工具清单——零 IPC 扩口（SPEC §2.3 约定）。
         Tool::new(
@@ -465,7 +520,8 @@ impl ServerHandler for McpServerState {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "PartiSync asset tools: asset_search / asset_read / asset_organize / \
-                 dataset_export / job_status. All calls are stateless.",
+                 dataset_export / job_status. Verifiable memory tools (M9-WP02): \
+                 memory_write / memory_search / memory_verify. All calls are stateless.",
         )
     }
 
@@ -522,6 +578,9 @@ impl ServerHandler for McpServerState {
             "asset_organize" => self.asset_organize(&args).await,
             "dataset_export" => self.dataset_export(&args).await,
             "job_status" => self.job_status(&args).await,
+            "memory_write" => self.memory_write(&args).await,
+            "memory_search" => self.memory_search(&args).await,
+            "memory_verify" => self.memory_verify(&args).await,
             "ext_list" => self.ext_list().await,
             name if name.starts_with("ext_") => self.call_extension(name, &args).await,
             other => {
@@ -535,6 +594,157 @@ impl ServerHandler for McpServerState {
         match result {
             Ok(r) => Ok(CallToolResponse::Complete(r)),
             Err(e) => Err(e),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// memory 工具面（M9-WP02-T04，SPEC M9-WP02 §2.4）
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct MemoryWriteInput {
+    content: String,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    metadata: Option<JsonValue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemorySearchInput {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    memory_id: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    offset: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryVerifyInput {
+    #[serde(default)]
+    memory_id: Option<String>,
+}
+
+impl McpServerState {
+    /// `memory_write`：内容寻址幂等写 + 根快照刷新（写入口在 graph
+    /// Store：oplog + 行 + 根一次完成）。限界（SPEC §2.4）：content
+    /// 非空 ≤64KiB / tags ≤32 项 / metadata object ≤16KiB——超限工具级
+    /// 错误，不截断、不静默。
+    async fn memory_write(&self, args: &JsonValue) -> Result<CallToolResult, ErrorData> {
+        let input: MemoryWriteInput = match serde_json::from_value(args.clone()) {
+            Ok(v) => v,
+            Err(e) => return Err(ErrorData::invalid_params(e.to_string(), None)),
+        };
+        if input.content.is_empty() {
+            return tool_err("memory content 不能为空");
+        }
+        if input.content.len() > 64 * 1024 {
+            return tool_err(format!(
+                "memory content 超限: {} bytes > 64KiB",
+                input.content.len()
+            ));
+        }
+        if input.tags.as_ref().is_some_and(|t| t.len() > 32) {
+            return tool_err(format!(
+                "memory tags 超限: {} 项 > 32",
+                input.tags.as_ref().map_or(0, Vec::len)
+            ));
+        }
+        let metadata = input
+            .metadata
+            .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
+        if !metadata.is_object() {
+            return tool_err("memory metadata 必须为 JSON object");
+        }
+        if metadata.to_string().len() > 16 * 1024 {
+            return tool_err(format!(
+                "memory metadata 超限: {} bytes > 16KiB",
+                metadata.to_string().len()
+            ));
+        }
+        let store = self.graph_store().await?;
+        let outcome = match store
+            .memory_write(
+                &input.content,
+                input.tags.as_deref().unwrap_or(&[]),
+                &metadata,
+            )
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => return tool_err(format!("memory_write 失败: {e}")),
+        };
+        let root = match store.memory_root_snapshot().await {
+            Ok(s) => s.map(|snap| snap.root),
+            Err(e) => return tool_err(format!("memory_write 读根失败: {e}")),
+        };
+        ok_json(&serde_json::json!({
+            "memory_id": outcome.memory_id,
+            "deduplicated": outcome.deduplicated,
+            "root": root,
+        }))
+    }
+
+    /// `memory_search`：FTS5 trigram / LIKE 兜底 + tag 精确过滤 + id 精确查。
+    async fn memory_search(&self, args: &JsonValue) -> Result<CallToolResult, ErrorData> {
+        let input: MemorySearchInput = match serde_json::from_value(args.clone()) {
+            Ok(v) => v,
+            Err(e) => return Err(ErrorData::invalid_params(e.to_string(), None)),
+        };
+        let store = self.graph_store().await?;
+        let report = store
+            .memory_search(
+                input.query.as_deref(),
+                input.tag.as_deref(),
+                input.memory_id.as_deref(),
+                input.limit.unwrap_or(20),
+                input.offset.unwrap_or(0),
+            )
+            .await;
+        let report = match report {
+            Ok(r) => r,
+            Err(e) => return tool_err(format!("memory_search 失败: {e}")),
+        };
+        ok_json(&report)
+    }
+
+    /// `memory_verify`（只读）：无 id = 全库快照根 vs 重算根 + 列级校验；
+    /// 有 id = 单叶包含证明（自包含验证，不需数据库）。
+    async fn memory_verify(&self, args: &JsonValue) -> Result<CallToolResult, ErrorData> {
+        let input: MemoryVerifyInput = match serde_json::from_value(args.clone()) {
+            Ok(v) => v,
+            Err(e) => return Err(ErrorData::invalid_params(e.to_string(), None)),
+        };
+        let store = self.graph_store().await?;
+        match input.memory_id {
+            None => {
+                let report = match store.verify_memory().await {
+                    Ok(r) => r,
+                    Err(e) => return tool_err(format!("memory_verify 失败: {e}")),
+                };
+                ok_json(&serde_json::json!({
+                    "root": report.snapshot_root,
+                    "memory_count": report.memory_count,
+                    "recomputed_root": report.recomputed_root,
+                    "ok": report.ok,
+                }))
+            }
+            Some(id) => {
+                let rows = match store.memory_rows().await {
+                    Ok(r) => r,
+                    Err(e) => return tool_err(format!("memory_verify 失败: {e}")),
+                };
+                match partisync_graph::memory::inclusion_proof(&rows, &id) {
+                    Some(proof) => ok_json(&proof),
+                    None => tool_err(format!("memory 不存在: {id}")),
+                }
+            }
         }
     }
 }
@@ -1628,9 +1838,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_tools_returns_six() {
+    async fn list_tools_returns_nine() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 9);
         let names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
         for n in [
             "asset_search",
@@ -1638,6 +1848,9 @@ mod tests {
             "asset_organize",
             "dataset_export",
             "job_status",
+            "memory_write",
+            "memory_search",
+            "memory_verify",
             "ext_list",
         ] {
             assert!(names.contains(&n.to_string()), "missing tool {n}");
