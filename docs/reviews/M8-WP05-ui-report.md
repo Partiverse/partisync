@@ -67,9 +67,9 @@
 | # | 债 | 来源 | 处置 |
 |---|---|---|---|
 | D1 | oplog ACK 排水后 sync_stats 归零，与「已应用」累计标签口径冲突——engine 接线时 devices/last_sync 改由 `sync_watermark`（持久、不被 trim）派生 | T3 AI 审查 F1（P2） | 引擎写路径接线任务（独立，对账语义先行）落地时一并处理 |
-| D2 | 时间线/历史等 innerHTML 插值未转义（沿 v3 判例，CSP `script-src 'self'` 已挡 inline 事件，残留 markup 破格风险）——统一 `escapeHtml` UI 硬化 | T3 AI 审查 F2（P3） | 独立 UI 硬化任务，不在功能 PR 顺手修 |
-| D3 | 详情面板测试空库路径覆盖（T02 登记延续） | T2 | 随下一桌面任务顺带补测试 |
-| D4 | 转写检索开关为 N4 纯透传语义标注（include_transcript 后端常开） | T2 | 维持，后端开关化时回改 |
+| D2 | ~~时间线/历史等 innerHTML 插值未转义（沿 v3 判例，CSP `script-src 'self'` 已挡 inline 事件，残留 markup 破格风险）——统一 `escapeHtml` UI 硬化~~ **已清账（2026-10-04）**：24 站点动态插值收敛 `esc()` helper（M9-WP03-T01，PR #135；ui_hardening.rs 三探针绿——esc 定义唯一含五字符 / 裸插值禁列零命中 / 收敛规模对账）；全 tab 巡检截图挂 T04 人工 | T3 AI 审查 F2（P3） | 已闭环（巡检挂 T04） |
+| D3 | ~~详情面板测试空库路径覆盖（T02 登记延续）~~ **已清账（2026-10-04）**：空库路径已有 `t02_asset_detail_empty_db_returns_empty_copies` 覆盖（commands.rs:346）——M9-WP03-T01 验证后确认既有，未新增重复测试（沿「先验证再动手」判例） | T2 | 已闭环 |
+| D4 | ~~转写检索开关为 N4 纯透传语义标注（include_transcript 后端常开）~~ **已清账（2026-10-04）**：IPC `include_transcript: Option<bool>` 显式接线 + UI「含转写」开关显式传值 + bm25 `parser_no_tx` 补齐（false 真实生效）——M9-WP03-T01（PR #135；`t01_search_include_transcript_toggle_wiring` + 静态探针绿） | T2 | 已闭环 |
 | D5 | ~~Mimosa `scanner_enobufs` 反复出现，deep 完整审计重跑~~ **已清账（2026-10-02）**：deep 复扫 `scan-2026-10-02T15-25-41.420Z-0a39454d7cbc`（seal `sha256:6163689e…`）全程无 enobufs，唯一 HIGH advisory 与 M6-report §5.1 已签收误报同源（M8-WP00 台账行已更新复扫记录） | hook 提示 ×3+ | 已闭环（登记不构成安全放行结论） |
 | D6 | ~~T4 全 tab 视觉巡检待 GUI 验证~~ **已清账（2026-10-02 晚）**：7 张截图归档 + demo_echo 真调用 + visual-judge 评审；随带修复 browse/dups/jobs 空态动作邀请缺口（judge 首轮 3 fail → 整改） | AGENTS.md 验收规则 | 已闭环 |
 
