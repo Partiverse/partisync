@@ -13,10 +13,12 @@ pub mod host_state;
 pub mod inject;
 pub mod manifest;
 pub mod registry;
+pub mod signature;
 pub use host_state::{HostState, IndexError, IndexRead, MAX_QUERY_BYTES};
 pub use inject::linker_for;
 pub use manifest::{Capability, Manifest, ManifestError, ValidateError};
 pub use registry::{CallError, ExtRegistry, ExtTool, LoadError};
+pub use signature::{anchored_pubkeys, pubkey_from_base64, verify, SignatureError, ANCHOR_PUBKEYS};
 
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Cache, CacheConfig, Config, Engine};

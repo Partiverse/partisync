@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use partisync_ext_host::{ExtRegistry, HostState, IndexError, IndexRead, LoadError};
 
+mod common;
+
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -33,7 +35,9 @@ fn write_manifest(dir: &std::path::Path, stem: &str, body: &str) -> std::path::P
 
 #[test]
 fn load_and_call_demo_tool() {
-    let tool = partisync_ext_host::registry::ExtTool::load(
+    // [P21] 起正路装载经测试钥锚（fixtures 签名钥；SPEC §4「测试钥签名
+    // 路径」）——`load_with_anchors` 为 `load` 核心体，装载序一致。
+    let tool = partisync_ext_host::registry::ExtTool::load_with_anchors(
         fixture("demo_tool.wasm"),
         write_manifest(
             &std::env::temp_dir(),
@@ -41,6 +45,7 @@ fn load_and_call_demo_tool() {
             r#"{"tool_name":"demo_ext","capabilities":[]}"#,
         ),
         HostState::without_index(),
+        &common::test_anchor(),
     )
     .expect("demo_tool 装载成功");
     assert_eq!(tool.manifest().tool_name, "demo_ext");
@@ -69,10 +74,12 @@ fn load_rejects_unwired_index_read() {
         "ext",
         r#"{"tool_name":"needs_index","capabilities":["index.read"]}"#,
     );
-    let err = partisync_ext_host::registry::ExtTool::load(
+    // 验签（[P21]）位于 preflight 之前——签名须先通过方达 preflight 拒绝
+    let err = partisync_ext_host::registry::ExtTool::load_with_anchors(
         fixture("demo_tool.wasm"),
         &manifest,
         HostState::without_index(),
+        &common::test_anchor(),
     )
     .expect_err("未接线时 preflight 必须装载期拒绝");
     assert!(matches!(err, LoadError::Preflight(IndexError::NotWired)));
@@ -88,10 +95,11 @@ fn load_accepts_wired_index_read() {
         "ext",
         r#"{"tool_name":"uses_index","capabilities":["index.read"]}"#,
     );
-    let tool = partisync_ext_host::registry::ExtTool::load(
+    let tool = partisync_ext_host::registry::ExtTool::load_with_anchors(
         fixture("demo_tool.wasm"),
         &manifest,
         HostState::with_index(Arc::new(EchoIndex)),
+        &common::test_anchor(),
     )
     .expect("已接线的 index.read 声明必须装载成功");
     let out = tool.call("x").expect("call 成功");
@@ -102,8 +110,20 @@ fn load_accepts_wired_index_read() {
 #[test]
 fn scan_directory_convention() {
     let dir = tempfile::tempdir().unwrap();
+    // [P21] 起三文件配对：`.wasm` + `.json` + `.minisig`（签名随 fixture
+    // 同步拷贝；scan 核心体经测试钥锚装载——SPEC §4「测试钥签名路径」）。
     std::fs::copy(fixture("demo_tool.wasm"), dir.path().join("alpha.wasm")).unwrap();
+    std::fs::copy(
+        fixture("demo_tool.minisig"),
+        dir.path().join("alpha.minisig"),
+    )
+    .unwrap();
     std::fs::copy(fixture("demo_tool.wasm"), dir.path().join("beta.wasm")).unwrap();
+    std::fs::copy(
+        fixture("demo_tool.minisig"),
+        dir.path().join("beta.minisig"),
+    )
+    .unwrap();
     write_manifest(
         dir.path(),
         "alpha",
@@ -115,7 +135,12 @@ fn scan_directory_convention() {
         r#"{"tool_name":"beta_tool","capabilities":[]}"#,
     );
 
-    let registry = ExtRegistry::scan(dir.path(), &HostState::without_index()).expect("scan 成功");
+    let registry = ExtRegistry::scan_with_anchors(
+        dir.path(),
+        &HostState::without_index(),
+        &common::test_anchor(),
+    )
+    .expect("scan 成功");
     assert_eq!(registry.len(), 2);
     let names: Vec<_> = registry
         .manifests()
@@ -139,12 +164,18 @@ fn scan_directory_convention() {
 fn scan_rejects_duplicate_tool_names() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(fixture("demo_tool.wasm"), dir.path().join("a.wasm")).unwrap();
+    std::fs::copy(fixture("demo_tool.minisig"), dir.path().join("a.minisig")).unwrap();
     std::fs::copy(fixture("demo_tool.wasm"), dir.path().join("b.wasm")).unwrap();
+    std::fs::copy(fixture("demo_tool.minisig"), dir.path().join("b.minisig")).unwrap();
     write_manifest(dir.path(), "a", r#"{"tool_name":"same","capabilities":[]}"#);
     write_manifest(dir.path(), "b", r#"{"tool_name":"same","capabilities":[]}"#);
 
-    let err =
-        ExtRegistry::scan(dir.path(), &HostState::without_index()).expect_err("撞名必须装载期拒绝");
+    let err = ExtRegistry::scan_with_anchors(
+        dir.path(),
+        &HostState::without_index(),
+        &common::test_anchor(),
+    )
+    .expect_err("撞名必须装载期拒绝");
     assert!(matches!(err, LoadError::Duplicate(_)), "撞名错误：{err}");
 }
 

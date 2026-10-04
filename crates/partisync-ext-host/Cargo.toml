@@ -10,6 +10,7 @@ publish = false
 wasmtime = { workspace = true }
 serde = { workspace = true } # manifest 模块：Manifest 类型序列化
 serde_json = { workspace = true } # manifest 模块：load() JSON 解析
+minisign-verify = { workspace = true } # P21 装载期验签（SPEC M9-WP04 §2.2 / ADR-0030）
 # SPEC M7-WP01 §2.1：宿主 crate 仅依赖 core；索引只读经 IndexRead trait
 # 由 gateway 注入（T04 接线时引入），T01 骨架暂无内部依赖。
 

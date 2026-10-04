@@ -3,6 +3,8 @@
 use partisync_ext_host::registry::{ExtRegistry, FUEL_BUDGET};
 use partisync_ext_host::HostState;
 
+mod common;
+
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -30,10 +32,12 @@ fn t01_spin_loop_terminated_by_epoch() {
     ));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let mut reg = ExtRegistry::empty();
-    reg.register(
+    // [P21] 正路注册经测试钥锚（SPEC §4「测试钥签名路径」）
+    reg.register_with_anchors(
         fixture("spin_loop.wat"),
         write_manifest(&dir, "spin", r#"{"tool_name":"spin","capabilities":[]}"#),
         &HostState::without_index(),
+        &common::test_anchor(),
     )
     .expect("spin_loop 装载成功");
     let call = reg.call("spin", r#"{}"#).expect("call handle");
@@ -58,10 +62,11 @@ fn t01_spin_loop_terminated_by_epoch() {
 
     // 线程释放：同一批注册表上正常工具可继续调用（demo_tool 复用）
     let mut reg2 = ExtRegistry::empty();
-    reg2.register(
+    reg2.register_with_anchors(
         fixture("demo_tool.wasm"),
         write_manifest(&dir, "demo", r#"{"tool_name":"demo","capabilities":[]}"#),
         &HostState::without_index(),
+        &common::test_anchor(),
     )
     .expect("demo_tool 装载成功");
     let call = reg2.call("demo", r#"{}"#).expect("call handle");
@@ -84,10 +89,11 @@ fn t01_fuel_budget_constant_and_normal_tool_unaffected() {
     ));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let mut reg = ExtRegistry::empty();
-    reg.register(
+    reg.register_with_anchors(
         fixture("demo_tool.wasm"),
         write_manifest(&dir, "demo", r#"{"tool_name":"demo","capabilities":[]}"#),
         &HostState::without_index(),
+        &common::test_anchor(),
     )
     .expect("demo_tool 装载成功");
     let call = reg.call("demo", r#"{"k":"v"}"#).expect("call handle");
@@ -109,10 +115,11 @@ fn t01_regression_smoke_on_epoch_engine() {
     ));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let mut reg = ExtRegistry::empty();
-    reg.register(
+    reg.register_with_anchors(
         fixture("demo_tool.wasm"),
         write_manifest(&dir, "demo", r#"{"tool_name":"demo","capabilities":[]}"#),
         &HostState::without_index(),
+        &common::test_anchor(),
     )
     .expect("装载成功");
     let call = reg.call("demo", r#"{}"#).expect("call handle");
