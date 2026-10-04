@@ -11,7 +11,7 @@
 | **Task-ID** | M9-WP05-T01 |
 | **类型** | 起草 + 骨架实装（文档 PR + 代码 PR 堆叠；PR1 = R0 纯文档，PR2 = R1 hub 侧新模块零数据面） |
 | **优先级** | P1（M9-WP00 §1-WP05/§4 债表 G8 行「MCP 仅本地 stdio」的兑现任务；窗口敏感项） |
-| **范围** | SPEC M9-WP05 全文 + 评估文档（差距面 G-1..G-6/A-1..A-5 + 威胁模型 T-R1..T-R7 + 结论）+ 本卡（PR1）；partisync-hub mcp_remote 骨架 + 探针 + hub-demo 接线（PR2）。评估与骨架拆两个堆叠 PR，均挂本 Task-ID（沿 M9-WP04-T02 判例 #143–#145） |
+| **范围** | SPEC M9-WP05 全文 + 评估文档（差距面 G-1..G-6/A-1..A-5 + 威胁模型 T-R1..T-R7 + 结论）+ 本卡（PR1）；partisync-hub mcp_remote 骨架 + hub-demo 接线（PR2）+ 探针与切分修订（PR3）。评估/实装/探针三个堆叠 PR，均挂本 Task-ID（沿 M9-WP04-T02 判例 #143–#145；实装/探针拆分由铁律 3 ≤400 行触发，SPEC 0.2 修订） |
 | **创建日期** | 2026-10-04 |
 | **来源** | M9-WP00 §1-WP05/§4 债表 G8 + M9-roadmap-proposal §3-δ/§5-WP05/§6-G8 + M8 前瞻 G8 + M7-WP03-enterprise-topics §2（威胁模型判例）+ M5-WP04 v0.1 mock 边界判例 |
 
@@ -57,17 +57,23 @@
 - mock 边界沿 M5-WP04 v0.1 判例（SPEC M5-WP04 §v0.1 外部依赖策略：
   stub 落既有依赖、正式 SDK/接线另立）。
 
-## 验收
+## 验收（实施期回填，2026-10-04）
 
-- [ ] docs/specs/M9-WP05.md 落盘：§2 契约（评估三要素 + 骨架端点面 +
+- [x] docs/specs/M9-WP05.md 落盘：§2 契约（评估三要素 + 骨架端点面 +
       mock 边界明示）+ §3 任务切分 + §4 可执行验收 + §5 非目标 + §6
-      文件清单 + §7 风险六项；
-- [ ] docs/reviews/M9-WP05-mcp2-remote-eval.md 落盘：差距面（G-1..G-6
+      文件清单 + §7 风险六项（PR1 #147 合入）；
+- [x] docs/reviews/M9-WP05-mcp2-remote-eval.md 落盘：差距面（G-1..G-6
       / A-1..A-5）+ 威胁模型（T-R1..T-R7 表）+ 结论 + 开放问题
-      O1..O4；
-- [ ] 本卡落盘（先卡后工）；
-- [ ] PR2 骨架探针全绿：PRM 四字段 / 401 挑战 / initialize 握手 /
-      202 / 404+-32601 / mock Bearer 放行边界；
-- [ ] 零新增顶层依赖 + fmt/clippy/test 门禁全绿；
-- [ ] 产品依赖图变更仅限 partisync-hub 新模块（hub-demo 演示面接线），
-      gateway/桌面/CLI 零触碰。
+      O1..O4（PR1 #147 合入）；
+- [x] 本卡落盘（先卡后工）；
+- [x] 骨架实装合入（PR2 #148）：mcp_remote 模块 + lib/demo 接线，
+      PR CI 8/8 绿（fmt/clippy/deny/gate/interop/task-ids/test
+      ubuntu+macos）；零新增顶层依赖（diff 无 Cargo.toml）；
+- [x] 骨架探针全绿：`cargo test -p partisync-hub --test wp05_mcp_remote`
+      10/10（PRM 四字段 / 401 挑战双路 / initialize 握手含 skeleton
+      标注 / mock Bearer 放行边界 / 202 / 404+-32601 / 400+-32600 /
+      常量形状 / 模块 doc mock 边界静态断言）；随 PR3 入仓；
+- [x] fmt/clippy/test 门禁全绿（fmt/clippy 本地实跑 + PR #148 CI
+      test ubuntu/macos + hub crate 全量 0 failed 本地实跑）；
+- [x] 产品依赖图变更仅限 partisync-hub 新模块（hub-demo 演示面接线），
+      gateway/桌面/CLI 零触碰（PR #148 diff 实证：3 文件 231 行）。
