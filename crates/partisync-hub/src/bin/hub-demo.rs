@@ -3,6 +3,10 @@
 //! 语义诚实（沿用 partisync-cli 演示面惯例）：全部读写打在真实 `HashPlane`
 //! （fjall 3.1，ADR-0011）上，无 mock；绑定 127.0.0.1，无鉴权——公网暴露前
 //! 必须加鉴权。启动：`cargo run -p partisync-hub --bin hub-demo -- --root <dir>`
+//!
+//! M9-WP05-T01 起 `/mcp` + PRM 端点挂载为**骨架**（`partisync_hub::
+//! mcp_remote`）：401 挑战是 mock 形状（Bearer 存在即放行），不构成真鉴权；
+//! 演示面其余路由仍完全无鉴权。
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -44,7 +48,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/entries", get(list_entries).post(create_entry))
         .route("/api/entries/{id}", delete(remove_entry))
         .route("/api/shards", get(shard_stats))
-        .with_state(app);
+        .with_state(app)
+        // M9-WP05-T01：远程 MCP 端点骨架挂演示面（SPEC docs/specs/M9-WP05.md
+        // §2.2）——mock 边界见 mcp_remote 模块 doc（token 不验证，仅
+        // 127.0.0.1 演示面，不承诺生产可用）。
+        .merge(partisync_hub::mcp_remote::RemoteMcpSkeleton::default().router());
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("演示面：http://{addr}  （Ctrl-C 退出）");
     axum::serve(listener, router).await?;

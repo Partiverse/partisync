@@ -13,6 +13,7 @@ pub mod federation;
 pub mod iroh_channel;
 pub mod iroh_keyspace;
 pub mod ksconv;
+pub mod mcp_remote;
 pub mod net;
 pub mod quota;
 pub mod raft_store;
