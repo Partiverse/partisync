@@ -432,16 +432,164 @@ async function loadSync(animate = false) {
   }
 }
 
+// ── H. 记忆浏览面板（M9-WP03-T02；SPEC §2.2）——mcp_call 透传
+// memory_search / memory_write / memory_verify 三工具，桌面 Rust 侧零新增
+// command。真实 sidecar 返回 rmcp CallToolResult（camelCase：content /
+// structuredContent / isError）——解包沿 ext 面（structuredContent ?? r）
+// 判例；工具级错误（isError=true，文本在 content[]）解出后走 error-region
+// 既有链路（SPEC §2.2：工具级错误文本透传显示）。
+function mcPayload(r) {
+  if (r?.isError) {
+    const text = (r.content ?? []).map((c) => c?.text ?? "").filter(Boolean).join(" ")
+      || "memory 工具返回错误（无错误文本）";
+    showError(`[Memory] ${text}`);
+    throw new Error(text);
+  }
+  return r?.structuredContent ?? r;
+}
+
+async function memCall(tool, args) {
+  // IPC 层失败由 call() 直接走 error-region；工具级错误由 mcPayload 走。
+  return mcPayload(await call("mcp_call", { tool, args }));
+}
+
+// tags canonical JSON 串（memory.rs canonical_tags）→ 逗号列表；解析失败原样透出。
+function memTags(s) {
+  try {
+    const arr = JSON.parse(s);
+    return Array.isArray(arr) ? arr.join(", ") : String(s ?? "");
+  } catch { return String(s ?? ""); }
+}
+
+// 验证状态区：memory_verify（无 id）→ 根 hex 截断 + memory_count + ok 徽章。
+async function loadMemVerify() {
+  try {
+    const v = await memCall("memory_verify", {});
+    $("mem-root").textContent = v.root ? `${v.root.slice(0, 16)}…` : "—";
+    $("mem-banner-text").innerHTML = `<b>${esc(v.memory_count)}</b> 条记忆 · 承诺验证`;
+    const badge = $("mem-ok");
+    badge.style.display = "";
+    badge.textContent = v.ok ? "OK" : "FAIL";
+    badge.classList.toggle("ok", !!v.ok);
+    badge.classList.toggle("bad", !v.ok);
+    $("mem-banner").classList.toggle("alert", !v.ok);
+  } catch (e) {
+    $("mem-banner-text").textContent = "记忆承诺不可用（sidecar 未启动或库不可读）";
+    $("mem-ok").style.display = "none";
+    $("mem-root").textContent = "";
+  }
+}
+
+// 列表/检索：query/tag 空则不带键（全量列表），limit/offset 恒传（§2.2 契约）。
+async function loadMemories() {
+  const q = $("mem-q").value.trim();
+  const tag = $("mem-tag").value.trim();
+  const args = { limit: 50, offset: 0 };
+  if (q) args.query = q;
+  if (tag) args.tag = tag;
+  $("mem-meta").innerHTML = "检索中…";
+  try {
+    const r = await memCall("memory_search", args);
+    const rows = r.results ?? [];
+    $("mem-meta").innerHTML = rows.length ? `<b>${rows.length}</b> / ${r.total ?? rows.length} 条记忆` : "";
+    $("mem-rows").innerHTML = rows.length ? rows.map((m) => `
+      <tr class="mem-row" data-mid="${esc(m.memory_id)}">
+        <td>${esc(trunc(m.content, 90))}</td>
+        <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
+        <td class="mtime">${timeFmt(m.created_ns)}</td>
+        <td class="size">${esc(m.origin_device)}</td>
+        <td class="size">${(m.score ?? 0).toFixed(2)}</td>
+        <td><button class="btn ghost mem-verify-btn" data-mid="${esc(m.memory_id)}">验证</button></td>
+      </tr>`).join("")
+      : `<tr><td colspan="6" class="empty">${q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条"}</td></tr>`;
+  } catch (e) {
+    $("mem-meta").innerHTML = "";
+    $("mem-rows").innerHTML = `<tr><td colspan="6" class="empty">记忆列表加载失败——见顶部错误提示。</td></tr>`;
+  }
+  $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
+    b.onclick = () => memVerifyRow(b.dataset.mid, b);
+  });
+}
+
+// 行级「验证」：memory_verify(memory_id) → 包含证明展开行（单开语义，
+// 再点收起）；proof = {memory_id, leaf_hash, audit_path[], root, ok}。
+async function memVerifyRow(memoryId, btn) {
+  const open = $("mem-rows").querySelector(`tr.mem-proof[data-proof="${CSS.escape(memoryId)}"]`);
+  if (open) { open.remove(); return; }
+  $("mem-rows").querySelectorAll("tr.mem-proof").forEach((tr) => tr.remove());
+  const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(memoryId)}"]`);
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = "验证中…";
+  try {
+    const p = await memCall("memory_verify", { memory_id: memoryId });
+    const tr = document.createElement("tr");
+    tr.className = "mem-proof";
+    tr.dataset.proof = p.memory_id;
+    tr.innerHTML = `<td colspan="6">
+      <span class="mem-badge ${p.ok ? "ok" : "bad"}">${p.ok ? "OK" : "FAIL"}</span>
+      包含证明 · leaf <span class="hash">${esc(p.leaf_hash.slice(0, 16))}…</span>
+      · audit_path <b>${p.audit_path.length}</b> 节点
+      · root <span class="hash">${esc(p.root.slice(0, 16))}…</span></td>`;
+    if (row) row.after(tr); else $("mem-rows").append(tr);
+  } catch {
+    // 工具级错误（如 memory 不存在）已由 mcPayload → error-region 透传。
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+// 写入入口：content + tags（逗号分隔）+ metadata JSON → memory_write；
+// deduplicated=true → 幂等命中提示（琥珀）。metadata 预校验沿工具契约
+// （非空 object），超限/非法形态由服务端工具级错误经 error-region 透传。
+async function memWrite() {
+  const note = $("mem-write-note");
+  const fail = (msg) => { note.className = "mem-note dup"; note.textContent = msg; };
+  const content = $("mem-content").value;
+  if (!content.trim()) { fail("内容不能为空"); return; }
+  const args = { content };
+  const tags = $("mem-write-tags").value.split(",").map((t) => t.trim()).filter(Boolean);
+  if (tags.length) args.tags = tags;
+  const rawMeta = $("mem-metadata").value.trim();
+  if (rawMeta) {
+    let meta;
+    try { meta = JSON.parse(rawMeta); }
+    catch { fail("metadata 不是合法 JSON——留空或写成 {\"k\":\"v\"} 形态"); return; }
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+      fail("metadata 必须为 JSON object"); return;
+    }
+    args.metadata = meta;
+  }
+  note.className = "mem-note";
+  note.textContent = "写入中…";
+  try {
+    const r = await memCall("memory_write", args);
+    if (r.deduplicated) {
+      note.className = "mem-note dup";
+      note.textContent = `幂等命中：同 (content, tags, metadata) 已存在，复用 ${(r.memory_id ?? "").slice(0, 12)}…`;
+    } else {
+      note.className = "mem-note ok";
+      note.textContent = `已写入 ${(r.memory_id ?? "").slice(0, 12)}…（承诺根已刷新）`;
+    }
+    loadMemVerify();
+    loadMemories();
+  } catch (e) {
+    fail("写入失败——见顶部错误提示。");
+  }
+}
+
 // ── 绑定（CSP 禁 inline onclick） ──
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.removeAttribute("aria-current"));
   b.setAttribute("aria-current", "page");
   const t = b.dataset.tab;
-  ["browse", "search", "sync", "dups", "jobs", "ext"].forEach(v => {
+  ["browse", "search", "memory", "sync", "dups", "jobs", "ext"].forEach(v => {
     const el = $(`view-${v}`);
     if (el) el.style.display = v === t ? "" : "none";
   });
   if (t === "browse") browse(curPath);
+  if (t === "memory") { loadMemVerify(); loadMemories(); }
   if (t === "sync") { loadSync(!syncAnimated); syncAnimated = true; }
   if (t === "dups") loadDups();
   if (t === "jobs") loadJobs();
@@ -454,6 +602,11 @@ $("mode-hybrid").addEventListener("change", () => { searchMode = "hybrid"; if ($
 $("mode-transcript").addEventListener("change", () => { searchMode = "transcript"; if ($("q").value.trim()) doSearch(); });
 $("btn-ext-refresh").onclick = loadExtTools;
 $("btn-ext-call").onclick = doExtCall;
+// 记忆面板（M9-WP03-T02）：检索/写入/回车触发；不进 5s 轮询（防行级
+// 证明展开态被打断），切 tab / 写入后刷新。
+$("btn-mem-search").onclick = loadMemories;
+$("mem-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadMemories(); });
+$("btn-mem-write").onclick = memWrite;
 
 setInterval(async () => {
   await loadStats();

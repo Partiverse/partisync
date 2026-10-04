@@ -50,6 +50,16 @@ fn no_raw_interpolation_of_dynamic_fields() {
         "${t.name}",
         "${q.slice",
         "${h.highlight ||",
+        // M9-WP03-T02 记忆面板动态字段（memory_search 命中行 / 包含证明 /
+        // 验证横幅）——字符串插值一律 esc；数字（score.toFixed/length）不入列。
+        "${m.memory_id",
+        "${m.content",
+        "${m.tags",
+        "${m.origin_device",
+        "${p.leaf_hash",
+        "${p.root",
+        "${r.memory_id",
+        "${v.memory_count",
     ];
     let mut leaked = Vec::new();
     for pat in BARE {
@@ -89,5 +99,89 @@ fn transcript_toggle_wired_to_include_transcript() {
     assert!(
         !UI_JS.contains("include_transcript 已在后端常开"),
         "旧 N4「开关仅为语义标注」注释必须移除（诚实化）"
+    );
+}
+
+// ── M9-WP03-T02：记忆浏览面板静态契约（SPEC §2.2） ──
+
+const UI_HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/index.html"));
+
+/// 记忆面板接线（工具名三具全走 mcp_call + payload 形状字面量——与
+/// commands.rs `t02_memory_panel_dataflow_via_stub_sidecar` 的请求行断言
+/// 逐键对账：那边测传输面，这边绑 UI 构造面）。
+#[test]
+fn memory_panel_tools_and_payload_contract() {
+    for tool in ["memory_search", "memory_write", "memory_verify"] {
+        assert!(
+            UI_JS.contains(&format!("memCall(\"{tool}\"")),
+            "面板未接线 {tool}"
+        );
+    }
+    assert!(
+        UI_JS.contains("return mcPayload(await call(\"mcp_call\", { tool, args }));"),
+        "memCall 必须走既有 mcp_call IPC（Rust 侧零新增 command）"
+    );
+    // 工具级错误（CallToolResult isError）文本透传 error-region（§2.2 遥测口径）。
+    assert!(
+        UI_JS.contains("showError(`[Memory] ${text}`);"),
+        "isError 文本必须走 error-region 既有链路"
+    );
+    // memory_search payload：query/tag 条件键 + limit/offset 恒传。
+    assert!(
+        UI_JS.contains("const args = { limit: 50, offset: 0 };"),
+        "limit/offset 必须恒传"
+    );
+    assert!(UI_JS.contains("if (q) args.query = q;"), "query 条件键");
+    assert!(UI_JS.contains("if (tag) args.tag = tag;"), "tag 条件键");
+    // 行级验证 + 写入 payload（tags/metadata 条件键）。
+    assert!(
+        UI_JS.contains("memCall(\"memory_verify\", { memory_id: memoryId })"),
+        "行级「验证」必须按 memory_id 精确查"
+    );
+    assert!(
+        UI_JS.contains("if (tags.length) args.tags = tags;")
+            && UI_JS.contains("args.metadata = meta;"),
+        "写入 payload：tags/metadata 条件键缺失"
+    );
+}
+
+/// 记忆 tab 结构 + DOM id 对账：JS 里 `$()` 引用的 mem*/btn-mem* 元素必须
+/// 在 index.html 存在（双 include_str 对账，防 id 漂移）；tab 切换数组含
+/// memory；5s 轮询面不含记忆 tab（任务卡：防行级证明展开态被打断）。
+#[test]
+fn memory_tab_structure_and_dom_id_parity() {
+    assert!(UI_HTML.contains("data-tab=\"memory\""), "nav 缺「记忆」tab");
+    assert!(
+        UI_HTML.contains("id=\"view-memory\""),
+        "缺 #view-memory section"
+    );
+    assert!(
+        UI_JS.contains("\"browse\", \"search\", \"memory\", \"sync\""),
+        "tab 切换数组未含 memory"
+    );
+    let mut missing: Vec<String> = Vec::new();
+    let mut rest = UI_JS;
+    while let Some(pos) = rest.find("$(\"") {
+        let tail = &rest[pos + 3..];
+        let Some(end) = tail.find('"') else { break };
+        let id = &tail[..end];
+        if (id.starts_with("mem-") || id.starts_with("btn-mem-"))
+            && !UI_HTML.contains(&format!("id=\"{id}\""))
+        {
+            missing.push(id.to_string());
+        }
+        rest = &tail[end + 1..];
+    }
+    assert!(
+        missing.is_empty(),
+        "JS 引用的记忆面板元素在 index.html 缺失：{missing:?}"
+    );
+    // 轮询分支只刷 browse/sync（loadMemories 不进 setInterval 体）。
+    let interval_at = UI_JS.find("setInterval").expect("轮询存在");
+    let interval_body = &UI_JS[interval_at..];
+    let close = interval_body.find("}, 5000);").expect("interval 闭合");
+    assert!(
+        !interval_body[..close].contains("loadMemories"),
+        "记忆面板不得进 5s 轮询（防展开态被打断）"
     );
 }

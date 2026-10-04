@@ -15,6 +15,7 @@
   <nav>
     <button data-tab="browse" aria-current="page">浏览</button>
     <button data-tab="search">检索</button>
+    <button data-tab="memory">记忆</button>
     <button data-tab="sync">同步</button>
     <button data-tab="dups">重复内容</button>
     <button data-tab="jobs">作业</button>
@@ -61,6 +62,36 @@
     </div>
     <div class="result-meta" id="ssearch-meta"></div>
     <div id="srows" class="hits"></div>
+  </section>
+
+  <!-- 记忆（M9-WP03-T02：可验证记忆层浏览面板；经 mcp_call 透传
+       memory_search / memory_write / memory_verify，Rust 侧零新增 command） -->
+  <section id="view-memory" style="display:none">
+    <div class="status-banner" id="mem-banner">
+      <span class="dot"></span>
+      <span id="mem-banner-text">记忆承诺验证中…</span>
+      <span class="mem-badge" id="mem-ok" style="display:none"></span>
+      <time id="mem-root" title="承诺树根（截断展示）"></time>
+    </div>
+    <div class="section-tag">search / memory_search（FTS5 trigram · tag 精确 · limit 50）</div>
+    <form class="query-row" onsubmit="return false">
+      <input id="mem-q" type="search" placeholder="搜记忆内容…" aria-label="记忆检索">
+      <input id="mem-tag" type="search" placeholder="tag 精确过滤" aria-label="tag 过滤" class="mem-tag-input">
+      <button id="btn-mem-search" type="submit">[检索]</button>
+    </form>
+    <div class="result-meta" id="mem-meta"></div>
+    <table class="panel-table" aria-label="记忆条目">
+      <thead><tr><th>内容</th><th>tags</th><th>创建时间</th><th>来源设备</th><th>score</th><th></th></tr></thead>
+      <tbody id="mem-rows"></tbody>
+    </table>
+    <div class="section-tag">write / memory_write（内容寻址幂等）</div>
+    <textarea id="mem-content" rows="3" placeholder="记忆内容（非空，≤64KiB）"></textarea>
+    <div class="mem-write-row">
+      <input id="mem-write-tags" placeholder="tags（逗号分隔，可选）">
+      <input id="mem-metadata" placeholder='metadata JSON object（可选，如 {"source":"gui"}）'>
+      <button id="btn-mem-write" class="btn primary">写入</button>
+    </div>
+    <div id="mem-write-note" class="mem-note"></div>
   </section>
 
   <!-- 同步（M8-WP05-T03：sync_stats/sync_recent 只读呈现；design v4.3 wireframe） -->
