@@ -27,7 +27,7 @@ use partisync_desktop::ipc::{
 };
 use partisync_desktop::mcp_sidecar::McpSidecar;
 use partisync_desktop::state::AppState;
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::test::{mock_builder, mock_context, noop_assets};
 use tauri::Manager;
 use tempfile::TempDir;
@@ -669,4 +669,181 @@ async fn t01_search_include_transcript_toggle_wiring() {
     .await
     .expect("transcript-excluded search");
     assert!(hits.is_empty(), "Some(false) 必须排除转写命中");
+}
+
+// ── M9-WP03-T02：记忆浏览面板数据流（SPEC §2.2 + §3「请求 payload 与
+// §2.2 契约一致」） ──
+
+/// 记忆面板三动作（search / write / verify×2）经 `mcp_call` 透传。stub 沿
+/// [`mcp_call_on_stub_sidecar_returns_result`] 模板升级：按 `params.name`
+/// 回**真实 rmcp CallToolResult 形状**（structuredContent / isError 分支，
+/// mcp.rs `ok_json`/`tool_err` 判例）、回显请求 id（多调用串行不串线）、
+/// 请求行旁路落盘（`$2.req`，`$2` = `--db` 的值）供 payload 逐键断言。
+/// UI 侧 payload 构造由 ui_hardening.rs 静态探针绑定（面板 JS 字面量）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t02_memory_panel_dataflow_via_stub_sidecar() {
+    let tmp = TempDir::new().expect("tempdir");
+    let stub_path = tmp.path().join("stub-memory-panel.sh");
+    let db = tmp.path().join("sidecar.db");
+    std::fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+while read line; do
+  echo "$line" >> "$2.req"
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+  *'"method":"initialize"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"stub","version":"0"}}}' ;;
+  *'"name":"memory_search"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[],"structuredContent":{"results":[{"memory_id":"aa11aa11aa11aa11","content":"GUI panel probe memory <script>","tags":"[\"gui\",\"spec\"]","metadata":{},"created_ns":1728000000000000000,"origin_device":"device-self","score":1.5}],"total":1}}}' ;;
+  *'"name":"memory_write"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[],"structuredContent":{"memory_id":"cc01cc01cc01cc01","deduplicated":true,"root":"dd01dd01dd01dd01"}}}' ;;
+  *'"name":"memory_verify"'*)
+    case "$line" in
+    *'"memory_id":"nope"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[{"type":"text","text":"memory 不存在: nope"}],"isError":true}}' ;;
+    *'"memory_id"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[],"structuredContent":{"memory_id":"aa11aa11aa11aa11","leaf_hash":"ff01ff01ff01ff01","audit_path":["a1","a2"],"root":"ee01ee01ee01ee01","ok":true}}}' ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[],"structuredContent":{"root":"ee01ee01ee01ee01","memory_count":3,"recomputed_root":"ee01ee01ee01ee01","ok":true}}}' ;;
+    esac ;;
+  esac
+done
+"#,
+    )
+    .expect("write stub");
+    let mut perms = std::fs::metadata(&stub_path).expect("stat").permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    std::fs::set_permissions(&stub_path, perms).expect("chmod");
+
+    let mut state = AppState::open(
+        tmp.path().join("test.db"),
+        tmp.path().join("cas"),
+        tmp.path().join("index"),
+    )
+    .await
+    .expect("open state");
+    state.mcp_sidecar = std::sync::Arc::new(McpSidecar::new(
+        stub_path,
+        db.clone(),
+        tmp.path().join("index"),
+    ));
+    let app = mock_builder()
+        .manage(state)
+        .build(mock_context(noop_assets()))
+        .expect("build app");
+    let st = app.state::<AppState>();
+
+    // 1) 列表/检索（loadMemories payload：query/tag 非空 + limit/offset 恒传）
+    let r = mcp_call(
+        st.clone(),
+        McpCallArgs {
+            tool: "memory_search".into(),
+            args: json!({"query": "面板探针", "tag": "gui", "limit": 50, "offset": 0}),
+        },
+    )
+    .await
+    .expect("memory_search");
+    let payload = &r["structuredContent"];
+    assert_eq!(payload["total"], json!(1), "渲染面：result-meta 总数");
+    let hit = &payload["results"][0];
+    for (key, want) in [
+        ("content", json!("GUI panel probe memory <script>")),
+        ("tags", json!("[\"gui\",\"spec\"]")),
+        ("origin_device", json!("device-self")),
+        ("score", json!(1.5)),
+        ("created_ns", json!(1728000000000000000i64)),
+    ] {
+        assert_eq!(hit[key], want, "结果行渲染字段 {key}");
+    }
+
+    // 2) 写入（deduplicated=true = 幂等命中提示的数据面）
+    let r = mcp_call(
+        st.clone(),
+        McpCallArgs {
+            tool: "memory_write".into(),
+            args: json!({"content": "GUI 写入探针", "tags": ["gui"], "metadata": {}}),
+        },
+    )
+    .await
+    .expect("memory_write");
+    assert_eq!(r["structuredContent"]["deduplicated"], json!(true));
+
+    // 3) 验证状态区（无 id：root + memory_count + ok）
+    let r = mcp_call(
+        st.clone(),
+        McpCallArgs {
+            tool: "memory_verify".into(),
+            args: json!({}),
+        },
+    )
+    .await
+    .expect("memory_verify root");
+    assert_eq!(r["structuredContent"]["ok"], json!(true));
+    assert_eq!(r["structuredContent"]["memory_count"], json!(3));
+
+    // 4) 行级验证（包含证明：leaf_hash / audit_path / root / ok）
+    let r = mcp_call(
+        st.clone(),
+        McpCallArgs {
+            tool: "memory_verify".into(),
+            args: json!({"memory_id": "aa11aa11aa11aa11"}),
+        },
+    )
+    .await
+    .expect("memory_verify proof");
+    let proof = &r["structuredContent"];
+    assert_eq!(proof["leaf_hash"], json!("ff01ff01ff01ff01"));
+    assert_eq!(proof["audit_path"].as_array().unwrap().len(), 2);
+    assert_eq!(proof["ok"], json!(true));
+
+    // 5) 工具级错误（isError=true）不是 IPC 错误——面板 mcPayload 解
+    // content[].text 走 error-region 的数据面（SPEC §2.2 遥测口径）。
+    let r = mcp_call(
+        st,
+        McpCallArgs {
+            tool: "memory_verify".into(),
+            args: json!({"memory_id": "nope"}),
+        },
+    )
+    .await
+    .expect("tool-level error must not reject the IPC promise");
+    assert_eq!(r["isError"], json!(true));
+    assert_eq!(r["content"][0]["text"], json!("memory 不存在: nope"));
+
+    // payload 断言：旁路落盘请求行逐键对账（initialize + initialized
+    // 通知同样落盘，按 method == "tools/call" 过滤）。
+    let reqlog = std::fs::read_to_string(format!("{}.req", db.display())).expect("req log");
+    let mut reqs: Vec<Value> = reqlog
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<_, _>>()
+        .expect("parse req lines");
+    reqs.retain(|r| r["method"] == "tools/call");
+    let want_args = [
+        json!({"query": "面板探针", "tag": "gui", "limit": 50, "offset": 0}),
+        json!({"content": "GUI 写入探针", "tags": ["gui"], "metadata": {}}),
+        json!({}),
+        json!({"memory_id": "aa11aa11aa11aa11"}),
+        json!({"memory_id": "nope"}),
+    ];
+    let want_name = [
+        "memory_search",
+        "memory_write",
+        "memory_verify",
+        "memory_verify",
+        "memory_verify",
+    ];
+    assert_eq!(reqs.len(), 5, "三动作共 5 次调用");
+    for (i, req) in reqs.iter().enumerate() {
+        assert_eq!(req["params"]["name"], want_name[i], "req #{i} 工具名");
+        assert_eq!(
+            req["params"]["arguments"], want_args[i],
+            "req #{i} payload 与 §2.2 契约逐键一致"
+        );
+    }
 }
