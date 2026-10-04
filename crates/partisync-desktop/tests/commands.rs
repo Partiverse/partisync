@@ -81,6 +81,7 @@ async fn search_empty_index_returns_no_hits() {
         SearchArgs {
             q: "anything".into(),
             limit: Some(10),
+            include_transcript: None,
         },
     )
     .await
@@ -298,6 +299,7 @@ async fn t01_embedder_not_loaded_on_startup_or_bm25() {
         SearchArgs {
             q: "anything".into(),
             limit: Some(5),
+            include_transcript: None,
         },
     )
     .await
@@ -326,6 +328,7 @@ async fn t01_hybrid_empty_index_returns_no_hits_and_loads_embedder() {
         SearchArgs {
             q: "项目验收报告".into(),
             limit: Some(10),
+            include_transcript: None,
         },
     )
     .await
@@ -596,4 +599,74 @@ async fn mcp_call_memory_tool_passthrough_stub() {
     assert_eq!(result["ok"], json!(true));
     assert_eq!(result["tool"], json!("memory_write"));
     assert_eq!(result["passthrough"], json!(true));
+}
+
+// ── M9-WP03-T01：UI 硬化（SPEC §2.1 N4 开关接线；D3 已由
+// t02_asset_detail_empty_db_returns_empty_copies 覆盖——台账过期验证清账） ──
+
+/// N4 开关接线（SPEC §2.1，§6-R1 拍板 = 开关化）：BM25 索引直种含转写
+/// 文档（`bm25_index().upsert`）——`include_transcript: None`（后端常开
+/// 现状）转写命中；`Some(false)` 排除转写命中；filename 查询不受开关影响。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t01_search_include_transcript_toggle_wiring() {
+    use partisync_index::search::bm25::IndexedDoc;
+
+    let (app, _tmp) = make_app().await;
+    {
+        let engine = app.state::<AppState>().index().await.expect("engine");
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "aa110000".into(),
+                filename: "meeting-notes.pdf".into(),
+                tags: vec![],
+                ocr_text: None,
+                transcript_text: Some("weekly sync recording transcript marker xyzzy".into()),
+                updated_ns: 1,
+            })
+            .expect("seed transcript doc");
+        engine.commit().expect("commit");
+        // OnCommitWithDelay 策略：测试同步语义须显式 reload（bm25.rs:319）
+        engine.bm25_index().reload().expect("reader reload");
+    }
+    let st = app.state::<AppState>();
+
+    // filename 查询：开关不影响 filename/OCR 通道
+    let hits = search(
+        st.clone(),
+        SearchArgs {
+            q: "meeting".into(),
+            limit: Some(10),
+            include_transcript: Some(false),
+        },
+    )
+    .await
+    .expect("filename search");
+    assert_eq!(hits.len(), 1);
+
+    // None（默认）= 后端常开现状：转写命中
+    let hits = search(
+        st.clone(),
+        SearchArgs {
+            q: "xyzzy".into(),
+            limit: Some(10),
+            include_transcript: None,
+        },
+    )
+    .await
+    .expect("default search hits transcript");
+    assert_eq!(hits.len(), 1, "None 必须维持常开语义（转写命中）");
+
+    // Some(false)：转写通道排除 → 不命中
+    let hits = search(
+        st,
+        SearchArgs {
+            q: "xyzzy".into(),
+            limit: Some(10),
+            include_transcript: Some(false),
+        },
+    )
+    .await
+    .expect("transcript-excluded search");
+    assert!(hits.is_empty(), "Some(false) 必须排除转写命中");
 }

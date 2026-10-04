@@ -184,6 +184,10 @@ pub struct Bm25Index {
     writer: RwLock<IndexWriter>,
     reader: IndexReader,
     parser: QueryParser,
+    /// 排除转写字段的解析器（`Bm25Query::include_transcript = false` 走
+    /// 此面——M9-WP03-T01 补齐：此前该参数在 bm25 路径从未被 search()
+    /// 尊重，parser 恒含 tx 字段，「关闭可提升速度/排除转写」名存实亡）。
+    parser_no_tx: QueryParser,
     schema: Schema,
 }
 
@@ -219,11 +223,13 @@ impl Bm25Index {
         let (_id_field, fn_field, tags_field, ocr_field, tx_field, _upd_field) = field_ids(&schema);
         let parser =
             QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field, tx_field]);
+        let parser_no_tx = QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field]);
 
         Ok(Self {
             writer: RwLock::new(writer),
             reader,
             parser,
+            parser_no_tx,
             schema,
         })
     }
@@ -340,10 +346,12 @@ impl Bm25Index {
         let searcher = self.reader.searcher();
 
         let pre_query = cjk_fan_out(&sanitize_query(&q.query));
-        let parsed = self
-            .parser
-            .parse_query(&pre_query)
-            .map_err(|e| err("bm25 parse query", e))?;
+        let parsed = if q.include_transcript {
+            self.parser.parse_query(&pre_query)
+        } else {
+            self.parser_no_tx.parse_query(&pre_query)
+        }
+        .map_err(|e| err("bm25 parse query", e))?;
 
         let (id_field, _fn_field, _tags_field, ocr_field, tx_field, _) = field_ids(&self.schema);
 
