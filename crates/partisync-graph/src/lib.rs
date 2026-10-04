@@ -13,7 +13,10 @@ pub mod store;
 pub mod watch;
 
 pub use journal::{apply_pending, record, Applied, EventKind, JournalEvent};
-pub use memory::{MemoryRootSnapshot, MemoryRow, MemoryWriteOutcome, VerifyReport};
+pub use memory::{
+    MemoryInclusionProof, MemoryRootSnapshot, MemoryRow, MemorySearchHit, MemorySearchReport,
+    MemoryWriteOutcome, VerifyReport,
+};
 pub use store::{
     ApplyConflict, ApplyOutcome, ConflictRow, DupGroup, EntryKind, EntryRow, EntryState,
     EntryVersionRow, PairingSessionRow, SpaceCryptoRow, Stats, Store, TagRow,

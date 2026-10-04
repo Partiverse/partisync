@@ -244,3 +244,56 @@ fn combine(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     h.update(right);
     h.finalize().into()
 }
+
+/// `memory_search` 单条命中（SPEC §2.4：score 为匹配秩，非语义分）。
+#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+pub struct MemorySearchHit {
+    pub memory_id: String,
+    pub content: String,
+    pub tags: String,
+    pub metadata: String,
+    pub created_ns: i64,
+    pub origin_device: String,
+    pub score: f64,
+}
+
+/// `memory_search` 报告（results 按 score 降序、次键 created_ns 降序）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemorySearchReport {
+    pub results: Vec<MemorySearchHit>,
+    pub total: i64,
+}
+
+/// `memory_verify(memory_id)` 单叶包含证明（SPEC §2.3/§2.4 有 id 分支；
+/// 自包含：不需数据库即可验证，hex 编码）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryInclusionProof {
+    pub memory_id: String,
+    pub leaf_hash: String,
+    pub audit_path: Vec<String>,
+    pub root: String,
+    /// 重算即验：`verify_inclusion(leaf, path, idx, n, root)` 恒真
+    /// （构造即验证；字段保留给不信任本进程的下游复核者）。
+    pub ok: bool,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 单叶包含证明（SPEC §2.3 `inclusion_proof`）：rows 按 memory_id 升序
+/// （[`crate::store::Store::memory_rows`] 口径），目标不存在 → None。
+#[must_use]
+pub fn inclusion_proof(rows: &[MemoryRow], memory_id: &str) -> Option<MemoryInclusionProof> {
+    let idx = rows.iter().position(|r| r.memory_id == memory_id)?;
+    let hashes: Vec<[u8; 32]> = rows.iter().map(leaf_hash).collect();
+    let path = audit_path(&hashes, idx)?;
+    let root = tree_root(&hashes);
+    Some(MemoryInclusionProof {
+        memory_id: memory_id.to_string(),
+        leaf_hash: hex(&hashes[idx]),
+        audit_path: path.iter().map(|p| hex(p)).collect(),
+        root: hex(&root),
+        ok: verify_inclusion(&hashes[idx], &path, idx, rows.len(), &root),
+    })
+}
