@@ -7,6 +7,7 @@
 //! 完整子命令矩阵（ls/find/dedupe/serve/sync）随 M0-WP06 与 M1/M2 落地。
 
 mod dav;
+mod reindex;
 mod s3api;
 mod web;
 
@@ -46,10 +47,12 @@ async fn main() {
         Some("find") => find_cmd(&args[1..]).await,
         Some("dedupe") => dedupe_cmd(&args[1..]).await,
         Some("search") => search_cmd(&args[1..]).await,
+        Some("reindex") => reindex::reindex_cmd(&args[1..]).await,
         _ => {
             eprintln!(
                 "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync scan-plan --scheme fs --root <dir> [--prefix /] [--concurrency N] [--journal <path>]  扫描调度 dry-run（分片并行 + 断点续扫）\n  partisync event-drain --source mock [--space <s>] [--journal <path>] [--cursor <tok>]  云事件流增量 journal（v0.1 mock source）\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]
   partisync search <query> [--db <path>] [--index-root <path>] [--mode hybrid|bm25] [--limit N]  混合检索
+  partisync reindex [--db <path>] [--cas <dir>] [--index-root <path>] [--source-root <dir>]  检索索引重建（text/* 全文，M9-WP03-T06）
   partisync sidecar-run <root> [--db <path>] [--sidecar-dir <dir>]   Sidecar 管线（缩略图/EXIF/嵌入）
   partisync sidecar-status [--db <path>]",
                 env!("CARGO_PKG_VERSION")

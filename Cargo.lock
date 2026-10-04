@@ -7508,6 +7508,7 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 
