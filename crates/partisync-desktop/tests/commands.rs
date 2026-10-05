@@ -671,6 +671,99 @@ async fn t01_search_include_transcript_toggle_wiring() {
     assert!(hits.is_empty(), "Some(false) 必须排除转写命中");
 }
 
+/// M10-WP01-T01（「GUI 搜索形同虚设」修复）：命中载荷透出真实文件名——
+/// graph entry 反查回填 filename（孤儿索引行 None，前端回落哈希切片）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t01_search_hit_carries_graph_filename() {
+    use partisync_graph::store::EntryKind;
+    use partisync_index::search::bm25::IndexedDoc;
+
+    let (app, _tmp) = make_app().await;
+    let marker = "quarterly review marker zzzqq";
+    {
+        let engine = app.state::<AppState>().index().await.expect("engine");
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "bb220000".into(),
+                filename: "orphan-row.md".into(), // 索引侧文件名不直接透出——以 graph 反查为准
+                tags: vec![],
+                ocr_text: Some(marker.into()),
+                transcript_text: None,
+                updated_ns: 1,
+            })
+            .expect("seed doc");
+        engine.commit().expect("commit");
+        engine.bm25_index().reload().expect("reload");
+    }
+    // graph 侧建 entry（content 行 + entry 关联 content_id）
+    let st = app.state::<AppState>();
+    st.store
+        .seed_device_volume("dev-a", "Device A", "fp-a")
+        .await
+        .expect("seed");
+    st.store
+        .add_entry(
+            None,
+            "2026Q3-验收报告.md",
+            "/docs/2026Q3-验收报告.md",
+            EntryKind::File,
+            64,
+            1_700_000_000_000_000_000,
+            Some(("bb220000", 64)),
+            None,
+        )
+        .await
+        .expect("entry");
+
+    let hits = search(
+        st.clone(),
+        SearchArgs {
+            q: "zzzqq".into(),
+            limit: Some(10),
+            include_transcript: None,
+        },
+    )
+    .await
+    .expect("search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        hits[0].filename.as_deref(),
+        Some("2026Q3-验收报告.md"),
+        "命中必须透出 graph 真实文件名（修复「GUI 搜索形同虚设」）"
+    );
+
+    // 孤儿索引行（无 graph entry）→ filename None（前端回落哈希切片）
+    {
+        let engine = st.index().await.expect("engine");
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "cc330000".into(),
+                filename: "ghost.md".into(),
+                tags: vec![],
+                ocr_text: Some("orphan marker ggqq".into()),
+                transcript_text: None,
+                updated_ns: 2,
+            })
+            .expect("seed orphan doc");
+        engine.commit().expect("commit");
+        engine.bm25_index().reload().expect("reload");
+    }
+    let hits = search(
+        st,
+        SearchArgs {
+            q: "ggqq".into(),
+            limit: Some(10),
+            include_transcript: None,
+        },
+    )
+    .await
+    .expect("orphan search");
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].filename.is_none(), "孤儿行 filename 置 None");
+}
+
 // ── M9-WP03-T02：记忆浏览面板数据流（SPEC §2.2 + §3「请求 payload 与
 // §2.2 契约一致」） ──
 
