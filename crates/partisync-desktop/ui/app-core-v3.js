@@ -609,6 +609,65 @@ async function loadMemVerify() {
 }
 
 // 列表/检索：query/tag 空则不带键（全量列表），limit/offset 恒传（§2.2 契约）。
+// 命中落 memRows 快照：表头排序只重渲快照、不重发查询（M10-WP02-T01；
+// SPEC §2.1 诚实边界——只排序当前渲染窗口 ≤50 条，服务端 limit:50
+// offset:0 契约不变，meta「N / total」明示窗口语义）。
+let memRows = []; // 最近一次 memory_search 命中快照（服务端原始序）
+let memSort = { key: null, dir: 1 }; // 表头排序态：key ∈ created|score|tags|device；null = 服务端默认序
+
+function memSortValue(m, key) {
+  // tags 键 = memTags() 解析后的逗号列表字典序（非 canonical JSON 原串）；
+  // created/score 数值比较，device 字符串比较；缺失值归 0/空串。
+  if (key === "created") return m.created_ns ?? 0;
+  if (key === "score") return m.score ?? 0;
+  if (key === "tags") return memTags(m.tags);
+  return String(m.origin_device ?? "");
+}
+
+function sortedMemRows() {
+  if (!memSort.key) return memRows; // 默认 = 服务端序（FTS score DESC → created_ns DESC / LIKE created_ns DESC）
+  const k = memSort.key, d = memSort.dir;
+  return memRows.slice().sort((a, b) => {
+    const va = memSortValue(a, k), vb = memSortValue(b, k);
+    return (va < vb ? -1 : va > vb ? 1 : 0) * d; // 同键稳定保序（ES2019 stable sort）
+  });
+}
+
+function memSortClick(key) {
+  memSort = memSort.key !== key ? { key, dir: 1 } // 首点：升序
+    : memSort.dir === 1 ? { key, dir: -1 }        // 再点：反序
+    : { key: null, dir: 1 };                      // 第三点：回默认（服务端序）
+  renderMemRows();
+}
+
+// 表头箭头指示当前排序键与方向（↑ 升序 / ↓ 降序；aria-sort 同步）。
+function renderMemSortHeads() {
+  document.querySelectorAll("th[data-mem-sort]").forEach((th) => {
+    const on = th.dataset.memSort === memSort.key;
+    th.classList.toggle("mem-sort-on", on);
+    th.setAttribute("aria-sort", on ? (memSort.dir === 1 ? "ascending" : "descending") : "none");
+    th.querySelector(".mem-sort-arrow").textContent = on ? (memSort.dir === 1 ? "↑" : "↓") : "";
+  });
+}
+
+function renderMemRows(emptyText) {
+  const rows = sortedMemRows();
+  $("mem-rows").innerHTML = rows.length ? rows.map((m) => `
+      <tr class="mem-row" data-mid="${esc(m.memory_id)}">
+        <td>${esc(trunc(m.content, 90))}</td>
+        <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
+        <td class="mtime">${timeFmt(m.created_ns)}</td>
+        <td class="size">${esc(m.origin_device)}</td>
+        <td class="size">${(m.score ?? 0).toFixed(2)}</td>
+        <td><button class="btn ghost mem-verify-btn" data-mid="${esc(m.memory_id)}">验证</button></td>
+      </tr>`).join("")
+    : `<tr><td colspan="6" class="empty">${esc(emptyText ?? "")}</td></tr>`;
+  $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
+    b.onclick = () => memVerifyRow(b.dataset.mid, b);
+  });
+  renderMemSortHeads();
+}
+
 async function loadMemories() {
   const q = $("mem-q").value.trim();
   const tag = $("mem-tag").value.trim();
@@ -618,25 +677,16 @@ async function loadMemories() {
   $("mem-meta").innerHTML = "检索中…";
   try {
     const r = await memCall("memory_search", args);
-    const rows = r.results ?? [];
-    $("mem-meta").innerHTML = rows.length ? `<b>${rows.length}</b> / ${r.total ?? rows.length} 条记忆` : "";
-    $("mem-rows").innerHTML = rows.length ? rows.map((m) => `
-      <tr class="mem-row" data-mid="${esc(m.memory_id)}">
-        <td>${esc(trunc(m.content, 90))}</td>
-        <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
-        <td class="mtime">${timeFmt(m.created_ns)}</td>
-        <td class="size">${esc(m.origin_device)}</td>
-        <td class="size">${(m.score ?? 0).toFixed(2)}</td>
-        <td><button class="btn ghost mem-verify-btn" data-mid="${esc(m.memory_id)}">验证</button></td>
-      </tr>`).join("")
-      : `<tr><td colspan="6" class="empty">${q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条"}</td></tr>`;
+    memRows = r.results ?? [];
+    memSort = { key: null, dir: 1 }; // 新检索/换 query/换 tag：排序态重置默认（服务端序）
+    $("mem-meta").innerHTML = memRows.length ? `<b>${memRows.length}</b> / ${r.total ?? memRows.length} 条记忆` : "";
+    renderMemRows(q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条");
   } catch (e) {
+    memRows = [];
+    memSort = { key: null, dir: 1 };
     $("mem-meta").innerHTML = "";
-    $("mem-rows").innerHTML = `<tr><td colspan="6" class="empty">记忆列表加载失败——见顶部错误提示。</td></tr>`;
+    renderMemRows("记忆列表加载失败——见顶部错误提示。");
   }
-  $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
-    b.onclick = () => memVerifyRow(b.dataset.mid, b);
-  });
 }
 
 // 行级「验证」：memory_verify(memory_id) → 包含证明展开行（单开语义，
@@ -739,7 +789,18 @@ $("btn-ext-call").onclick = doExtCall;
 // 记忆面板（M9-WP03-T02）：检索/写入/回车触发；不进 5s 轮询（防行级
 // 证明展开态被打断），切 tab / 写入后刷新。
 $("btn-mem-search").onclick = loadMemories;
-$("mem-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadMemories(); });
+// 记忆 form 防整页重载（M10-WP02-T01 清偿 ui_hardening.rs:405 登记债）：
+// 沿 T04 检索 form 判例双保险——CSP 必拦 inline onsubmit（原 index.html
+// onsubmit 形同虚设），submit 按钮 / Enter 隐式提交都会把整页刷回 browse
+// tab。mem-q Enter preventDefault；form submit 兜底 preventDefault
+// （覆盖 mem-tag Enter 隐式提交）。
+$("mem-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); loadMemories(); } });
+document.querySelector("#view-memory form.query-row").addEventListener("submit", (e) => e.preventDefault());
+// 表头客户端排序接线（M10-WP02-T01）：点击可排列表头 → 排序当前已渲染
+// 行集快照（不重发查询）；箭头指示与三态循环见 memSortClick/renderMemSortHeads。
+document.querySelectorAll("th[data-mem-sort]").forEach((th) => {
+  th.onclick = () => memSortClick(th.dataset.memSort);
+});
 $("btn-mem-write").onclick = memWrite;
 
 setInterval(async () => {

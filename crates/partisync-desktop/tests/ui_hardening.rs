@@ -522,3 +522,137 @@ fn t05_index_stats_badge_cached_and_no_polling() {
         "footer IPC command 计数须与 generate_handler 对账（+index_stats = 12）"
     );
 }
+
+// ── M10-WP02-T01：记忆 form 防重载 + 表头客户端排序（SPEC §2.1）——
+// 清偿上方 t04 注释登记的「记忆面板同名 form 遗留」债（PR #162 披露源）。 ──
+
+/// 记忆 form 防整页重载锁（`t04_search_form_never_reloads_page` 同款扩面）：
+/// CSP `script-src 'self'` 必拦 inline `onsubmit`（原 index.html 死代码，
+/// 形同虚设），submit 按钮默认提交 / mem-q Enter 隐式提交 = 整页刷回
+/// browse tab、列表全丢。锁：记忆 form 区间零 `onsubmit=` / 零
+/// `type="submit"`；JS 侧 mem-q Enter preventDefault + 记忆 form submit
+/// 兜底 preventDefault 双保险。
+#[test]
+fn t01_memory_form_never_reloads_page() {
+    let at = UI_HTML
+        .find("id=\"view-memory\"")
+        .expect("记忆 section 存在");
+    let seg = &UI_HTML[at..];
+    let form_at = seg
+        .find("<form class=\"query-row\"")
+        .expect("记忆 form 存在（view-memory section 内首个 query-row）");
+    let seg = &seg[form_at..];
+    let end = seg.find("</form>").expect("记忆 form 闭合");
+    let form = &seg[..end];
+    assert!(
+        !form.contains("onsubmit="),
+        "记忆 form 禁 inline onsubmit（CSP script-src 'self' 必拦，形同虚设——登记债清偿）"
+    );
+    assert!(
+        !form.contains("type=\"submit\""),
+        "记忆 form 禁 submit 按钮（点击 = form 默认提交 = 整页刷回 browse tab）"
+    );
+    assert!(
+        UI_JS.contains(
+            "$(\"mem-q\").addEventListener(\"keydown\", (e) => { if (e.key === \"Enter\") { e.preventDefault(); loadMemories(); } });"
+        ),
+        "mem-q Enter 必须 preventDefault 后再检索（防隐式提交整页重载）"
+    );
+    assert!(
+        UI_JS.contains(
+            "document.querySelector(\"#view-memory form.query-row\").addEventListener(\"submit\", (e) => e.preventDefault());"
+        ),
+        "记忆 form 必须 submit 兜底 preventDefault（CSP 下 inline onsubmit 不生效；覆盖 mem-tag Enter 隐式提交）"
+    );
+}
+
+/// 表头客户端排序接线（SPEC §2.1）：四可排序列（创建时间/score/tags/
+/// 来源设备；内容列除外——截断展示排序意义弱）+ 点击排序当前快照
+/// （slice 副本，不重发查询、不触后端）+ 三态循环（首点升序/再点反序/
+/// 第三点回默认服务端序）+ tags 键经 memTags() 解析（非 canonical JSON
+/// 原串）+ 箭头指示当前排序键与方向 + 新检索/失败路径重置排序态。
+#[test]
+fn t01_memory_table_header_sort_wired() {
+    // 四可排序列接线：th data-mem-sort 恰四列 + memSortValue 四键覆盖。
+    for key in ["created", "score", "tags", "device"] {
+        assert!(
+            UI_HTML.contains(&format!("data-mem-sort=\"{key}\"")),
+            "记忆表头缺可排序列 {key}"
+        );
+    }
+    assert_eq!(
+        UI_HTML.matches("data-mem-sort=").count(),
+        4,
+        "可排序列必须恰四列（内容列除外，SPEC §2.1）"
+    );
+    assert!(
+        UI_JS.contains("if (key === \"created\") return m.created_ns ?? 0;")
+            && UI_JS.contains("if (key === \"score\") return m.score ?? 0;")
+            && UI_JS.contains("if (key === \"tags\") return memTags(m.tags);")
+            && UI_JS.contains("return String(m.origin_device ?? \"\");"),
+        "memSortValue 必须覆盖四键；tags 键 = memTags() 解析后逗号列表字典序（非 JSON 原串）"
+    );
+    // 排序只作用于已渲染窗口快照：slice() 副本 + 客户端比较器，函数体内
+    // 零 IPC 站点（沿 T04 chips「不重发查询、不触后端」判例）。
+    let at = UI_JS
+        .find("function sortedMemRows() {")
+        .expect("sortedMemRows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (!memSort.key) return memRows;"),
+        "默认态必须原样返回服务端序快照（第三点回默认语义）"
+    );
+    assert!(
+        body.contains("memRows.slice().sort("),
+        "排序必须作用于快照副本（不重排服务端原始序数组）"
+    );
+    for banned in ["invoke(", "call(", "fetch("] {
+        assert!(
+            !body.contains(banned),
+            "排序不得触后端/重发查询（客户端窗口序，SPEC §2.1）：{banned}"
+        );
+    }
+    // 三态循环：首点升序 → 再点反序 → 第三点回默认（服务端序）。
+    let at = UI_JS
+        .find("function memSortClick(key) {")
+        .expect("memSortClick 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("memSort = memSort.key !== key ? { key, dir: 1 }"),
+        "首点必须升序（dir=1）"
+    );
+    assert!(
+        body.contains("memSort.dir === 1 ? { key, dir: -1 }"),
+        "再点必须反序（dir=-1）"
+    );
+    assert!(
+        body.contains("{ key: null, dir: 1 };"),
+        "第三点必须回默认（服务端序，key=null）"
+    );
+    // 箭头指示 + aria-sort（当前排序键与方向透出）+ CSS 指示样式落地。
+    assert!(
+        UI_JS.contains("function renderMemSortHeads() {")
+            && UI_JS.contains(
+                "th.querySelector(\".mem-sort-arrow\").textContent = on ? (memSort.dir === 1 ? \"↑\" : \"↓\") : \"\";"
+            )
+            && UI_JS.contains("aria-sort"),
+        "表头必须箭头指示当前排序键与方向 + aria-sort 同步"
+    );
+    assert!(
+        UI_CSS.contains(".mem-sort-arrow") && UI_CSS.contains("th[data-mem-sort]"),
+        "styles-v3.css 缺排序指示样式（可点击 + 激活态 + 箭头）"
+    );
+    // 表头点击接线 + 新检索/换 query/换 tag 重置（成功与失败路径都重置）。
+    assert!(
+        UI_JS.contains("th.onclick = () => memSortClick(th.dataset.memSort);"),
+        "表头点击必须接线 memSortClick（GUI 实操判例：漏绑 = 静态摆设）"
+    );
+    assert!(
+        UI_JS.matches("memSort = { key: null, dir: 1 };").count() >= 2,
+        "loadMemories 成功/失败路径都必须重置排序态（新检索/换 query/tag → 服务端默认序）"
+    );
+}

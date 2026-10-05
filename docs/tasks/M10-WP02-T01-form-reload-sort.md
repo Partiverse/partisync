@@ -37,9 +37,16 @@
 
 ## 验收
 
-- [ ] 静态探针：记忆 form 零 `onsubmit=` / 零 `type="submit"` /
+- [x] 静态探针：记忆 form 零 `onsubmit=` / 零 `type="submit"` /
       Enter preventDefault / submit 兜底断言 + 排序接线（点击排序 /
-      方向切换 / 回默认 / 新检索重置 / 箭头指示）；
+      方向切换 / 回默认 / 新检索重置 / 箭头指示）——
+      `t01_memory_form_never_reloads_page` + `t01_memory_table_header_sort_wired`
+      全绿（2026-10-06 本地实测，ui_hardening 19/19）。
 - [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T01-*.png`（排序前后 +
-      Enter 检索不重载、仍停记忆 tab）；
-- [ ] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖。
+      Enter 检索不重载、仍停记忆 tab）——**待 GUI 验证**：验证时段
+      （2026-10-06 00:4x）主机屏保→锁屏（HID 空闲 51 min+，Touch ID
+      无人在场），真实实例窗口退化（210×141 负坐标帧 / AX 零窗口），
+      实操不可得；PR 保持 OPEN 打「待 GUI 验证」，解锁后补验归档。
+- [x] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖
+      （2026-10-06 本地实测：fmt ✓ / clippy -D warnings ✓ /
+      cargo test --workspace exit 0）。
