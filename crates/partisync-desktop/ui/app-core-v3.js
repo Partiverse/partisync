@@ -170,6 +170,16 @@ function searchArgs(q) {
   return args;
 }
 
+// M10-WP01-T02（SPEC §2.2）：命中摘要渲染 = esc() 全串**之后**再做
+// sentinel→<mark> 替换。后端（partisync-index bm25.rs）载荷是纯文本 +
+// [[/]] 包裹命中词；不变量：highlight 字段不得以模板插值形态直接进
+// innerHTML（唯一入口本函数），sentinel 之外零 HTML 引入（次序反了 =
+// 文档内容逃逸面）。
+function snippetHtml(h) {
+  if (!h.highlight) return "—";
+  return esc(h.highlight).replaceAll("[[", "<mark>").replaceAll("]]", "</mark>");
+}
+
 function searchSkeleton(n) {
   return Array.from({ length: n }, (_, i) =>
     `<article class="hit skel-row"><div class="skel skel-fp"></div>
@@ -218,7 +228,7 @@ async function doSearch() {
         <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
         <div class="body">
           <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
-          <div class="snippet">${h.highlight ? esc(h.highlight) : "—"}</div>
+          <div class="snippet">${snippetHtml(h)}</div>
         </div>
         <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>
         <div class="num">${h.score.toFixed(2)}</div></div>

@@ -49,7 +49,9 @@ fn no_raw_interpolation_of_dynamic_fields() {
         "${r.checkpoint",
         "${t.name}",
         "${q.slice",
-        "${h.highlight ||",
+        // M10-WP01-T02 收紧：`${h.highlight ||` → `${h.highlight`（覆盖
+        // 一切形态——snippet 渲染唯一入口是 snippetHtml(h)，见 T02 探针）。
+        "${h.highlight",
         // M9-WP03-T02 记忆面板动态字段（memory_search 命中行 / 包含证明 /
         // 验证横幅）——字符串插值一律 esc；数字（score.toFixed/length）不入列。
         "${m.memory_id",
@@ -91,6 +93,40 @@ fn hit_card_prefers_graph_filename() {
     assert!(
         UI_JS.contains("${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + \"…\"}"),
         "命中卡 name 行必须优先 filename（回落哈希切片）"
+    );
+}
+
+// ── M10-WP01-T02：命中词高亮 snippet 渲染契约（SPEC §2.2 / §3） ──
+
+const UI_CSS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/styles-v3.css"));
+
+/// snippet 渲染 = esc() 全串**之后** sentinel→`<mark>`/`</mark>` 替换
+/// （次序锁死——反序 = 文档内容经 sentinel 逃逸为 HTML 的注入面）；
+/// 模板零未转义 `${h.highlight}` 插值（唯一入口 snippetHtml(h)）；
+/// `<mark>` 样式存在于 styles-v3.css。
+#[test]
+fn t02_snippet_mark_escapes_then_replaces_sentinel() {
+    assert!(
+        UI_JS.contains("function snippetHtml("),
+        "snippet 渲染必须收敛到唯一 helper snippetHtml()"
+    );
+    assert!(
+        UI_JS.contains(
+            "return esc(h.highlight).replaceAll(\"[[\", \"<mark>\").replaceAll(\"]]\", \"</mark>\");"
+        ),
+        "必须 esc 全串之后再做 sentinel→<mark> 替换（次序不可反）"
+    );
+    assert!(
+        UI_JS.contains("<div class=\"snippet\">${snippetHtml(h)}</div>"),
+        "命中卡 snippet 行必须经 snippetHtml(h) 渲染"
+    );
+    assert!(
+        !UI_JS.contains("${h.highlight"),
+        "模板不得出现未转义 ${{h.highlight}} 插值（不变量，SPEC §2.2）"
+    );
+    assert!(
+        UI_CSS.contains(".hit .snippet mark"),
+        "<mark> 高亮样式必须存在于 styles-v3.css"
     );
 }
 

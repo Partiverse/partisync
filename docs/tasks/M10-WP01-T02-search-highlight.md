@@ -27,10 +27,23 @@ bm25 highlight 是「ocr/transcript 字段头部 200 字截断」（bm25.rs:376-
 
 ## 验收
 
-- [ ] e2e `t02_highlight_centers_on_hit_terms`：命中词置 >200 字符偏移
+- [x] e2e `t02_highlight_centers_on_hit_terms`：命中词置 >200 字符偏移
       （现状实现必败的判别用例）+ 中文例 + 无词面回落例；
-- [ ] 引擎级测试：窗口有界 + hybrid 继承断言；
-- [ ] 静态探针：esc-后-替换接线 + 无未转义插值；
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP01-T02-*.png`（高亮入镜，
+- [x] 引擎级测试：窗口有界 + hybrid 继承断言；
+- [x] 静态探针：esc-后-替换接线 + 无未转义插值；
+- [x] GUI 实操截图 `docs/screenshots/M10-WP01-T02-*.png`（高亮入镜，
       filename 卡同框补 T01 截图欠账）；
-- [ ] fmt/clippy/test 绿；零新增顶层依赖。
+- [x] fmt/clippy/test 绿；零新增顶层依赖。
+
+## 落地实况（2026-10-05）
+
+- 实作发现 tantivy 0.26 `TEXT` 常量 `stored: false`——旧「头部 200 字
+  截断」运行时恒 None（stored 值不存在，SPEC §1 描述与运行时行为有
+  出入）；修复补 `ocr_text`/`transcript_text` STORED（`schema()`，
+  bm25.rs）+ `SnippetGenerator` 定位摘要。
+- 存量索引按目录内嵌旧 schema 打开：打开/检索不受影响，highlight 回
+  落 None，重建（`partisync reindex`）后摘要生效。
+- 后端自拼 sentinel（fragment + highlighted ranges + collapse），不用
+  `Snippet::to_html()`（其内部转义会与前端 esc 叠成双重转义）。
+- 回落路径顺手修正旧 `&s[..200]` 按字节截断的 UTF-8 中界 panic 隐患
+  （改按字符边界，`head_truncate`）。
