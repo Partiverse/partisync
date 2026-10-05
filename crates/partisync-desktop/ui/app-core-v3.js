@@ -132,19 +132,26 @@ async function browse(path) {
 // 指纹色/副本路径）；标题回落语义（name 缺失 → content_id 切片，沿
 // §2.1）收敛在此——命中卡接线保持 showDetail(h.content_id, h.filename)
 // 字面（SPEC §2.3 探针锚点）。
+// 并发守卫（PR 161 评审 low）：快速连点两张命中卡时多个 asset_detail
+// 并发在途，先发后返的旧响应不得覆盖面板——按 panelId 记请求序号，
+// 迟到响应（seq 已被更新的请求取代）静默丢弃。
+const detailSeq = {};
 async function showDetail(contentId, name, panelId = "detail-panel") {
   const panel = $(panelId);
   panel.style.display = "";
   const body = $(panelId + "-body") || panel;
+  const seq = (detailSeq[panelId] = (detailSeq[panelId] || 0) + 1);
   body.innerHTML = `<div class="section-tag">detail</div>
     <div class="empty">加载中…</div>`;
   let d;
   try {
     d = await call("asset_detail", { prefix: contentId });
   } catch (e) {
+    if (seq !== detailSeq[panelId]) return;
     body.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
     return;
   }
+  if (seq !== detailSeq[panelId]) return;
   const title = name || contentId.slice(0, 8) + "…";
   const fp = fpOf(contentId);
   const copies = d.copies.map(c =>

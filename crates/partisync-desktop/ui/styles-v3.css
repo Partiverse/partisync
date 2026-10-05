@@ -152,6 +152,9 @@ main { padding: 0 22px 56px; }
 .hit:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
 .s-stage { display: flex; align-items: flex-start; gap: 18px; }
 .s-stage .hits { flex: 1; min-width: 0; }
+/* 详情列锁宽：min-width:0 防 flex 内容最小尺寸把 340px 撑宽挤压结果列
+   （PR 161 评审 low——长副本路径 li 已有 word-break:break-all） */
+.s-stage .detail { min-width: 0; max-width: 340px; }
 .sdetail-close { margin-bottom: 12px; }
 .hit {
   display: flex; gap: 13px; align-items: flex-start;

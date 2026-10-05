@@ -284,6 +284,27 @@ fn t03_hit_card_click_wires_show_detail_and_keeps_results() {
         "命中卡缺 cursor:pointer（骨架行除外）"
     );
     assert!(UI_CSS.contains(".hit:focus-visible"), "命中卡缺键盘焦点态");
+    // 6) 并发守卫（PR 161 评审 low）：面板级请求序号——迟到响应静默
+    //    丢弃，快速连点两张命中卡时旧 asset_detail 响应不得覆盖面板。
+    for needle in [
+        "const seq = (detailSeq[panelId] = (detailSeq[panelId] || 0) + 1);",
+        "if (seq !== detailSeq[panelId]) return;",
+    ] {
+        assert!(UI_JS.contains(needle), "showDetail 缺并发守卫：{needle}");
+    }
+    assert_eq!(
+        UI_JS
+            .matches("if (seq !== detailSeq[panelId]) return;")
+            .count(),
+        2,
+        "并发守卫必须同时覆盖成功渲染与失败透出两条路径"
+    );
+    // 7) 详情列锁宽（PR 161 评审 low）：长副本路径不得把 340px 面板
+    //    撑宽挤压结果列表。
+    assert!(
+        UI_CSS.contains(".s-stage .detail { min-width: 0; max-width: 340px; }"),
+        "检索详情面板缺 min-width:0 / max-width 锁宽约束"
+    );
 }
 
 /// 分区展示 + 跨通道不混排（§6-R2）：通道名分区标题、记忆行三字段
