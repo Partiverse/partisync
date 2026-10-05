@@ -1,9 +1,9 @@
 // PartiSync Desktop 前端 v3（设计语言 v4.3 落地——旧薄面弃用重写）。
 // M8-WP05-T01：语义检索旗舰（search_hybrid + 三态）。
 // 绑定面：index.html（v4.3 结构：tally 仪表 / hit 卡 / section-tag）。
-// 数据走 11 个 Tauri command（src/ipc.rs）：
-//   get_stats / list / search / search_hybrid / asset_detail / cas_stats /
-//   duplicates / jobs / sync_stats / sync_recent / mcp_call
+// 数据走 12 个 Tauri command（src/ipc.rs）：
+//   get_stats / list / search / search_hybrid / index_stats / asset_detail /
+//   cas_stats / duplicates / jobs / sync_stats / sync_recent / mcp_call
 // 文件名 app-core-v3.js：#39 判例（WKWebView 缓存击穿靠改名）。
 
 const __tauriCore = window.__TAURI__?.core;
@@ -178,6 +178,30 @@ function searchSkeleton(n) {
   ).join("");
 }
 
+// ── C3. 空态引导（M10-WP01-T05；SPEC §2.5）——index_stats 一次拉取缓存
+// （含失败态，不轮询）；approx_count 为 reader 快照近似值，UI 只做 0/>0
+// 粗分支 + 规模徽标，不承诺精确计数（§6-R5）。拉取失败 → 徽标隐藏，
+// 检索不受阻。
+let indexDocs = null; // null = 未拉取或拉取失败（徽标隐藏）
+let indexStatsDone = false;
+
+async function loadIndexStats() {
+  if (indexStatsDone) return;
+  indexStatsDone = true;
+  try { indexDocs = (await call("index_stats")).docs; } catch { indexDocs = null; }
+}
+
+// 检索 tab 初始态（未输入查询）：输入引导 + 全文索引规模徽标。已有查询
+// 结果（lastQ 非空）不覆盖——切 tab 回来检索结果原样保留。徽标样式内联
+// （styles-v3.css 不在本卡文件清单；JS 内联样式沿 skeleton/error 判例）。
+async function renderSearchIdle() {
+  await loadIndexStats();
+  if (lastQ) return;
+  $("srows").innerHTML = `<div class="empty">输入关键词或自然语言问题开始检索${
+    indexDocs !== null ? `<div class="idx-badge" style="display:inline-block;margin-top:12px;font-family:var(--mono);font-size:11px;line-height:1;padding:4px 9px;border:1px solid var(--green-dim);border-radius:999px;color:var(--green);background:var(--green-dark)" title="全文索引近似规模（reader 快照）">全文索引 ${indexDocs} docs</div>` : ""
+  }</div>`;
+}
+
 // ── C2. 检索过滤面（M10-WP01-T04；SPEC §2.4）——纯客户端维度：chips
 // 每次结果渲染后从命中集 filename 派生（大小写归一；无扩展名/孤儿行归
 // 「(无)」）；点击 chip 仅过滤已渲染命中（不重发查询、不触后端）；meta
@@ -250,9 +274,13 @@ function renderSearchResults() {
   }).join("")
     : total
       ? `<div class="empty">扩展名过滤后无显示命中——点掉上方 chips 恢复全部 ${total} 条。</div>`
-      : `<div class="empty">没有找到「${esc(lastQ.slice(0, 24))}」——换个更短的关键词${
-          searchMode === "hybrid" ? "" : "，或切到「语义」模式放宽匹配"
-        }。</div>`;
+      // T05 空态分支：索引空（docs==0）→ reindex 引导（CLI 命令直出，
+      // §4 非目标：不做 GUI 内执行按钮）；有索引无命中 → 既有建议文案。
+      : (indexDocs === 0
+        ? `<div class="empty">没有找到「${esc(lastQ.slice(0, 24))}」——全文索引还没有建立——运行 <b>partisync reindex</b> 建立内容索引。</div>`
+        : `<div class="empty">没有找到「${esc(lastQ.slice(0, 24))}」——换个更短的关键词${
+            searchMode === "hybrid" ? "" : "，或切到「语义」模式放宽匹配"
+          }。</div>`);
   // 记忆分区（§2.3：分区标题标明通道名；行 = content 截断 + tags + score，
   // 全部动态插值经 esc；空态/错误态沿既有 .empty 样式）。
   let memSection = "";
@@ -274,10 +302,11 @@ function renderSearchResults() {
 async function doSearch() {
   const q = $("q").value.trim();
   const meta = $("ssearch-meta");
+  await loadIndexStats(); // T05：0/>0 空态分支与徽标依赖（一次拉取缓存，不轮询）
   if (!q) {
     lastQ = ""; lastHits = []; lastMem = null; selectedExts.clear();
     renderChips();
-    $("srows").innerHTML = `<div class="empty">输入关键词或自然语言问题开始检索</div>`;
+    renderSearchIdle();
     meta.innerHTML = "";
     return;
   }
@@ -688,6 +717,7 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
     if (el) el.style.display = v === t ? "" : "none";
   });
   if (t === "browse") browse(curPath);
+  if (t === "search") renderSearchIdle(); // T05：初始态 = 输入引导 + 索引规模徽标
   if (t === "memory") { loadMemVerify(); loadMemories(); }
   if (t === "sync") { loadSync(!syncAnimated); syncAnimated = true; }
   if (t === "dups") loadDups();
