@@ -509,5 +509,29 @@ mod tests {
         // c2 仅 BM25，c3 仅 vector
         assert!(result.hits.iter().any(|h| h.content_id == "c2"));
         assert!(result.hits.iter().any(|h| h.content_id == "c3"));
+        // M10-WP01-T02：hybrid 经 rrf_fuse 继承 bm25 高亮（bm25 侧升级为
+        // SnippetGenerator 定位摘要后双通道自动惠及，hybrid 零改动）
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .find(|h| h.content_id == "c1")
+                .unwrap()
+                .highlight
+                .as_deref(),
+            Some("hello"),
+            "bm25 高亮必须经 rrf_fuse 透传至 hybrid 命中"
+        );
+        // R3：纯向量命中（c3）无词面 → highlight None
+        assert!(
+            result
+                .hits
+                .iter()
+                .find(|h| h.content_id == "c3")
+                .unwrap()
+                .highlight
+                .is_none(),
+            "纯向量命中无高亮（None → 前端「—」）"
+        );
     }
 }

@@ -11,7 +11,8 @@ use std::sync::RwLock;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
+use tantivy::snippet::{collapse_overlapped_ranges, SnippetGenerator};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Searcher, TantivyDocument};
 
 use partisync_core::error::{PartisyError, Severity};
 
@@ -67,8 +68,14 @@ fn schema() -> Schema {
     schema_builder.add_text_field(FIELD_CONTENT_ID, STRING | STORED);
     schema_builder.add_text_field(FIELD_FILENAME, TEXT | STORED);
     schema_builder.add_text_field(FIELD_TAGS, TEXT | STORED); // keyword_array 展开为 TEXT
-    schema_builder.add_text_field(FIELD_OCR_TEXT, TEXT);
-    schema_builder.add_text_field(FIELD_TRANSCRIPT_TEXT, TEXT);
+                                                              // M10-WP01-T02：ocr/transcript 补 STORED——tantivy 0.26 的 `TEXT` 常量
+                                                              // stored: false（schema/text_options.rs:276），此前 get_first 恒取不到
+                                                              // 值、highlight 恒 None，「头部 200 字截断」实际从未产出过内容。
+                                                              // snippet（SnippetGenerator.snippet_from_doc）同样依赖 stored 值。
+                                                              // 存量索引按目录内嵌旧 schema 打开：打开/检索不受影响，highlight 走
+                                                              // 回落 None，重建（partisync reindex）后摘要生效。
+    schema_builder.add_text_field(FIELD_OCR_TEXT, TEXT | STORED); // snippet 依赖 stored 值
+    schema_builder.add_text_field(FIELD_TRANSCRIPT_TEXT, TEXT | STORED);
     schema_builder.add_i64_field(FIELD_UPDATED_NS, INDEXED | STORED);
     schema_builder.build()
 }
@@ -121,6 +128,68 @@ fn sanitize_query(q: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// snippet 窗口字符上限（M10-WP01 §2.2「≤ ~200 字符量级」，与旧头部截断
+/// 同量级；`SnippetGenerator::set_max_num_chars` 按字符计）。
+const SNIPPET_MAX_CHARS: usize = 200;
+/// 命中词 sentinel：highlight 载荷为「纯文本 + `[[`/`]]` 包裹命中词」，
+/// 前端 esc 全串后替换为 `<mark>`/`</mark>`（SPEC §2.2）。R2：与正文撞串
+/// 仅视觉误差（esc 后无其他 HTML 引入面），接受。
+const SNIPPET_OPEN: &str = "[[";
+const SNIPPET_CLOSE: &str = "]]";
+
+/// 建 per-field `SnippetGenerator`（窗口 [`SNIPPET_MAX_CHARS`] 字符）。
+/// 创建失败（如查询词在该字段无词面 → terms_text 为空不算失败）→ None，
+/// 该字段回落旧头部截断——不 panic、不新增错误面（SPEC §2.2）。
+fn snippet_generator(
+    searcher: &Searcher,
+    query: &dyn tantivy::query::Query,
+    field: Field,
+) -> Option<SnippetGenerator> {
+    let mut gen = SnippetGenerator::create(searcher, query, field).ok()?;
+    gen.set_max_num_chars(SNIPPET_MAX_CHARS);
+    Some(gen)
+}
+
+/// 命中词定位摘要：text 含任一查询词面 → snippet fragment 以 sentinel
+/// `[[`/`]]` 包裹命中 token 后返回；空文本 / 无生成器 / 无词面（如纯向量
+/// 命中、查询词仅命中 filename/tags 字段）→ None（调用方回落旧头部截断）。
+///
+/// 自拼 sentinel 而不用 `Snippet::to_html()`：后者会 `encode_minimal` 转
+/// 义 fragment（`&`→`&amp;` 等），前端按契约还要整体 esc 一次 → 双重转义
+/// 显示错字。载荷保持纯文本，转义职责完全归前端。
+fn field_snippet(gen: Option<&SnippetGenerator>, text: Option<&str>) -> Option<String> {
+    let text = text.filter(|s| !s.is_empty())?;
+    let snippet = gen?.snippet(text);
+    if snippet.is_empty() {
+        return None;
+    }
+    let fragment = snippet.fragment();
+    let mut out = String::with_capacity(
+        fragment.len() + snippet.highlighted().len() * (SNIPPET_OPEN.len() + SNIPPET_CLOSE.len()),
+    );
+    let mut pos = 0usize;
+    for range in collapse_overlapped_ranges(snippet.highlighted()) {
+        out.push_str(fragment.get(pos..range.start)?);
+        out.push_str(SNIPPET_OPEN);
+        out.push_str(fragment.get(range.start..range.end)?);
+        out.push_str(SNIPPET_CLOSE);
+        pos = range.end;
+    }
+    out.push_str(fragment.get(pos..)?);
+    Some(out)
+}
+
+/// 旧「头部截断」回落（M10-WP01-T02 契约：无词面/生成器缺失时维持现状
+/// 行为）。按字符边界截断——旧实现 `&s[..200]` 按字节切，中文多字节字符
+/// 中界会 panic；回落路径重写时一并修正。
+fn head_truncate(s: &str) -> String {
+    let end = s
+        .char_indices()
+        .nth(SNIPPET_MAX_CHARS)
+        .map_or(s.len(), |(i, _)| i);
+    format!("{}…", &s[..end])
 }
 
 /// 是否 CJK 统一表意（基本汉字 + 扩展 A–F + 兼容 + 部首 + 笔画）。
@@ -355,6 +424,12 @@ impl Bm25Index {
 
         let (id_field, _fn_field, _tags_field, ocr_field, tx_field, _) = field_ids(&self.schema);
 
+        // M10-WP01-T02：命中词定位摘要——per-field SnippetGenerator 在
+        // 查询级构建一次（创建失败 → None，逐 hit 回落旧头部截断，
+        // SPEC §2.2「不 panic、不新增错误面」）。
+        let gen_ocr = snippet_generator(&searcher, &parsed, ocr_field);
+        let gen_tx = snippet_generator(&searcher, &parsed, tx_field);
+
         let top_docs = searcher
             .search(&parsed, &TopDocs::with_limit(q.limit).order_by_score())
             .map_err(|e| err("bm25 search", e))?;
@@ -373,25 +448,14 @@ impl Bm25Index {
                 .unwrap_or_default()
                 .to_string();
 
-            // 简单 highlight：取 ocr 或 transcript 字段内容片段
-            let highlight = retrieved
-                .get_first(ocr_field)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| {
-                    let len = s.len().min(200);
-                    format!("{}…", &s[..len])
-                })
-                .or_else(|| {
-                    retrieved
-                        .get_first(tx_field)
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| {
-                            let len = s.len().min(200);
-                            format!("{}…", &s[..len])
-                        })
-                });
+            // 命中词定位摘要优先（ocr → tx）；无词面/生成器缺失/字段空
+            // → 回落旧头部截断（ocr → tx → None，现状行为不变）。
+            let ocr_val = retrieved.get_first(ocr_field).and_then(|v| v.as_str());
+            let tx_val = retrieved.get_first(tx_field).and_then(|v| v.as_str());
+            let highlight = field_snippet(gen_ocr.as_ref(), ocr_val)
+                .or_else(|| field_snippet(gen_tx.as_ref(), tx_val))
+                .or_else(|| ocr_val.filter(|s| !s.is_empty()).map(head_truncate))
+                .or_else(|| tx_val.filter(|s| !s.is_empty()).map(head_truncate));
 
             hits.push(Bm25Hit {
                 content_id,
@@ -578,6 +642,131 @@ mod tests {
         assert_eq!(cjk_fan_out("中-A"), "中 -A");
         // 空串
         assert_eq!(cjk_fan_out(""), "");
+    }
+
+    // ── M10-WP01-T02：命中词定位摘要（SPEC §2.2 / §3）──
+
+    /// 判别性引擎例：命中词置于 >200 字符偏移处——旧「头部 200 字截断」
+    /// 实现（bm25.rs:376-394，取字段前缀）摘要里绝无命中词，必败；
+    /// SnippetGenerator 窗口必须定位到命中处并以 sentinel `[[`/`]]` 包裹。
+    #[test]
+    fn t02_snippet_window_centers_on_hit_terms_beyond_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = Bm25Index::open_or_create(dir.path()).unwrap();
+
+        // filler >200 字符且不含查询词面
+        let filler = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(8);
+        assert!(filler.chars().count() > 200);
+        idx.upsert(IndexedDoc {
+            content_id: "s1".to_string(),
+            filename: "wildlife.md".to_string(),
+            tags: vec![],
+            ocr_text: Some(format!("{filler}The quokka is a small marsupial.")),
+            transcript_text: None,
+            updated_ns: 1_700_000_000_000_000_000_i64,
+        })
+        .unwrap();
+        idx.commit().unwrap();
+        idx.force_reload().unwrap();
+
+        let r = idx
+            .search(Bm25Query {
+                query: "quokka".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert_eq!(r.total, 1);
+        let hl = r.hits[0].highlight.as_deref().expect("highlight Some");
+        assert!(hl.contains("[[quokka]]"), "sentinel 包裹命中词：{hl}");
+        // 窗口有界：去 sentinel 后 ≤ ~200 字符量级（SPEC §3「窗口有界」）
+        let plain = hl.replace("[[", "").replace("]]", "");
+        assert!(
+            plain.chars().count() <= 200,
+            "snippet 窗口有界（≤200 字符量级），得到 {} 字符：{hl}",
+            plain.chars().count()
+        );
+    }
+
+    /// 中文命中例（R1：CJK fan-out 词面必须可高亮）+ 无词面回落契约：
+    /// 查询词仅在 filename（ocr 有文本无词面）→ 回落头部截断（无
+    /// sentinel）；ocr/tx 全空 → None；全程不 panic。回落截断按字符边界
+    /// （旧实现 `&s[..200]` 按字节切，中文多字节中界 panic——回落路径
+    /// 重写时一并修正）。
+    #[test]
+    fn t02_snippet_cjk_hit_and_no_term_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = Bm25Index::open_or_create(dir.path()).unwrap();
+
+        // 中文长文：命中词「夸克」置于 >200 字符偏移，filler 不含「夸」「克」
+        let zh_filler = "粒子物理标准模型描述基本粒子及其相互作用。".repeat(12);
+        assert!(zh_filler.chars().count() > 200);
+        idx.upsert(IndexedDoc {
+            content_id: "zh1".to_string(),
+            filename: "物理笔记.md".to_string(),
+            tags: vec![],
+            ocr_text: Some(format!("{zh_filler}实验发现了新的夸克。")),
+            transcript_text: None,
+            updated_ns: 1_700_000_000_000_000_000_i64,
+        })
+        .unwrap();
+        // 无词面例：查询词仅在 filename，ocr 有文本但不含词面
+        idx.upsert(IndexedDoc {
+            content_id: "fb1".to_string(),
+            filename: "budget-falcon.md".to_string(),
+            tags: vec![],
+            ocr_text: Some("这份文档正文完全不含查询词面，用于验证回落行为。".to_string()),
+            transcript_text: None,
+            updated_ns: 1_700_000_000_000_000_001_i64,
+        })
+        .unwrap();
+        // 字段全空例：仅 filename 可命中
+        idx.upsert(IndexedDoc {
+            content_id: "mt1".to_string(),
+            filename: "empty-falcon.md".to_string(),
+            tags: vec![],
+            ocr_text: None,
+            transcript_text: None,
+            updated_ns: 1_700_000_000_000_000_002_i64,
+        })
+        .unwrap();
+        idx.commit().unwrap();
+        idx.force_reload().unwrap();
+
+        // 1) 中文命中：sentinel 包裹 fan-out 词面（bigram「夸克」单独成
+        //    token，必被包裹），窗口定位在 >200 字符偏移处
+        let r = idx
+            .search(Bm25Query {
+                query: "夸克".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert_eq!(r.total, 1);
+        let hl = r.hits[0]
+            .highlight
+            .as_deref()
+            .expect("中文命中 highlight Some");
+        assert!(hl.contains("[[夸克]]"), "sentinel 包裹中文命中词：{hl}");
+        let plain = hl.replace("[[", "").replace("]]", "");
+        assert!(plain.chars().count() <= 200, "窗口有界：{hl}");
+        assert!(hl.contains('夸'), "窗口含命中字：{hl}");
+
+        // 2) 无词面回落例：查询词仅在 filename
+        let r = idx
+            .search(Bm25Query {
+                query: "falcon".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert_eq!(r.total, 2);
+        let by_id = |cid: &str| r.hits.iter().find(|h| h.content_id == cid).unwrap();
+        // ocr 有文本无词面 → 头部截断回落（Some，无 sentinel）
+        let fb = by_id("fb1").highlight.as_deref().expect("回落头截 Some");
+        assert!(!fb.contains("[["), "回落不得引入 sentinel：{fb}");
+        // ocr/tx 全空 → None
+        assert!(by_id("mt1").highlight.is_none(), "字段全空 → None");
     }
 
     #[test]
