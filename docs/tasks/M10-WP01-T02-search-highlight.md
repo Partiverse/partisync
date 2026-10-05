@@ -31,8 +31,10 @@ bm25 highlight 是「ocr/transcript 字段头部 200 字截断」（bm25.rs:376-
       （现状实现必败的判别用例）+ 中文例 + 无词面回落例；
 - [x] 引擎级测试：窗口有界 + hybrid 继承断言；
 - [x] 静态探针：esc-后-替换接线 + 无未转义插值；
-- [x] GUI 实操截图 `docs/screenshots/M10-WP01-T02-*.png`（高亮入镜，
-      filename 卡同框补 T01 截图欠账）；
+- [ ] GUI 实操截图 `docs/screenshots/M10-WP01-T02-*.png`（高亮入镜，
+      filename 卡同框补 T01 截图欠账）；【待 GUI 验证】桌面实例启动
+      成功但本会话锁屏无法操作（无密码不可解锁）——PR 保持 OPEN
+      不合入，解锁后实操补录
 - [x] fmt/clippy/test 绿；零新增顶层依赖。
 
 ## 落地实况（2026-10-05）
@@ -45,5 +47,9 @@ bm25 highlight 是「ocr/transcript 字段头部 200 字截断」（bm25.rs:376-
   落 None，重建（`partisync reindex`）后摘要生效。
 - 后端自拼 sentinel（fragment + highlighted ranges + collapse），不用
   `Snippet::to_html()`（其内部转义会与前端 esc 叠成双重转义）。
+- 中文 fragment 碎片化实测（超 §6-R1 预判）：stored = fan-out 文本 →
+  fragment 为「单字+bigram 空格交错」碎片流非可读原文；命中定位/
+  sentinel 契约不受影响，处置接受；设计债（stored 膨胀 ~2x、原文摘要
+  需 stored-only 字段+reindex）登记 SPEC §2.2 注记④ + §4 非目标表。
 - 回落路径顺手修正旧 `&s[..200]` 按字节截断的 UTF-8 中界 panic 隐患
   （改按字符边界，`head_truncate`）。
