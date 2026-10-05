@@ -41,7 +41,10 @@
       Enter preventDefault / submit 兜底断言 + 排序接线（点击排序 /
       方向切换 / 回默认 / 新检索重置 / 箭头指示）——
       `t01_memory_form_never_reloads_page` + `t01_memory_table_header_sort_wired`
-      全绿（2026-10-06 本地实测，ui_hardening 19/19）。
+      + `t01_sort_rerender_preserves_proof_row_and_empty_text` 全绿
+      （2026-10-06 本地实测，ui_hardening 20/20；对抗评审 R3 修复后
+      成功/失败两处重置分别按上下文锚定，突变实验单删任一处均转红；
+      R2/R4 修复：排序重渲保留 mem-proof 展开行 + 空态文案 memEmptyText 透传）。
 - [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T01-*.png`（排序前后 +
       Enter 检索不重载、仍停记忆 tab）——**待 GUI 验证**：验证时段
       （2026-10-06 00:4x）主机屏保→锁屏（HID 空闲 51 min+，Touch ID

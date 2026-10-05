@@ -646,13 +646,65 @@ fn t01_memory_table_header_sort_wired() {
         UI_CSS.contains(".mem-sort-arrow") && UI_CSS.contains("th[data-mem-sort]"),
         "styles-v3.css 缺排序指示样式（可点击 + 激活态 + 箭头）"
     );
-    // 表头点击接线 + 新检索/换 query/换 tag 重置（成功与失败路径都重置）。
+    // 表头点击接线 + 新检索/换 query/换 tag 重置。突变锁死（对抗评审
+    // finding：声明行 `let memSort = ...` 亦命中同一子串，`matches >= 2`
+    // 实际只保证「至少一处」——单删失败路径重置行仍绿）——两处重置分别
+    // 按上下文锚定。
     assert!(
         UI_JS.contains("th.onclick = () => memSortClick(th.dataset.memSort);"),
         "表头点击必须接线 memSortClick（GUI 实操判例：漏绑 = 静态摆设）"
     );
     assert!(
-        UI_JS.matches("memSort = { key: null, dir: 1 };").count() >= 2,
-        "loadMemories 成功/失败路径都必须重置排序态（新检索/换 query/tag → 服务端默认序）"
+        UI_JS.contains(
+            "memSort = { key: null, dir: 1 }; // 新检索/换 query/换 tag：排序态重置默认（服务端序）"
+        ),
+        "loadMemories 成功路径必须重置排序态（新检索/换 query/tag → 服务端默认序）"
+    );
+    let load_at = UI_JS
+        .find("async function loadMemories() {")
+        .expect("loadMemories 必须存在");
+    let load_seg = &UI_JS[load_at..];
+    let catch_at = load_seg
+        .find("} catch (e) {")
+        .expect("loadMemories 必须有 catch 分支");
+    let catch_seg = &load_seg[catch_at..];
+    let catch_end = catch_seg.find("\n  }\n}").unwrap_or(catch_seg.len());
+    let catch_body = &catch_seg[..catch_end];
+    assert!(
+        catch_body.contains("memRows = [];")
+            && catch_body.contains("memSort = { key: null, dir: 1 };"),
+        "loadMemories 失败路径必须同时重置命中快照与排序态（失败不得残留旧窗口/旧排序）"
+    );
+}
+
+/// 排序重渲状态契约（对抗评审 findings）：①renderMemRows 的 innerHTML
+/// 全量重写不得静默清掉 memVerifyRow 直接 DOM 插入的 `tr.mem-proof`
+/// （面板既有契约「不进 5s 轮询防行级展开态被打断」的排序面延伸）——
+/// 必须先摘下、重写后按 data-proof 插回所属行之后；②空态文案经
+/// memEmptyText 透传（点表头不得把空态/错误态清成空白 empty 行）。
+#[test]
+fn t01_sort_rerender_preserves_proof_row_and_empty_text() {
+    let at = UI_JS
+        .find("function renderMemRows(emptyText) {")
+        .expect("renderMemRows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("const openProof = $(\"mem-rows\").querySelector(\"tr.mem-proof\");"),
+        "排序重写 tbody 前必须先摘下已展开证明行（防静默清掉，无恢复无提示）"
+    );
+    assert!(
+        body.contains("tr.mem-row[data-mid=\"${CSS.escape(openProof.dataset.proof)}\"]")
+            && body.contains("if (anchor) anchor.after(openProof);"),
+        "重写后必须按 data-proof 把证明行原样插回所属行之后（memVerifyRow toggle 寻址不受影响）"
+    );
+    assert!(
+        UI_JS.contains("let memEmptyText = null;")
+            && UI_JS.contains("esc(emptyText ?? memEmptyText ?? \"\")")
+            && UI_JS.contains("memEmptyText = q || tag ?")
+            && UI_JS.contains("memEmptyText = \"记忆列表加载失败——见顶部错误提示。\";")
+            && UI_JS.contains("renderMemRows(memEmptyText);"),
+        "空态/错误态文案必须落 memEmptyText 且排序重渲透传（防空态被点表头清成空白 empty 行）"
     );
 }

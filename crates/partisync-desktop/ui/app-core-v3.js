@@ -614,6 +614,7 @@ async function loadMemVerify() {
 // offset:0 契约不变，meta「N / total」明示窗口语义）。
 let memRows = []; // 最近一次 memory_search 命中快照（服务端原始序）
 let memSort = { key: null, dir: 1 }; // 表头排序态：key ∈ created|score|tags|device；null = 服务端默认序
+let memEmptyText = null; // 最近一次空态文案（loadMemories 设定；点表头重渲透传，防空态被清成空白 empty 行）
 
 function memSortValue(m, key) {
   // tags 键 = memTags() 解析后的逗号列表字典序（非 canonical JSON 原串）；
@@ -652,6 +653,12 @@ function renderMemSortHeads() {
 
 function renderMemRows(emptyText) {
   const rows = sortedMemRows();
+  // 排序/重渲不打断行级证明展开态（沿面板「不进 5s 轮询防打断」契约；
+  // 对抗评审 finding：innerHTML 全量重写会静默清掉 memVerifyRow 直接
+  // DOM 插入的 tr.mem-proof）——先摘下已展开证明行（单开语义至多一个），
+  // 重写 tbody 后按 data-proof 原样插回其所属行之后，memVerifyRow 的
+  // toggle 寻址不受影响。
+  const openProof = $("mem-rows").querySelector("tr.mem-proof");
   $("mem-rows").innerHTML = rows.length ? rows.map((m) => `
       <tr class="mem-row" data-mid="${esc(m.memory_id)}">
         <td>${esc(trunc(m.content, 90))}</td>
@@ -661,10 +668,14 @@ function renderMemRows(emptyText) {
         <td class="size">${(m.score ?? 0).toFixed(2)}</td>
         <td><button class="btn ghost mem-verify-btn" data-mid="${esc(m.memory_id)}">验证</button></td>
       </tr>`).join("")
-    : `<tr><td colspan="6" class="empty">${esc(emptyText ?? "")}</td></tr>`;
+    : `<tr><td colspan="6" class="empty">${esc(emptyText ?? memEmptyText ?? "")}</td></tr>`;
   $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
     b.onclick = () => memVerifyRow(b.dataset.mid, b);
   });
+  if (openProof) {
+    const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(openProof.dataset.proof)}"]`);
+    if (anchor) anchor.after(openProof);
+  }
   renderMemSortHeads();
 }
 
@@ -680,12 +691,14 @@ async function loadMemories() {
     memRows = r.results ?? [];
     memSort = { key: null, dir: 1 }; // 新检索/换 query/换 tag：排序态重置默认（服务端序）
     $("mem-meta").innerHTML = memRows.length ? `<b>${memRows.length}</b> / ${r.total ?? memRows.length} 条记忆` : "";
-    renderMemRows(q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条");
+    memEmptyText = q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条";
+    renderMemRows(memEmptyText);
   } catch (e) {
     memRows = [];
     memSort = { key: null, dir: 1 };
+    memEmptyText = "记忆列表加载失败——见顶部错误提示。";
     $("mem-meta").innerHTML = "";
-    renderMemRows("记忆列表加载失败——见顶部错误提示。");
+    renderMemRows(memEmptyText);
   }
 }
 
