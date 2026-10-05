@@ -84,6 +84,16 @@ fn esc_applied_at_expected_scale() {
     );
 }
 
+/// M10-WP01-T01：命中卡 name 行优先透出 graph 文件名（「GUI 搜索形同
+/// 虚设」修复的 UI 面——filename 缺失才回落哈希切片）。
+#[test]
+fn hit_card_prefers_graph_filename() {
+    assert!(
+        UI_JS.contains("${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + \"…\"}"),
+        "命中卡 name 行必须优先 filename（回落哈希切片）"
+    );
+}
+
 /// N4 开关接线（SPEC §2.1 + §6-R1 拍板 = 开关化）：
 /// transcript radio 显式传参，关键词/语义 radio 维持 None（后端常开）。
 #[test]

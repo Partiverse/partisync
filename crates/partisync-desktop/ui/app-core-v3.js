@@ -217,7 +217,7 @@ async function doSearch() {
       return `<article class="hit" style="--fp: ${fp}">
         <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
         <div class="body">
-          <div class="name">${esc(h.content_id.slice(0, 8))}…</div>
+          <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
           <div class="snippet">${h.highlight ? esc(h.highlight) : "—"}</div>
         </div>
         <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>

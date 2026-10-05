@@ -26,7 +26,7 @@ use tauri::State;
 
 use partisync_cas::CasStats;
 use partisync_graph::jobs::{self, JobRow};
-use partisync_graph::store::{DupGroup, EntryRow, Stats};
+use partisync_graph::store::{DupGroup, EntryRow, Stats, Store};
 use partisync_index::{Bm25Query, HybridQuery, HybridVectorKind, SearchFilters, VectorKind};
 // M8-WP05-T03： sync 域统计口径类型（只读复用， 无写路径/网络面——N2）。
 use partisync_sync::session::SyncStats as SyncSessionStats;
@@ -44,6 +44,10 @@ pub struct SearchHit {
     pub highlight: Option<String>,
     /// 检索通道（`bm25` / `hybrid`；M8-WP05-T01 起随载荷下发）。
     pub mode: &'static str,
+    /// 命中条目的真实文件名（graph 反查首个 entry；M10-WP01-T01「GUI
+    /// 搜索形同虚设」修复——哈希切片不可读，文件名是用户可行动信息）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,16 +106,36 @@ pub async fn search(state: State<'_, AppState>, args: SearchArgs) -> DesktopResu
         })
         .await
         .map_err(|e| DesktopError::Index(e.to_string()))?;
-    Ok(result
+    let hits = result
         .hits
         .into_iter()
-        .map(|h| SearchHit {
-            content_id: h.content_id,
-            score: h.score,
-            highlight: h.highlight,
-            mode: "bm25",
-        })
-        .collect())
+        .map(|h| (h.content_id, h.score, h.highlight, "bm25"))
+        .collect();
+    Ok(enrich_hits(&state.store, hits).await)
+}
+
+/// 检索命中 → IPC 载荷（M10-WP01-T01：graph 反查真实文件名回填；
+/// 反查失败（孤儿索引行）置 None——前端回落哈希切片展示）。
+async fn enrich_hits(
+    store: &Store,
+    hits: Vec<(String, f32, Option<String>, &'static str)>,
+) -> Vec<SearchHit> {
+    let mut out = Vec::with_capacity(hits.len());
+    for (content_id, score, highlight, mode) in hits {
+        let filename = store
+            .entries_by_content(&content_id)
+            .await
+            .ok()
+            .and_then(|rows| rows.into_iter().next().map(|e| e.name.clone()));
+        out.push(SearchHit {
+            content_id,
+            score,
+            highlight,
+            mode,
+            filename,
+        });
+    }
+    out
 }
 
 /// 语义混合检索 IPC（M8-WP05-T01 旗舰；BM25 + 向量 RRF）。
@@ -155,16 +179,12 @@ pub async fn search_hybrid(
         )
         .await
         .map_err(|e| DesktopError::Index(e.to_string()))?;
-    Ok(result
+    let hits = result
         .hits
         .into_iter()
-        .map(|h| SearchHit {
-            content_id: h.content_id,
-            score: h.rrf_score,
-            highlight: h.highlight,
-            mode: "hybrid",
-        })
-        .collect())
+        .map(|h| (h.content_id, h.rrf_score, h.highlight, "hybrid"))
+        .collect();
+    Ok(enrich_hits(&state.store, hits).await)
 }
 
 /// 条目详情 IPC（M8-WP05-T02；SPEC §2.2）：同 content_id 全部路径 +
