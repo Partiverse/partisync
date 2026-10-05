@@ -51,7 +51,7 @@
   <!-- 检索（旗舰） -->
   <section id="view-search" style="display:none">
     <div class="prompt-line"><b>partisync@local:~$</b> query<span class="cursor"></span></div>
-    <form class="query-row" onsubmit="return false">
+    <form class="query-row">
       <input id="q" type="search" placeholder="搜文件名、内容、转写文本…" aria-label="检索">
       <button id="btn-search" type="submit">[检索]</button>
     </form>
@@ -78,7 +78,7 @@
       <time id="mem-root" title="承诺树根（截断展示）"></time>
     </div>
     <div class="section-tag">search / memory_search（FTS5 trigram · tag 精确 · limit 50）</div>
-    <form class="query-row" onsubmit="return false">
+    <form class="query-row">
       <input id="mem-q" type="search" placeholder="搜记忆内容…" aria-label="记忆检索">
       <input id="mem-tag" type="search" placeholder="tag 精确过滤" aria-label="tag 过滤" class="mem-tag-input">
       <button id="btn-mem-search" type="submit">[检索]</button>

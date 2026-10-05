@@ -130,6 +130,25 @@ fn t02_snippet_mark_escapes_then_replaces_sentinel() {
     );
 }
 
+/// M10-WP01-T02 GUI 验收实测发现：CSP `script-src 'self'` 拦截 index.html
+/// 的 inline `onsubmit="return false"`（M9 硬化收敛漏网）→ 检索 form
+/// 默认提交 → 页面 reload，检索 UI 完全不可用。锁定：submit 必须经 JS
+/// preventDefault 兜底（资产 + 记忆两处 query-row），index.html 不得
+/// 回退到 inline onsubmit 依赖。
+#[test]
+fn t02_search_form_submit_prevent_default_wired() {
+    assert!(
+        UI_JS.contains(
+            "document.querySelectorAll(\"form.query-row\").forEach(f =>\n  f.addEventListener(\"submit\", (e) => e.preventDefault()));"
+        ),
+        "检索 form 必须经 JS preventDefault 阻止默认提交（CSP 挡 inline onsubmit）"
+    );
+    assert!(
+        !UI_HTML.contains("onsubmit="),
+        "index.html 不得依赖 inline onsubmit（CSP script-src 'self' 拦截 = 死代码 + 误导）"
+    );
+}
+
 /// N4 开关接线（SPEC §2.1 + §6-R1 拍板 = 开关化）：
 /// transcript radio 显式传参，关键词/语义 radio 维持 None（后端常开）。
 #[test]

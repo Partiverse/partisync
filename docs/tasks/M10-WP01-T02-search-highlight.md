@@ -31,10 +31,13 @@ bm25 highlight 是「ocr/transcript 字段头部 200 字截断」（bm25.rs:376-
       （现状实现必败的判别用例）+ 中文例 + 无词面回落例；
 - [x] 引擎级测试：窗口有界 + hybrid 继承断言；
 - [x] 静态探针：esc-后-替换接线 + 无未转义插值；
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP01-T02-*.png`（高亮入镜，
-      filename 卡同框补 T01 截图欠账）；【待 GUI 验证】桌面实例启动
-      成功但本会话锁屏无法操作（无密码不可解锁）——PR 保持 OPEN
-      不合入，解锁后实操补录
+- [x] GUI 实操截图 `docs/screenshots/M10-WP01-T02-*.png`（高亮入镜，
+      filename 卡同框补 T01 截图欠账）；✅ 解锁后实操补录两张——
+      `M10-WP01-T02-highlight-quokka.png`（英文 [[quokka]] mark 高亮 +
+      quokka-field-report.md filename 卡）与
+      `M10-WP01-T02-highlight-zh.png`（中文 [[夸]] [[夸克]] 碎片流形态 +
+      物理巡检笔记.md filename 卡），真实实例 partisd-desktop
+      --data-dir <demo>（索引含命中词 >200 字符偏移文档）
 - [x] fmt/clippy/test 绿；零新增顶层依赖。
 
 ## 落地实况（2026-10-05）
@@ -53,3 +56,11 @@ bm25 highlight 是「ocr/transcript 字段头部 200 字截断」（bm25.rs:376-
   需 stored-only 字段+reindex）登记 SPEC §2.2 注记④ + §4 非目标表。
 - 回落路径顺手修正旧 `&s[..200]` 按字节截断的 UTF-8 中界 panic 隐患
   （改按字符边界，`head_truncate`）。
+- GUI 验收过程发现并修复**存量缺陷**（阻塞验收，显式登记非顺手修）：
+  CSP `script-src 'self'` 拦截 index.html 的 inline
+  `onsubmit="return false"`（M9-WP03-T01 硬化收敛漏网）→ 检索 form
+  （资产 + 记忆两处 query-row）默认提交 → 页面 reload（回浏览 tab、
+  查询清空），检索 UI 完全不可用。最小修复：app-core-v3.js 绑定区
+  `querySelectorAll("form.query-row")` submit preventDefault + 移除
+  两处 inline onsubmit；探针 `t02_search_form_submit_prevent_default_wired`
+  锁接线。

@@ -621,6 +621,13 @@ async function memWrite() {
 }
 
 // ── 绑定（CSP 禁 inline onclick） ──
+// M10-WP01-T02 GUI 验收实测：CSP `script-src 'self'` 拦截 index.html 的
+// inline `onsubmit="return false"`（M9-WP03-T01 硬化收敛漏网）→ 检索
+// form（资产 + 记忆两处 query-row）默认提交 → 页面 reload（回浏览
+// tab、查询清空），检索 UI 完全不可用。JS 侧 preventDefault 兜底
+// （探针 ui_hardening 锁接线）。
+document.querySelectorAll("form.query-row").forEach(f =>
+  f.addEventListener("submit", (e) => e.preventDefault()));
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.removeAttribute("aria-current"));
   b.setAttribute("aria-current", "page");
