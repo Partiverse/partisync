@@ -265,3 +265,166 @@ fn t03_flagship_memory_sections_and_no_cross_merge() {
         );
     }
 }
+
+// ── M10-WP01-T04：检索过滤面静态契约（SPEC §2.4）——纯客户端维度：
+// chips 每次结果渲染后从命中集 filename 派生（大小写归一；无扩展名/
+// 孤儿行归「(无)」）；点击 chip 仅过滤已渲染命中（不重发查询、不触
+// 后端）；meta 同步「显示 n / 共 m」；全不选 = 不过滤。 ──
+
+const UI_CSS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/styles-v3.css"));
+
+/// chips 派生：extOf 从 filename 派生扩展名——大小写归一（toLowerCase）+
+/// 无扩展名/孤儿行（filename 空）归「(无)」；chips 集合来源必须是命中集
+/// filename（SPEC §2.4 字面）。
+#[test]
+fn t04_filter_chips_derive_from_filename_normalized() {
+    assert!(
+        UI_JS.contains("function extOf(filename) {"),
+        "chips 派生函数 extOf 必须存在"
+    );
+    assert!(
+        UI_JS.contains("return \"(无)\";"),
+        "无扩展名/孤儿行必须归「(无)」（SPEC §2.4）"
+    );
+    let at = UI_JS
+        .find("function extOf(filename) {")
+        .expect("extOf 存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains(".toLowerCase()"),
+        "扩展名必须大小写归一（SPEC §2.4）"
+    );
+    assert!(
+        UI_JS.contains("const e = extOf(h.filename);"),
+        "chips 集合必须从命中集 filename 派生"
+    );
+}
+
+/// 选中过滤仅影响展示：toggleExt = 切选中态 + 重渲（chips + 结果区），
+/// 函数体内禁止任何 IPC / 重查询站点（SPEC §2.4「不重发查询、不触后端」）。
+#[test]
+fn t04_chip_toggle_filters_client_side_only() {
+    let at = UI_JS
+        .find("function toggleExt(ext) {")
+        .expect("toggleExt 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("selectedExts")
+            && body.contains("renderChips();")
+            && body.contains("renderSearchResults();"),
+        "chip 点击 = 切换选中态 + 重渲 chips 与结果区"
+    );
+    for banned in ["invoke(", "call(", "doSearch(", "fetch("] {
+        assert!(
+            !body.contains(banned),
+            "过滤不得触后端/重发查询（SPEC §2.4）：{banned}"
+        );
+    }
+}
+
+/// 过滤只作用于已渲染命中快照：filteredHits 空选中集原样返回 lastHits
+/// （全不选 = 不过滤），非空时按 extOf 归一值过滤 lastHits。
+#[test]
+fn t04_filter_applies_to_rendered_hits_only() {
+    let at = UI_JS
+        .find("function filteredHits() {")
+        .expect("filteredHits 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (!selectedExts.size) return lastHits;"),
+        "全不选 = 不过滤（SPEC §2.4）"
+    );
+    assert!(
+        body.contains("lastHits.filter((h) => selectedExts.has(extOf(h.filename)))"),
+        "过滤只能作用于已渲染命中快照 lastHits（客户端）"
+    );
+}
+
+/// meta「显示 n / 共 m」同步 + 新查询/空查询/失败路径重置过滤选中态
+/// （chips 必须反映当轮命中集，不得残留上一轮选中）。
+#[test]
+fn t04_meta_shown_over_total_and_state_reset() {
+    assert!(
+        UI_JS.contains("显示 <b>${rows.length}</b> / 共 ${total}"),
+        "meta 必须同步「显示 n / 共 m」（SPEC §2.4）"
+    );
+    assert!(
+        UI_JS.contains("资产 显示 <b>${rows.length}</b> / 共 ${total}"),
+        "记忆同显时资产侧 meta 同样带「显示 n / 共 m」"
+    );
+    assert!(
+        UI_JS.matches("selectedExts.clear();").count() >= 2,
+        "新查询成功/空查询/失败路径都必须重置过滤选中态"
+    );
+}
+
+/// chips 容器 DOM 对账：JS 引用的 #filter-chips 必须在 index.html 存在
+/// 且带 role=group 可访问语义；chip 按钮带 aria-pressed 选中态；
+/// chips 样式（默认态 + 选中态 + 空容器收纳）在 styles-v3.css 落地。
+#[test]
+fn t04_filter_chips_dom_and_style_parity() {
+    assert!(
+        UI_JS.contains("$(\"filter-chips\")"),
+        "renderChips 必须渲染到 #filter-chips 容器"
+    );
+    assert!(
+        UI_HTML.contains("id=\"filter-chips\""),
+        "index.html 缺 #filter-chips 容器"
+    );
+    assert!(
+        UI_HTML.contains("role=\"group\" aria-label=\"按扩展名过滤\""),
+        "chips 容器必须带 group 语义 + 过滤用途 aria 标注"
+    );
+    assert!(
+        UI_JS.contains("aria-pressed="),
+        "chip 必须带 aria-pressed 选中态语义"
+    );
+    assert!(
+        UI_JS.contains("b.onclick = () => toggleExt(b.dataset.ext);"),
+        "chip 点击必须接线 toggleExt（GUI 实操实测漏绑 = chips 静态摆设）"
+    );
+    for needle in [".chip {", ".chip.on", ".chips:empty"] {
+        assert!(
+            UI_CSS.contains(needle),
+            "styles-v3.css 缺 chips 样式：{needle}"
+        );
+    }
+}
+
+/// 检索 form 防整页重载锁（T04 GUI 实操发现的既有 bug 的回归锁）：
+/// CSP `script-src 'self'` 必拦 inline `onsubmit`（形同虚设），form 默认
+/// 提交 = 整页重载回 browse tab、检索结果全丢——chips 过滤面在 GUI 不可
+/// 演示。锁：检索 form 区间零 `onsubmit=`/`type="submit"`；JS 侧 Enter
+/// keydown preventDefault + form submit 兜底 preventDefault 双保险。
+/// （记忆面板同名 form 模式为既有遗留，不在本卡范围——PR 正文披露。）
+#[test]
+fn t04_search_form_never_reloads_page() {
+    let at = UI_HTML
+        .find("<form class=\"query-row\"")
+        .expect("检索 form 存在（检索 section 先于记忆 section）");
+    let seg = &UI_HTML[at..];
+    let end = seg.find("</form>").expect("检索 form 闭合");
+    let form = &seg[..end];
+    assert!(
+        !form.contains("onsubmit="),
+        "检索 form 禁 inline onsubmit（CSP script-src 'self' 必拦，形同虚设）"
+    );
+    assert!(
+        !form.contains("type=\"submit\""),
+        "检索 form 禁 submit 按钮（点击 = form 默认提交 = 整页重载丢结果）"
+    );
+    assert!(
+        UI_JS.contains("if (e.key === \"Enter\") { e.preventDefault(); doSearch(); }"),
+        "检索输入 Enter 必须 preventDefault 后再检索（防隐式提交重载）"
+    );
+    assert!(
+        UI_JS.contains("addEventListener(\"submit\", (e) => e.preventDefault());"),
+        "检索 form 必须 submit 兜底 preventDefault（CSP 下 inline onsubmit 不生效）"
+    );
+}

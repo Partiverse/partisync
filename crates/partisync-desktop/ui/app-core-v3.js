@@ -178,10 +178,105 @@ function searchSkeleton(n) {
   ).join("");
 }
 
+// ── C2. 检索过滤面（M10-WP01-T04；SPEC §2.4）——纯客户端维度：chips
+// 每次结果渲染后从命中集 filename 派生（大小写归一；无扩展名/孤儿行归
+// 「(无)」）；点击 chip 仅过滤已渲染命中（不重发查询、不触后端）；meta
+// 同步「显示 n / 共 m」；全不选 = 不过滤。诚实边界：tags 生产恒空、
+// mime 未入索引 schema——不做空维度过滤面（SPEC §4 非目标登记）。
+let lastQ = "";
+let lastHits = []; // 最近一次资产检索命中（原始序、未过滤快照）
+let lastMem = null; // 记忆通道快照（{rows, error} | null）
+let lastModeLabel = "";
+let selectedExts = new Set();
+
+function extOf(filename) {
+  const base = String(filename ?? "").split("/").pop() || "";
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "(无)";
+  return base.slice(dot + 1).toLowerCase();
+}
+
+function filteredHits() {
+  if (!selectedExts.size) return lastHits;
+  return lastHits.filter((h) => selectedExts.has(extOf(h.filename)));
+}
+
+function renderChips() {
+  const exts = [];
+  for (const h of lastHits) {
+    const e = extOf(h.filename);
+    if (!exts.includes(e)) exts.push(e);
+  }
+  const box = $("filter-chips");
+  box.innerHTML = exts.length
+    ? `<span class="chips-cap">按扩展名过滤</span>` + exts.map((e) =>
+        `<button type="button" class="chip${selectedExts.has(e) ? " on" : ""}" data-ext="${esc(e)}" aria-pressed="${selectedExts.has(e) ? "true" : "false"}">${esc(e)}</button>`
+      ).join("")
+    : "";
+  box.querySelectorAll("button.chip").forEach((b) => {
+    b.onclick = () => toggleExt(b.dataset.ext);
+  });
+}
+
+function toggleExt(ext) {
+  if (selectedExts.has(ext)) selectedExts.delete(ext);
+  else selectedExts.add(ext);
+  renderChips();
+  renderSearchResults();
+}
+
+function renderSearchResults() {
+  const meta = $("ssearch-meta");
+  const rows = filteredHits();
+  const total = lastHits.length;
+  // meta（T04：资产侧同步「显示 n / 共 m」；记忆侧计数不受过滤影响）。
+  meta.innerHTML = lastMem
+    ? ((total || lastMem.rows.length)
+      ? `资产 显示 <b>${rows.length}</b> / 共 ${total} · 记忆 <b>${lastMem.rows.length}</b> hits · ${lastModeLabel}+记忆`
+      : "")
+    : (total ? `显示 <b>${rows.length}</b> / 共 ${total} hits · ${lastModeLabel}` : "");
+  // 资产分区：过滤仅影响展示；过滤致空 ≠ 无结果（给恢复引导，不清 chips）。
+  const assetRows = rows.length ? rows.map(h => {
+    const fp = fpOf(h.content_id);
+    return `<article class="hit" style="--fp: ${fp}">
+      <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
+      <div class="body">
+        <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
+        <div class="snippet">${h.highlight ? esc(h.highlight) : "—"}</div>
+      </div>
+      <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>
+      <div class="num">${h.score.toFixed(2)}</div></div>
+    </article>`;
+  }).join("")
+    : total
+      ? `<div class="empty">扩展名过滤后无显示命中——点掉上方 chips 恢复全部 ${total} 条。</div>`
+      : `<div class="empty">没有找到「${esc(lastQ.slice(0, 24))}」——换个更短的关键词${
+          searchMode === "hybrid" ? "" : "，或切到「语义」模式放宽匹配"
+        }。</div>`;
+  // 记忆分区（§2.3：分区标题标明通道名；行 = content 截断 + tags + score，
+  // 全部动态插值经 esc；空态/错误态沿既有 .empty 样式）。
+  let memSection = "";
+  if (lastMem) {
+    memSection = `<div class="section-tag">记忆通道 · memory_search</div>` + (lastMem.error
+      ? `<div class="empty">记忆通道不可用——见顶部错误提示。</div>`
+      : lastMem.rows.length
+        ? `<table class="panel-table" aria-label="记忆命中"><thead><tr><th>内容</th><th>tags</th><th>score</th></tr></thead><tbody>${
+            lastMem.rows.map((m) => `
+              <tr class="mem-row"><td>${esc(trunc(m.content, 90))}</td>
+              <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
+              <td class="size">${(m.score ?? 0).toFixed(2)}</td></tr>`).join("")}</tbody></table>`
+        : `<div class="empty">记忆通道无命中。</div>`);
+  }
+  $("srows").innerHTML = (lastMem ? `<div class="section-tag">资产通道 · ${lastModeLabel}检索</div>` : "")
+    + assetRows + memSection;
+}
+
 async function doSearch() {
   const q = $("q").value.trim();
   const meta = $("ssearch-meta");
   if (!q) {
+    lastQ = ""; lastHits = []; lastMem = null; selectedExts.clear();
+    renderChips();
     $("srows").innerHTML = `<div class="empty">输入关键词或自然语言问题开始检索</div>`;
     meta.innerHTML = "";
     return;
@@ -196,7 +291,8 @@ async function doSearch() {
   // 资产通道 IPC 参数不变（资产区现状不变）。双通道各自内部排序不变、
   // 不合并数组（score 不可比，§6-R2 分区展示）；记忆通道失败不拖垮资产区
   // （catch → 记忆分区 empty 错误行，error-region 走 call()/mcPayload
-  // 既有链路透传）。
+  // 既有链路透传）。T04 起：命中集落 lastHits 快照，chips 过滤仅重渲
+  // 已渲染命中（renderSearchResults），不再触碰 IPC。
   const withMem = $("mode-memory").checked;
   const memPromise = withMem
     ? memCall("memory_search", { query: q })
@@ -205,44 +301,16 @@ async function doSearch() {
     : Promise.resolve(null);
   try {
     const [rows, mem] = await Promise.all([call(cmd, searchArgs(q)), memPromise]);
-    const modeLabel = searchMode === "hybrid" ? "语义" : searchMode === "transcript" ? "含转写" : "关键词";
-    meta.innerHTML = mem
-      ? ((rows.length || mem.rows.length)
-        ? `资产 <b>${rows.length}</b> hits · 记忆 <b>${mem.rows.length}</b> hits · ${modeLabel}+记忆`
-        : "")
-      : (rows.length ? `<b>${rows.length}</b> hits · ${modeLabel}` : "");
-    // 资产分区：行渲染现状不变；含记忆开启时置通道分区标题（§2.3）。
-    const assetRows = rows.length ? rows.map(h => {
-      const fp = fpOf(h.content_id);
-      return `<article class="hit" style="--fp: ${fp}">
-        <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
-        <div class="body">
-          <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
-          <div class="snippet">${h.highlight ? esc(h.highlight) : "—"}</div>
-        </div>
-        <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>
-        <div class="num">${h.score.toFixed(2)}</div></div>
-      </article>`;
-    }).join("") : `<div class="empty">没有找到「${esc(q.slice(0, 24))}」——换个更短的关键词${
-      searchMode === "hybrid" ? "" : "，或切到「语义」模式放宽匹配"
-    }。</div>`;
-    // 记忆分区（§2.3：分区标题标明通道名；行 = content 截断 + tags + score，
-    // 全部动态插值经 esc；空态/错误态沿既有 .empty 样式）。
-    let memSection = "";
-    if (mem) {
-      memSection = `<div class="section-tag">记忆通道 · memory_search</div>` + (mem.error
-        ? `<div class="empty">记忆通道不可用——见顶部错误提示。</div>`
-        : mem.rows.length
-          ? `<table class="panel-table" aria-label="记忆命中"><thead><tr><th>内容</th><th>tags</th><th>score</th></tr></thead><tbody>${
-              mem.rows.map((m) => `
-                <tr class="mem-row"><td>${esc(trunc(m.content, 90))}</td>
-                <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
-                <td class="size">${(m.score ?? 0).toFixed(2)}</td></tr>`).join("")}</tbody></table>`
-          : `<div class="empty">记忆通道无命中。</div>`);
-    }
-    $("srows").innerHTML = (mem ? `<div class="section-tag">资产通道 · ${modeLabel}检索</div>` : "")
-      + assetRows + memSection;
+    lastQ = q;
+    lastHits = rows;
+    lastMem = mem;
+    lastModeLabel = searchMode === "hybrid" ? "语义" : searchMode === "transcript" ? "含转写" : "关键词";
+    selectedExts.clear();
+    renderChips();
+    renderSearchResults();
   } catch (e) {
+    lastQ = ""; lastHits = []; lastMem = null; selectedExts.clear();
+    renderChips();
     const kind = e?.kind ?? "Internal";
     meta.innerHTML = "";
     $("srows").innerHTML = `<div class="empty">
@@ -626,7 +694,12 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   if (t === "jobs") loadJobs();
   if (t === "ext") loadExtTools();
 });
-$("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+// 检索 form 防整页重载（M10-WP01-T04 GUI 实操发现的既有 bug）：CSP
+// script-src 'self' 必拦 inline onsubmit（index.html 原 onsubmit 形同
+// 虚设），Enter 隐式提交 / submit 按钮都会把整页刷回 browse tab。JS 侧
+// 双保险：Enter keydown preventDefault + form submit 兜底 preventDefault。
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doSearch(); } });
+document.querySelector("form.query-row").addEventListener("submit", (e) => e.preventDefault());
 $("btn-search").onclick = doSearch;
 $("mode-bm25").addEventListener("change", () => { searchMode = "bm25"; if ($("q").value.trim()) doSearch(); });
 $("mode-hybrid").addEventListener("change", () => { searchMode = "hybrid"; if ($("q").value.trim()) doSearch(); });
