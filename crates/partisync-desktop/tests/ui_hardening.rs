@@ -522,3 +522,156 @@ fn t05_index_stats_badge_cached_and_no_polling() {
         "footer IPC command 计数须与 generate_handler 对账（+index_stats = 12）"
     );
 }
+
+// ── M10-WP02-T02：记忆详情联动展开 + 复制静态契约（SPEC §2.2）——行点击
+// 展开 tr.mem-detail：完整 content / tags 全列 / metadata pretty JSON /
+// 完整 memory_id / created_ns 完整本地时间 / score 口径注记（store.rs
+// memory_search docstring：FTS = 匹配秩（-bm25），LIKE·精确路径恒 1.0）；
+// esc 全覆盖；展开/收起不碰证明行、不清空列表；「验证」按钮
+// stopPropagation 隔离；复制经 navigator.clipboard.writeText + §6-R1
+// execCommand 回落 + 「已复制」1.5s 反馈回落。 ──
+
+/// 函数体切片（沿 t05 双指针判例：顶层 `function` / `async function` 取
+/// 先到者——切片恰含本函数，不吃进后继）。
+fn js_fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
+    let at = src.find(sig).unwrap_or_else(|| panic!("{sig} 必须存在"));
+    let seg = &src[at..];
+    let end = ["\nasync function ", "\nfunction "]
+        .iter()
+        .filter_map(|m| seg.find(m))
+        .min()
+        .unwrap_or(seg.len());
+    &seg[..end]
+}
+
+/// 详情行模板字段齐全（SPEC §2.2 字面）+ esc 全覆盖（无未转义插值）。
+#[test]
+fn t02_memory_detail_row_fields_and_esc_coverage() {
+    let body = js_fn_body(UI_JS, "function memDetailHtml(");
+    assert!(
+        !body.contains("esc(trunc(") && body.contains("${esc(m.content)}"),
+        "详情 content 必须完整透出（禁 trunc 截断）且经 esc"
+    );
+    assert!(
+        body.contains("esc(memTags(m.tags))"),
+        "详情 tags 必须全列（memTags 解析 + esc）"
+    );
+    assert!(
+        body.contains("JSON.stringify(JSON.parse(m.metadata), null, 2)"),
+        "metadata 必须 pretty-print JSON（2 空格缩进）"
+    );
+    assert!(
+        body.contains("${esc(m.memory_id)}"),
+        "memory_id 必须完整透出（禁 slice 截断）且经 esc"
+    );
+    assert!(
+        body.contains("timeFmt(m.created_ns)"),
+        "created_ns 必须完整本地时间展示"
+    );
+    assert!(
+        body.contains("匹配秩") && body.contains("恒 1.0"),
+        "score 必须带口径注记（FTS 全文 = 匹配秩（-bm25）/ LIKE·精确路径恒 1.0，store.rs:2281-2282 语义诚实透出）"
+    );
+    // esc 全覆盖：模板内全部 m.* 动态段禁裸插值（数字经 toFixed 格式化不入列）。
+    for banned in [
+        "${m.content}",
+        "${m.memory_id}",
+        "${m.tags}",
+        "${m.metadata}",
+        "${m.created_ns}",
+        "${m.origin_device}",
+        "${m.score}",
+    ] {
+        assert!(
+            !body.contains(banned),
+            "详情模板动态段必须经 esc/格式化包裹（无未转义插值）：{banned}"
+        );
+    }
+    // 详情行样式落地（R3：pretty JSON 区 break-all + max-height 滚动防撑爆）。
+    for needle in [".mem-detail td {", ".mem-detail-meta {", "max-height"] {
+        assert!(
+            UI_CSS.contains(needle),
+            "styles-v3.css 缺详情行样式：{needle}"
+        );
+    }
+}
+
+/// 展开/收起只动本行详情：不碰证明行、不重写列表 innerHTML、不重发检索
+/// （SPEC §2.2 硬约束「不得关闭既有证明行、不得清空列表」）；多行详情
+/// 并存允许（禁全局清理详情行）。
+#[test]
+fn t02_detail_expand_preserves_proof_rows_and_list() {
+    let body = js_fn_body(UI_JS, "function memToggleDetail(");
+    assert!(
+        body.contains("tr.className = \"mem-detail\";")
+            && body.contains("tr.dataset.detail = memoryId;"),
+        "详情行必须是 tr.mem-detail + data-detail 锚点（沿 .mem-proof 展开行判例）"
+    );
+    assert!(
+        body.contains("open.remove();"),
+        "再点已展开行必须只收起该行详情"
+    );
+    assert!(
+        !body.contains("mem-proof"),
+        "展开/收起不得触碰证明行（单开语义维持，SPEC §2.2 硬约束）"
+    );
+    assert!(
+        !body.contains("$(\"mem-rows\").innerHTML"),
+        "展开/收起不得重写列表 innerHTML（不清空列表，SPEC §2.2 硬约束）"
+    );
+    assert!(
+        !body.contains("loadMemories"),
+        "展开/收起不得重发检索（防展开态被打断，沿 M9-WP03-T02 判例）"
+    );
+    assert!(
+        !UI_JS.contains("querySelectorAll(\"tr.mem-detail\").forEach"),
+        "多行详情并存允许——禁止全局清理详情行"
+    );
+}
+
+/// 行点击与「验证」按钮事件隔离（SPEC §6-R4）：验证按钮 stopPropagation，
+/// 行点击接线 memToggleDetail。
+#[test]
+fn t02_row_click_and_verify_button_isolated() {
+    assert!(
+        UI_JS.contains(
+            "b.onclick = (ev) => { ev.stopPropagation(); memVerifyRow(b.dataset.mid, b); };"
+        ),
+        "「验证」按钮必须 stopPropagation 隔离（点击验证不得触发行详情展开）"
+    );
+    assert!(
+        UI_JS.contains("tr.onclick = () => memToggleDetail(tr.dataset.mid);"),
+        "记忆行点击必须接线 memToggleDetail（详情联动入口）"
+    );
+}
+
+/// 复制契约（SPEC §2.2 + §6-R1）：详情行内「复制内容」「复制 ID」两按钮
+/// → navigator.clipboard.writeText（webview 内建，零新增依赖）；API 不可
+/// 用 → execCommand 隐藏 textarea 回落；成功反馈 = 文案瞬变「已复制」
+/// 1.5s 回落；数据源为 memIndex 快照（不抄 DOM 展示文本）。
+#[test]
+fn t02_copy_via_clipboard_write_text_with_fallback_and_feedback() {
+    let body = js_fn_body(UI_JS, "function memCopyDetail(");
+    assert!(
+        UI_JS.contains("复制内容") && UI_JS.contains("复制 ID"),
+        "详情行必须提供「复制内容」「复制 ID」两复制按钮"
+    );
+    assert!(
+        body.contains("navigator.clipboard.writeText("),
+        "复制必须走 webview 内建 clipboard.writeText（零新增依赖）"
+    );
+    assert!(
+        UI_JS.contains("function execCopyFallback(")
+            && js_fn_body(UI_JS, "function execCopyFallback(")
+                .contains("document.execCommand(\"copy\")"),
+        "剪贴板 API 不可用/拒权必须 execCommand 隐藏 textarea 回落（SPEC §6-R1）"
+    );
+    assert!(
+        body.contains("已复制") && body.contains("1500"),
+        "成功反馈 = 按钮文案瞬变「已复制」+ 1.5s（setTimeout 1500ms）回落"
+    );
+    assert!(
+        body.contains("memIndex.get(memoryId)"),
+        "复制数据源必须是 memIndex 命中快照（不抄 DOM 展示文本）"
+    );
+}

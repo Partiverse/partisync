@@ -589,6 +589,10 @@ function memTags(s) {
   } catch { return String(s ?? ""); }
 }
 
+// 最近一次 memory_search 命中快照（memory_id → 原始行）：详情展开与复制
+// 的数据源（M10-WP02-T02）——不抄 DOM 展示文本（列表 content 是截断态）。
+let memIndex = new Map();
+
 // 验证状态区：memory_verify（无 id）→ 根 hex 截断 + memory_count + ok 徽章。
 async function loadMemVerify() {
   try {
@@ -619,6 +623,7 @@ async function loadMemories() {
   try {
     const r = await memCall("memory_search", args);
     const rows = r.results ?? [];
+    memIndex = new Map(rows.map((x) => [x.memory_id, x]));
     $("mem-meta").innerHTML = rows.length ? `<b>${rows.length}</b> / ${r.total ?? rows.length} 条记忆` : "";
     $("mem-rows").innerHTML = rows.length ? rows.map((m) => `
       <tr class="mem-row" data-mid="${esc(m.memory_id)}">
@@ -635,7 +640,12 @@ async function loadMemories() {
     $("mem-rows").innerHTML = `<tr><td colspan="6" class="empty">记忆列表加载失败——见顶部错误提示。</td></tr>`;
   }
   $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
-    b.onclick = () => memVerifyRow(b.dataset.mid, b);
+    b.onclick = (ev) => { ev.stopPropagation(); memVerifyRow(b.dataset.mid, b); };
+  });
+  // 行点击展开/收起详情（M10-WP02-T02；验证按钮 stopPropagation 已隔离，
+  // 点验证不触发行展开）。
+  $("mem-rows").querySelectorAll("tr.mem-row").forEach((tr) => {
+    tr.onclick = () => memToggleDetail(tr.dataset.mid);
   });
 }
 
@@ -666,6 +676,85 @@ async function memVerifyRow(memoryId, btn) {
     btn.disabled = false;
     btn.textContent = label;
   }
+}
+
+// ── 记忆详情联动展开 + 复制（M10-WP02-T02；SPEC §2.2）——行点击展开
+// tr.mem-detail（沿证明行展开判例）：完整 content / tags 全列 / metadata
+// pretty JSON / 完整 memory_id / created_ns 完整本地时间 / score 口径
+// 注记（FTS 全文路径 = 匹配秩（-bm25）；LIKE 兜底 / tag·id 精确路径恒
+// 1.0——store.rs memory_search docstring 语义诚实透出）。展开/收起只动
+// 本行详情：不重写列表、不重发检索；多行详情并存，证明行语义不受影响。
+
+// 详情行模板（动态段全部 esc / 数字格式化——无未转义插值；content 不截断）。
+function memDetailHtml(m) {
+  let metaPretty;
+  try { metaPretty = JSON.stringify(JSON.parse(m.metadata), null, 2); }
+  catch { metaPretty = String(m.metadata ?? ""); }
+  return `<td colspan="6">
+    <div class="mem-detail-grid">
+      <span class="lbl">content</span><div class="val">${esc(m.content)}</div>
+      <span class="lbl">tags</span><div class="val">${esc(memTags(m.tags)) || "—"}</div>
+      <span class="lbl">metadata</span><div class="val"><pre class="mem-detail-meta">${esc(metaPretty) || "—"}</pre></div>
+      <span class="lbl">memory_id</span><div class="val hash">${esc(m.memory_id)}</div>
+      <span class="lbl">created_ns</span><div class="val">${timeFmt(m.created_ns)}</div>
+      <span class="lbl">score</span><div class="val">${(m.score ?? 0).toFixed(2)}<span class="score-note">口径：FTS 全文路径 = 匹配秩（-bm25）；LIKE 兜底 / tag·id 精确路径恒 1.0</span></div>
+    </div>
+    <div class="mem-detail-actions">
+      <button type="button" class="btn ghost mem-copy-btn" data-copy="content" data-mid="${esc(m.memory_id)}">复制内容</button>
+      <button type="button" class="btn ghost mem-copy-btn" data-copy="id" data-mid="${esc(m.memory_id)}">复制 ID</button>
+    </div></td>`;
+}
+
+// 展开/收起切换：已开 → 只删该行详情行；未开 → 在本行后插入。既有证明
+// 行与列表本体一概不触碰。
+function memToggleDetail(memoryId) {
+  const open = $("mem-rows").querySelector(`tr.mem-detail[data-detail="${CSS.escape(memoryId)}"]`);
+  if (open) { open.remove(); return; }
+  const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(memoryId)}"]`);
+  const m = memIndex.get(memoryId);
+  if (!row || !m) return;
+  const tr = document.createElement("tr");
+  tr.className = "mem-detail";
+  tr.dataset.detail = memoryId;
+  tr.innerHTML = memDetailHtml(m);
+  row.after(tr);
+  tr.querySelectorAll("button.mem-copy-btn").forEach((b) => {
+    b.onclick = (ev) => { ev.stopPropagation(); memCopyDetail(b, b.dataset.mid, b.dataset.copy); };
+  });
+}
+
+// 复制：webview 内建 navigator.clipboard.writeText（零新增依赖）；API 不
+// 可用/拒权 → 隐藏 textarea + execCommand 回落（SPEC §6-R1 实现期拍板）。
+// 成功反馈 = 按钮文案瞬变「已复制」1.5s 回落。
+function memCopyDetail(btn, memoryId, what) {
+  const m = memIndex.get(memoryId);
+  if (!m) return;
+  const text = what === "content" ? String(m.content ?? "") : String(m.memory_id ?? "");
+  const done = () => {
+    const label = btn.textContent;
+    btn.textContent = "已复制";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = label; btn.classList.remove("copied"); }, 1500);
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => execCopyFallback(text, done));
+  } else {
+    execCopyFallback(text, done);
+  }
+}
+
+function execCopyFallback(text, done) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  if (ok) done();
 }
 
 // 写入入口：content + tags（逗号分隔）+ metadata JSON → memory_write；
