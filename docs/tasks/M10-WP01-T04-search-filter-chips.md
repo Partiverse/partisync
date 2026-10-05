@@ -26,8 +26,30 @@
 
 ## 验收
 
-- [ ] 静态探针：chips 派生归一逻辑 + 选中过滤仅影响展示 + meta
-      「显示 n / 共 m」接线断言；
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP01-T04-*.png`（过滤前后
-      两帧）；
-- [ ] fmt/clippy/test 绿；改动仅限本卡范围。
+- [x] 静态探针：chips 派生归一逻辑 + 选中过滤仅影响展示 + meta
+      「显示 n / 共 m」接线断言——`t04_filter_chips_derive_from_filename_normalized`
+      / `t04_chip_toggle_filters_client_side_only` / `t04_filter_applies_to_rendered_hits_only`
+      / `t04_meta_shown_over_total_and_state_reset` / `t04_filter_chips_dom_and_style_parity`
+      / `t04_search_form_never_reloads_page`（ui_hardening 15/15 绿）；
+- [x] GUI 实操截图 `docs/screenshots/M10-WP01-T04-*.png`（过滤前后
+      两帧 + md/txt 叠选大小写归一帧，共 3 帧）；
+- [x] fmt/clippy/test 绿；改动仅限本卡范围。
+
+## 落地实况（2026-10-05，GUI 实操发现两项并当场上锁）
+
+1. **检索 form 整页重载（既有 bug，本卡修复）**：CSP `script-src
+   'self'` 必拦 inline `onsubmit="return false"`（形同虚设），点 [检索]
+   / Enter 均触发 form 默认提交 = 整页刷回 browse tab、检索结果全丢，
+   chips 面在 GUI 不可演示。最小修复（清单内文件）：按钮 `type=submit`
+   → `type=button`、摘除死 inline onsubmit、JS 侧 Enter keydown
+   preventDefault + form submit 兜底 preventDefault；回归锁
+   `t04_search_form_never_reloads_page`。**记忆面板同名 form 模式为既
+   有遗留未动**（不在本卡清单），后续任务承接。
+2. **chips 点击接线遗漏（实现期自查）**：首版 renderChips 漏绑
+   `onclick → toggleExt`（GUI 实测点击无效果，hover 态伪装选中）；
+   补接线 + `t04_filter_chips_dom_and_style_parity` 增接线断言锁死。
+3. GUI 验证路径：`--data-dir /tmp/m10-t04-gui` 隔离数据目录（5 文件
+   语料：txt/md/json/大写 TXT），CLI index+reindex 播种，BM25 检索
+   `quantum` 4 hits——chips 派生 json/md/txt（大小写归一实证）、点
+   md → 「资产 显示 1 / 共 4」仅 report.md、叠 txt → 3/4 含大写
+   .TXT；全程无重载（query 保留）。
