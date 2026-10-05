@@ -23,3 +23,4 @@ mutants.out*/
 
 # M6-WP03 Tauri 构建产物（tauri-build 生成， 与 Tauri 官方 .gitignore 模板一致）
 crates/partisync-desktop/gen/
+.zcode/workflow-drafts/
