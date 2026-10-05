@@ -30,9 +30,26 @@
 
 ## 验收
 
-- [ ] 静态探针：相对时间四档 + >30 天回落 + title 完整时间 + 缺失
+- [x] 静态探针：相对时间四档 + >30 天回落 + title 完整时间 + 缺失
       「—」不回退 + chips 派生/客户端过滤/meta 计数/全不选/换查询
-      重置/样式 parity（沿 t04 五探针句式）；
+      重置/样式 parity（沿 t04 五探针句式）——探针×6（含裸插值禁列
+      扩面），先红后绿，ui_hardening 23/23 绿；
 - [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T03-*.png`（chips 过滤
-      前后 + 相对时间 tooltip 入镜）；
-- [ ] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖。
+      前后 + 相对时间 tooltip 入镜）——**环境受阻待验**（见遗留①），
+      PR 保持 OPEN 挂「待 GUI 验证」label，不自行合入；
+- [x] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖。
+
+## 遗留登记
+
+1. **GUI 实操环境不可得（2026-10-06）**：实操会话中窗口全部被窗口
+   服务器挂到负坐标幻影屏（AppKit 仅报主屏 1440×900；CGWindowList 中
+   app 主窗退化 210×140@(-226,191)，与 M9-WP01-T04 登记的「210×141@
+   负坐标环境异常」同款，本次幻影屏离线更甚）；System Events AX 对
+   partisd-desktop / 终端 / ZCode 全局 0 windows（AXPress 驱动不可
+   用）；`screencapture -x` 仅得主屏壁纸、`-l <主窗id>` 报 could not
+   create image。**app 本体无恙**：`--bench-cold-start` 探针
+   `__BENCH_READY__ 293` 证实窗口+webview+page load 全链正常；CGWindow
+   List 确认窗口对象存在（onscreen=1）。另登记：Bash 沙箱内启动的
+   GUI 子进程不进窗口服务器（非沙箱启动才可见）——后续实操会话注意。
+   补验动作：环境恢复后按 §2.4 清单实操 + 截图归档 + SPEC §3 GUI 行
+   回填。

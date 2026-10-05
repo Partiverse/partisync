@@ -1246,3 +1246,158 @@ fn t02_copy_via_clipboard_write_text_with_fallback_and_feedback() {
         "复制数据源必须是 memIndex 命中快照（不抄 DOM 展示文本）"
     );
 }
+
+// ── M10-WP02-T03：时间展示深化 + tag 过滤 chips 静态契约（SPEC §2.3）
+// ——创建时间列相对显示（四档 + >30 天回落绝对 + title 完整本地时间）；
+// tag chips 从渲染行集派生 + 纯客户端过滤 + meta「显示 n / 共 m」+ 全不
+// 选不过滤 + 换查询重置重派生 + 样式 parity（沿 T04 五探针句式）。
+
+/// 时间探针：memTime 相对四档（刚刚/分钟/小时/天）+ >30 天回落 timeFmt
+/// 绝对日期 + created_ns 缺失/0「—」回落不回退（timeFmt 原样）+ 行模板
+/// title 悬浮完整本地时间（SPEC §2.3 字面）。
+#[test]
+fn t03_memtime_relative_tiers_and_absolute_fallback() {
+    let body = js_fn_body(UI_JS, "function memTime(ns) {");
+    for tier in ["刚刚", "分钟前", "小时前", "天前"] {
+        assert!(
+            body.contains(tier),
+            "相对时间缺「{tier}」档（SPEC §2.3 四档）"
+        );
+    }
+    assert!(
+        body.contains("30 * 86400") && body.contains("return timeFmt(ns);"),
+        ">30 天必须回落 timeFmt 绝对日期（SPEC §2.3）"
+    );
+    assert!(
+        body.contains("if (!ns) return timeFmt(ns);"),
+        "created_ns 缺失/0 必须回落 timeFmt（既有「—」）"
+    );
+    // timeFmt 既有输出不回退：缺失「—」回落仍在。
+    let tf = js_fn_body(UI_JS, "function timeFmt(ns) {");
+    assert!(
+        tf.contains("if (!ns) return \"—\";"),
+        "timeFmt 既有「—」回落不得回退"
+    );
+    // 行模板：title 悬浮 = 完整本地时间（timeFmt 经 esc）；创建时间列改
+    // 相对显示（memTime 经 esc）。
+    assert!(
+        UI_JS.contains("title=\"${esc(timeFmt(m.created_ns))}\""),
+        "创建时间单元格必须带 title 悬浮完整本地时间（SPEC §2.3）"
+    );
+    assert!(
+        UI_JS.contains("esc(memTime(m.created_ns))"),
+        "创建时间列必须改相对显示（经 esc）"
+    );
+}
+
+/// tag chips 派生：集合来源必须是已渲染行集快照 lastMemRows 的 tags
+/// （memTagArr 解析，与行内 tags 列同源——memTags 委托同一解析防漂移）。
+#[test]
+fn t03_mem_tag_chips_derive_from_rendered_rows() {
+    assert!(
+        UI_JS.contains("function memTagArr(s) {"),
+        "tags 解析函数 memTagArr 必须存在（chips 与行内显示同源）"
+    );
+    assert!(
+        UI_JS.contains("return memTagArr(s).join(\", \");"),
+        "memTags 必须委托 memTagArr（单一解析语义）"
+    );
+    let body = js_fn_body(UI_JS, "function renderMemChips() {");
+    assert!(
+        body.contains("for (const m of lastMemRows)") && body.contains("memTagArr(m.tags)"),
+        "chips 集合必须从已渲染行集 lastMemRows 经 memTagArr 派生（SPEC §2.3）"
+    );
+    assert!(
+        UI_JS.contains("lastMemRows = r.results ?? [];"),
+        "行集快照必须来自 memory_search 结果（r.results）"
+    );
+}
+
+/// chip 点击仅客户端过滤：toggleMemTag = 切选中态 + 重渲（chips + 行区），
+/// 函数体内禁止任何 IPC / 重查询站点（SPEC §2.3「不重发查询、不触后端」）。
+#[test]
+fn t03_mem_tag_chip_toggle_filters_client_side_only() {
+    let body = js_fn_body(UI_JS, "function toggleMemTag(tag) {");
+    assert!(
+        body.contains("selectedMemTags")
+            && body.contains("renderMemChips();")
+            && body.contains("renderMemRows("),
+        "chip 点击 = 切换选中态 + 重渲 chips 与行区"
+    );
+    for banned in ["invoke(", "call(", "loadMemories(", "doSearch(", "fetch("] {
+        assert!(
+            !body.contains(banned),
+            "过滤不得触后端/重发查询（SPEC §2.3）：{banned}"
+        );
+    }
+}
+
+/// 过滤只作用于已渲染行集快照：filteredMemRows 空选中集原样返回
+/// lastMemRows（全不选 = 不过滤），非空时按 memTagArr 解析的 tag 命中过滤。
+#[test]
+fn t03_mem_filter_applies_to_rendered_rows_only() {
+    let body = js_fn_body(UI_JS, "function filteredMemRows() {");
+    assert!(
+        body.contains("if (!selectedMemTags.size) return lastMemRows;"),
+        "全不选 = 不过滤（SPEC §2.3）"
+    );
+    assert!(
+        body.contains(
+            "lastMemRows.filter((m) => memTagArr(m.tags).some((t) => selectedMemTags.has(t)))"
+        ),
+        "过滤只能作用于已渲染行集快照 lastMemRows（客户端）"
+    );
+}
+
+/// meta「显示 n / 共 m」同步 + 新检索重置选中态并重派生 chips（沿 T04
+/// 判例：chips 必须反映当轮行集，不得残留上一轮选中）。
+#[test]
+fn t03_mem_meta_shown_over_total_and_state_reset() {
+    assert!(
+        UI_JS.contains("显示 <b>${rows.length}</b> / 共 ${esc(lastMemTotal)} 条记忆"),
+        "meta 必须同步「显示 n / 共 m」（SPEC §2.3）"
+    );
+    // 重置单点收口在 loadMemories（fetch 前——覆盖成功/空查询/失败全路径；
+    // toggle 切换不重置）；成功与失败路径都重派生 chips。
+    let body = js_fn_body(UI_JS, "async function loadMemories() {");
+    assert!(
+        body.contains("selectedMemTags.clear();"),
+        "新检索必须重置 tag 选中态（T04 判例）"
+    );
+    assert!(
+        body.matches("renderMemChips();").count() >= 2,
+        "成功与失败路径都必须重派生 chips（防残留上一轮 chips）"
+    );
+    assert_eq!(
+        UI_JS.matches("selectedMemTags.clear();").count(),
+        1,
+        "重置单点收口在 loadMemories（toggle 切换不重置）"
+    );
+}
+
+/// chips 容器 DOM + 样式 parity：JS 引用的 #mem-filter-chips 必须在
+/// index.html 存在且复用 .chips 容器样式（role=group + aria 标注）；
+/// chip 按钮复用 .chip 选中态样式 + aria-pressed；点击接线 toggleMemTag。
+#[test]
+fn t03_mem_tag_chips_dom_and_style_parity() {
+    assert!(
+        UI_JS.contains("$(\"mem-filter-chips\")"),
+        "renderMemChips 必须渲染到 #mem-filter-chips 容器"
+    );
+    assert!(
+        UI_HTML.contains("id=\"mem-filter-chips\""),
+        "index.html 缺 #mem-filter-chips 容器"
+    );
+    assert!(
+        UI_HTML.contains("class=\"chips\" role=\"group\" aria-label=\"按 tag 过滤\""),
+        "chips 容器必须复用 .chips 样式 + group 语义 + 过滤用途 aria 标注"
+    );
+    assert!(
+        UI_JS.contains("b.onclick = () => toggleMemTag(b.dataset.tag);"),
+        "chip 点击必须接线 toggleMemTag（漏绑 = chips 静态摆设）"
+    );
+    assert!(
+        UI_JS.contains("class=\"chip${selectedMemTags.has(t) ? \" on\" : \"\"}\""),
+        "chip 必须复用 .chip 选中态样式（styles-v3.css .chip.on）"
+    );
+}

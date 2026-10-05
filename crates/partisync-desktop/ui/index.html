@@ -116,6 +116,10 @@
       <button id="btn-mem-search" type="submit">[检索]</button>
     </form>
     <div class="result-meta" id="mem-meta"></div>
+    <!-- M10-WP02-T03（SPEC §2.3）：tag 过滤 chips 容器——从当前已渲染行集
+         tags 派生（复用 .chips/.chip 既有样式）；点击仅客户端过滤已渲染行，
+         不重发查询。 -->
+    <div id="mem-filter-chips" class="chips" role="group" aria-label="按 tag 过滤"></div>
     <table class="panel-table" aria-label="记忆条目">
       <thead><tr><th>内容</th><th>tags</th><th>创建时间</th><th>来源设备</th><th>score</th><th></th></tr></thead>
       <tbody id="mem-rows"></tbody>
