@@ -1,7 +1,10 @@
-# Release 发布工作流（SPEC docs/specs/M8-WP02.md §2.4）。
-# 签名工具链与密钥保管：ADR-0027（草稿——签名步在其批准后启用）+
-# docs/release/key-custody.md（私钥仅以 GitHub secret 注入，人不经手）。
-# 门禁阈值改动需 ADR（铁律：门禁前置）；toolchain 与 rust-toolchain.toml 一致（ADR-0003）。
+# Release 发布工作流（SPEC docs/specs/M8-WP02.md §2.4；beta 修订 docs/specs/M9-WP06.md §2.1 T02）。
+# 签名工具链与密钥保管：ADR-0027 + docs/release/key-custody.md（私钥仅以
+# GitHub secret 注入，人不经手）。门禁阈值改动需 ADR；toolchain 与
+# rust-toolchain.toml 一致（ADR-0003）。
+# beta 口径（M9-WP06 §2.1，用户 2026-10-05 确认）：tag v0.1.0-beta、Cargo
+# 维持 0.1.0、产物名 -beta 后缀；tar 包扩 partisync-mcp / partisync-fuse；
+# CycloneDX SBOM 独立导出；linux 双构建 reproducibility 对账（偏差登记不假绿）。
 name: release
 
 on:
@@ -24,20 +27,22 @@ jobs:
       - name: build (locked, auditable)
         run: |
           cargo install --locked cargo-auditable
-          cargo auditable build --locked --release -p partisync-cli -p partisync-hub
+          cargo auditable build --locked --release -p partisync-cli -p partisync-hub -p partisync-gateway -p partisync-fuse
       - name: package
-        # hub 产物 = hub-demo-web（hub crate 无主 bin——v0.1.0-alpha 口径，
-        # 正式 hub 服务 bin 归后续任务；release-report 登记）
+        # hub 产物 = hub-demo-web（hub crate 无主 bin——alpha 口径延续，如实
+        # 标注 demo 面）；beta 扩 partisync-mcp（记忆三工具 stdio server）+
+        # partisync-fuse（挂载写回入口），SPEC M9-WP06 §2.1 产物面轴
         run: |
           mkdir -p dist
-          for bin in partisync-cli hub-demo-web; do
+          for bin in partisync-cli partisync-mcp partisync-fuse hub-demo-web; do
             cp target/release/$bin dist/
           done
-          tar -czf dist/partisync-linux-x86_64.tar.gz -C dist partisync-cli hub-demo-web
+          tar -czf dist/partisync-cli-0.1.0-beta-linux-x86_64.tar.gz -C dist \
+            partisync-cli partisync-mcp partisync-fuse hub-demo-web
       - uses: actions/upload-artifact@v4
         with:
           name: cli-linux
-          path: dist/partisync-linux-x86_64.tar.gz
+          path: dist/partisync-cli-0.1.0-beta-linux-x86_64.tar.gz
 
   build-cli-macos:
     runs-on: macos-latest
@@ -46,18 +51,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - name: build (locked, auditable)
+        # macOS 不含 partisync-fuse：fuser 需 osxfuse 系统件（runner 未预装，
+        # 构建必败）——fuse 产物登记 linux-only，macOS 挂载路径作为已知限制
+        # 写入 release notes（SPEC §2.1 产物面轴偏差，发布报告留痕）
         run: |
           cargo install --locked cargo-auditable
-          cargo auditable build --locked --release -p partisync-cli
+          cargo auditable build --locked --release -p partisync-cli -p partisync-gateway
       - name: package
         run: |
           mkdir -p dist
-          cp target/release/partisync-cli dist/
-          tar -czf dist/partisync-cli-macos-aarch64.tar.gz -C dist partisync-cli
+          for bin in partisync-cli partisync-mcp; do
+            cp target/release/$bin dist/
+          done
+          tar -czf dist/partisync-cli-0.1.0-beta-macos-aarch64.tar.gz -C dist \
+            partisync-cli partisync-mcp
       - uses: actions/upload-artifact@v4
         with:
           name: cli-macos
-          path: dist/partisync-cli-macos-aarch64.tar.gz
+          path: dist/partisync-cli-0.1.0-beta-macos-aarch64.tar.gz
 
   build-desktop-macos:
     # 桌面壳 dmg（Tauri bundler）。公证（notarization）为 SPEC 非目标，
@@ -72,45 +83,101 @@ jobs:
         run: |
           cargo install tauri-cli --locked
           cargo tauri build --target aarch64-apple-darwin
+      - name: rename (beta suffix)
+        run: |
+          mkdir -p dist
+          for f in target/aarch64-apple-darwin/release/bundle/dmg/*.dmg; do
+            base=$(basename "$f")
+            cp "$f" "dist/PartiSync.Desktop_0.1.0-beta_aarch64.dmg"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-macos
-          path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          path: dist/PartiSync.Desktop_0.1.0-beta_aarch64.dmg
+
+  sbom:
+    # CycloneDX SBOM 独立导出（M9-WP06 §2.1；A6 cargo auditable 嵌入面之外的
+    # 独立机器可读清单）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: export SBOM
+        run: |
+          cargo install --locked cargo-cyclonedx
+          cargo cyclonedx --all --format json
+      - name: collect
+        run: |
+          mkdir -p dist
+          find . -name "*.cdx.json" -not -path "./target/*" -exec cp {} dist/ \;
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: dist/*.cdx.json
+
+  reproducibility:
+    # linux 双构建 SHA256 对账（M8-WP02 R1 判例：偏差登记不假绿）——
+    # cargo 构建含路径相关性，不一致时输出偏差说明进产物，不作失败门
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: build twice (separate target dirs)
+        run: |
+          CARGO_TARGET_DIR=target-a cargo build --locked --release -p partisync-cli
+          CARGO_TARGET_DIR=target-b cargo build --locked --release -p partisync-cli
+      - name: compare
+        run: |
+          A=$(sha256sum target-a/release/partisync-cli | cut -d' ' -f1)
+          B=$(sha256sum target-b/release/partisync-cli | cut -d' ' -f1)
+          echo "build-a: $A"
+          echo "build-b: $B"
+          if [ "$A" = "$B" ]; then
+            echo "REPRODUCIBLE=yes" | tee reproducibility.txt
+          else
+            echo "REPRODUCIBLE=no" | tee reproducibility.txt
+            echo "deviation: cargo 构建路径相关性（M8-WP02 R1 判例，偏差登记不假绿）" | tee -a reproducibility.txt
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reproducibility
+          path: reproducibility.txt
 
   release:
-    needs: [build-cli-linux, build-cli-macos, build-desktop-macos]
+    needs: [build-cli-linux, build-cli-macos, build-desktop-macos, sbom, reproducibility]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
-      - name: checksums
+      - name: flatten + checksums
         # 剥掉 artifact 子目录前缀——Release asset 为扁平布局，sha256sum -c
         # 需与文件名直接对应
         run: |
           cd dist
           find . -type f \( -name "*.tar.gz" -o -name "*.dmg" \) -print0 |
             while IFS= read -r -d '' f; do
-              sha256sum "$f" | sed 's|  .*/| |' >> SHA256SUMS
+              dir=$(dirname "$f"); base=$(basename "$f")
+              mv "$f" "$base"
+              sha256sum "$base" >> SHA256SUMS
             done
+          find . -mindepth 2 -type f \( -name "*.cdx.json" -o -name "reproducibility.txt" \) -exec mv {} . \;
+          rm -rf */ 2>/dev/null || true
+          ls -la
       # 签名步（M8-WP02-T02，ADR-0027 已接受 + 生成仪式 2026-10-01 完成）：
-      # 依赖 GitHub secrets RELEASE_SIGNING_KEY（口令加密私钥）与
-      # RELEASE_SIGNING_PASSWORD（口令，见 key-custody.md「CI 签名口径」节）。
+      # 依赖 GitHub secrets RELEASE_SIGNING_CI_KEY（无口令 CI 子钥）。
       # secret 未配置时跳过签名——Release 显式标注 unsigned（不假绿）。
       - name: install minisign
         if: env.RELEASE_SIGNING_CI_KEY != ''
         env:
           RELEASE_SIGNING_CI_KEY: ${{ secrets.RELEASE_SIGNING_CI_KEY }}
-        # minisign CLI 无 Rust 发布（crates.io crate 纯库；官方仓库 0.10+ 为 C/Zig
-        # 构建）——ubuntu 用官方预编译二进制（release asset）
         run: |
           curl -sL https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz | tar xz
           sudo install minisign-linux/x86_64/minisign /usr/local/bin/minisign
           minisign -v
       - name: sign artifacts
-        # C 版 minisign 无密码环境变量（get_password 强制 tty）——CI 用无口令
-        # 子钥（key-custody.md「CI 签名口径」修订；主钥离线双人保管不变）
         if: env.RELEASE_SIGNING_CI_KEY != ''
         env:
           RELEASE_SIGNING_CI_KEY: ${{ secrets.RELEASE_SIGNING_CI_KEY }}
@@ -119,7 +186,7 @@ jobs:
           printf '%s\n' "$RELEASE_SIGNING_CI_KEY" > /tmp/ci.key
           trap 'rm -f /tmp/ci.key' EXIT
           # dmg 名含空格（"PartiSync Desktop_*"）——find -print0 防拆词
-          find . \( -name "*.tar.gz" -o -name "*.dmg" -o -name "SHA256SUMS" \) -print0 |
+          find . \( -name "*.tar.gz" -o -name "*.dmg" -o -name "SHA256SUMS" -o -name "*.cdx.json" \) -print0 |
             while IFS= read -r -d '' f; do
               minisign -Sm "$f" -s /tmp/ci.key \
                 -t "PartiSync release (CI subkey; $(date -u +%Y-%m-%dT%H:%M:%SZ))"
@@ -134,3 +201,5 @@ jobs:
             dist/**/*.dmg
             dist/SHA256SUMS
             dist/**/*.minisig
+            dist/*.cdx.json
+            dist/reproducibility.txt
