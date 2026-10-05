@@ -731,10 +731,19 @@ function memCopyDetail(btn, memoryId, what) {
   if (!m) return;
   const text = what === "content" ? String(m.content ?? "") : String(m.memory_id ?? "");
   const done = () => {
-    const label = btn.textContent;
+    // 防重入（PR #166 对抗评审 F3）：1.5s 窗口内二次点击——原始 label 只
+    // 捕获一次（dataset 持久保存，避免把「已复制」存成回落文案），旧 timer
+    // 先清再设，杜绝双 setTimeout 竞争致按钮永久停留「已复制」。
+    if (!btn.dataset.copyLabel) btn.dataset.copyLabel = btn.textContent;
+    clearTimeout(Number(btn.dataset.copyTimer));
     btn.textContent = "已复制";
     btn.classList.add("copied");
-    setTimeout(() => { btn.textContent = label; btn.classList.remove("copied"); }, 1500);
+    btn.dataset.copyTimer = String(setTimeout(() => {
+      btn.textContent = btn.dataset.copyLabel;
+      btn.removeAttribute("data-copy-label");
+      btn.removeAttribute("data-copy-timer");
+      btn.classList.remove("copied");
+    }, 1500));
   };
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(text).then(done).catch(() => execCopyFallback(text, done));

@@ -670,6 +670,13 @@ fn t02_copy_via_clipboard_write_text_with_fallback_and_feedback() {
         body.contains("已复制") && body.contains("1500"),
         "成功反馈 = 按钮文案瞬变「已复制」+ 1.5s（setTimeout 1500ms）回落"
     );
+    // 防重入（PR #166 对抗评审 F3）：1.5s 窗口内二次点击复制按钮，不得把
+    // 「已复制」捕获为回落 label + 双 setTimeout 竞争致永久停留「已复制」
+    // ——done() 必须 clearTimeout 旧 timer + dataset 持久保留原始 label。
+    assert!(
+        body.contains("clearTimeout(") && body.contains("dataset.copyLabel"),
+        "复制反馈必须防重入：clearTimeout 旧 timer + dataset.copyLabel 持久保留原始 label"
+    );
     assert!(
         body.contains("memIndex.get(memoryId)"),
         "复制数据源必须是 memIndex 命中快照（不抄 DOM 展示文本）"
