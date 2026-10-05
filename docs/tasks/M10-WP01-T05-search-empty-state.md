@@ -29,9 +29,35 @@
 
 ## 验收
 
-- [ ] e2e `index_stats`：空索引 docs=0；种子 IndexedDoc 后 >0；失败
-      → `kind:"Index"`；
-- [ ] 静态探针：三分支文案/徽标接线断言；
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP01-T05-*.png`（索引空引导
-      态；有索引态入镜更佳）；
-- [ ] fmt/clippy/test 绿；零新增顶层依赖。
+- [x] e2e `index_stats`：空索引 docs=0；种子 IndexedDoc 后 >0；失败
+      → `kind:"Index"`——`t05_index_stats_empty_zero_then_seeded_positive`
+      / `t05_index_stats_open_failure_maps_to_index_error` 全绿。实测
+      注记：`state.index()` 打开失败原生落 `Internal`（`From<
+      PartisyError>`），`index_stats` 命令面按 SPEC §2.5 拨回 `Index`；
+      search 打开失败落 `Internal` 属既有文档漂移（state.rs/ipc.rs 注释
+      vs 行为），文件不在本卡清单，登记遗留不顺手修；
+- [x] 静态探针：三分支文案/徽标接线断言——
+      `t05_empty_state_reindex_branch_and_no_hit_copy` /
+      `t05_index_stats_badge_cached_and_no_polling` 全绿（ui_hardening
+      17 探针全过）；
+- [x] GUI 实操截图 `docs/screenshots/M10-WP01-T05-*.png`（索引空引导
+      态；有索引态入镜更佳）——真实实例（partisd-desktop）实操五态
+      归档：empty-idle-badge（索引空初始态「全文索引 0 docs」徽标）/
+      empty-reindex-guide（索引空零命中 → `partisync reindex` 引导）/
+      indexed-idle-badge（有索引初始态「全文索引 2 docs」徽标）/
+      filename-hit-card（量子退火命中 · 验收报告.txt 卡入镜）/
+      indexed-nohit-suggest（有索引无命中 → 既有建议文案，与索引空
+      分支正确区分）；
+- [x] fmt/clippy/test 绿；零新增顶层依赖（fmt ✓ / clippy -D warnings ✓
+      / workspace test 107 目标 ok——唯一失败
+      `mcp_call_real_sidecar_ext_list` 为 main 既有环境性失败，stash
+      验证 clean main 同红，见遗留登记）。
+
+## 遗留登记
+
+- `mcp_call_real_sidecar_ext_list` 在本机为既有失败（demo 扩展 sidecar
+  返回空 tools；stash 验证 clean main 同样红）——环境依赖测试，与本卡
+  无关，未修。
+- search/search_hybrid 打开失败实际 `kind:"Internal"`，与 ipc.rs/state.rs
+  注释宣称的 `DesktopError::Index` 漂移——注释/行为归一需动 state.rs
+  （不在本卡清单），待后续任务承接。

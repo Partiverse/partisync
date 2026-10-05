@@ -428,3 +428,97 @@ fn t04_search_form_never_reloads_page() {
         "检索 form 必须 submit 兜底 preventDefault（CSP 下 inline onsubmit 不生效）"
     );
 }
+
+// ── M10-WP01-T05：检索空态引导静态契约（SPEC §2.5）——index_stats IPC
+// 接线 + 三分支（初始态徽标 / 索引空 reindex 引导 / 有索引无命中既有
+// 文案）；approx_count 近似值只做 0/>0 粗分支，不承诺精确（§6-R5）。 ──
+
+/// 空态分支文案：索引空（docs==0 零命中）→ `partisync reindex` 引导
+/// （CLI 命令直出）；有索引无命中 → 既有「换个更短的关键词 / 切语义」
+/// 建议文案维持；GUI 内执行 reindex 按钮不存在（§4 非目标）。
+#[test]
+fn t05_empty_state_reindex_branch_and_no_hit_copy() {
+    assert!(
+        UI_JS.contains("indexDocs === 0"),
+        "空态分支必须以 indexDocs===0 为索引空判据（SPEC §2.5）"
+    );
+    assert!(
+        UI_JS.contains("全文索引还没有建立——运行 <b>partisync reindex</b> 建立内容索引"),
+        "索引空必须明示 partisync reindex 引导（SPEC §2.5 字面）"
+    );
+    assert!(
+        UI_JS.contains("换个更短的关键词"),
+        "有索引无命中必须维持既有建议文案（SPEC §2.5 分支 3）"
+    );
+    assert!(
+        UI_JS.contains("或切到「语义」模式放宽匹配"),
+        "既有「切语义模式」建议文案不得回退"
+    );
+    assert!(
+        !UI_HTML.contains("reindex-btn") && !UI_JS.contains("reindex("),
+        "禁止 GUI 内执行 reindex（SPEC §4 非目标：仅文案引导）"
+    );
+}
+
+/// index_stats 接线：经既有 call() 链路一次拉取缓存（含失败态）不轮询；
+/// 初始态徽标「全文索引 N docs」仅在拉取成功时渲染；检索 tab 切换接线；
+/// footer command 计数对账。
+#[test]
+fn t05_index_stats_badge_cached_and_no_polling() {
+    assert_eq!(
+        UI_JS.matches("call(\"index_stats\")").count(),
+        1,
+        "index_stats 调用站点必须唯一（loadIndexStats 内一次拉取）"
+    );
+    let at = UI_JS
+        .find("async function loadIndexStats() {")
+        .expect("loadIndexStats 必须存在");
+    let seg = &UI_JS[at..];
+    let end = ["\nasync function ", "\nfunction "]
+        .iter()
+        .filter_map(|m| seg.find(m))
+        .min()
+        .unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (indexStatsDone) return;") && body.contains("indexStatsDone = true;"),
+        "loadIndexStats 必须缓存（含失败态）——一次拉取，不轮询（SPEC §2.5）"
+    );
+    assert!(
+        body.contains("call(\"index_stats\")"),
+        "loadIndexStats 必须经既有 call() 链路调 index_stats"
+    );
+    assert!(
+        UI_JS.contains("async function renderSearchIdle() {"),
+        "检索 tab 初始态渲染器必须存在"
+    );
+    assert!(
+        UI_JS.contains("输入关键词或自然语言问题开始检索"),
+        "初始态输入引导文案保留"
+    );
+    assert!(
+        UI_JS.contains("全文索引 ${indexDocs} docs"),
+        "初始态必须显示全文索引规模徽标（SPEC §2.5「全文索引 N docs」）"
+    );
+    assert!(
+        UI_JS.contains("indexDocs !== null"),
+        "未拉取/拉取失败（null）时徽标必须隐藏"
+    );
+    assert!(
+        UI_JS.contains("if (t === \"search\") renderSearchIdle();"),
+        "切到检索 tab 必须渲染初始态（索引规模可见）"
+    );
+    // 不进 5s 轮询（徽标为会话级快照；§6-R5 不承诺精确）
+    let interval_at = UI_JS.find("setInterval").expect("轮询存在");
+    let close = UI_JS[interval_at..]
+        .find("}, 5000);")
+        .expect("interval 闭合");
+    assert!(
+        !UI_JS[interval_at..interval_at + close].contains("index_stats"),
+        "索引规模不得进 5s 轮询（一次拉取缓存）"
+    );
+    assert!(
+        UI_HTML.contains("IPC 12 commands"),
+        "footer IPC command 计数须与 generate_handler 对账（+index_stats = 12）"
+    );
+}
