@@ -126,23 +126,31 @@ async function browse(path) {
 }
 
 // ── B2. 条目详情面板（M8-WP05-T02；SPEC §2.2） ──
-async function showDetail(contentId, name) {
-  const panel = $("detail-panel");
+// M10-WP01-T03：渲染目标抽参 panelId——浏览侧栏（#detail-panel，无
+// -body 容器时直渲面板本体）与检索内联面板（#sdetail-panel，常驻关闭
+// 按钮，动态区 #sdetail-panel-body）共用同一渲染契约（大小/副本数/
+// 指纹色/副本路径）；标题回落语义（name 缺失 → content_id 切片，沿
+// §2.1）收敛在此——命中卡接线保持 showDetail(h.content_id, h.filename)
+// 字面（SPEC §2.3 探针锚点）。
+async function showDetail(contentId, name, panelId = "detail-panel") {
+  const panel = $(panelId);
   panel.style.display = "";
-  panel.innerHTML = `<div class="section-tag">detail</div>
+  const body = $(panelId + "-body") || panel;
+  body.innerHTML = `<div class="section-tag">detail</div>
     <div class="empty">加载中…</div>`;
   let d;
   try {
     d = await call("asset_detail", { prefix: contentId });
   } catch (e) {
-    panel.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
+    body.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
     return;
   }
+  const title = name || contentId.slice(0, 8) + "…";
   const fp = fpOf(contentId);
   const copies = d.copies.map(c =>
     `<li>${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></li>`).join("");
-  panel.innerHTML = `
-    <h2>${esc(name)}</h2>
+  body.innerHTML = `
+    <h2>${esc(title)}</h2>
     <dl>
       <dt>大小</dt><dd>${sizeFmt(d.size)}</dd>
       <dt>副本</dt><dd>${d.copies.length} 处</dd>
@@ -181,6 +189,9 @@ function searchSkeleton(n) {
 async function doSearch() {
   const q = $("q").value.trim();
   const meta = $("ssearch-meta");
+  // M10-WP01-T03：新一次查询收起上一轮的详情面板（面板独立于结果列表，
+  // 结果列表仍由下方正常重渲——不违反「点击不清空结果」硬约束）。
+  $("sdetail-panel").style.display = "none";
   if (!q) {
     $("srows").innerHTML = `<div class="empty">输入关键词或自然语言问题开始检索</div>`;
     meta.innerHTML = "";
@@ -212,9 +223,11 @@ async function doSearch() {
         : "")
       : (rows.length ? `<b>${rows.length}</b> hits · ${modeLabel}` : "");
     // 资产分区：行渲染现状不变；含记忆开启时置通道分区标题（§2.3）。
+    // M10-WP01-T03：卡加 role=button/tabindex/data-cid（整卡可点击 +
+    // 键盘可达），点击接线在本函数尾部的 innerHTML 赋值之后统一绑。
     const assetRows = rows.length ? rows.map(h => {
       const fp = fpOf(h.content_id);
-      return `<article class="hit" style="--fp: ${fp}">
+      return `<article class="hit" role="button" tabindex="0" data-cid="${esc(h.content_id)}" style="--fp: ${fp}">
         <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
         <div class="body">
           <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
@@ -242,6 +255,21 @@ async function doSearch() {
     }
     $("srows").innerHTML = (mem ? `<div class="section-tag">资产通道 · ${modeLabel}检索</div>` : "")
       + assetRows + memSection;
+    // M10-WP01-T03（SPEC §2.3）：命中卡整卡可点击 → 既有 asset_detail
+    // IPC（零新增 command），详情渲进检索内联面板 #sdetail-panel；本路径
+    // 零 #srows 重写（硬约束：点击不清空结果列表，关闭后原样可继续点）。
+    // 卡顺序 = rows 顺序（assetRows 恰为 rows.map 产物且位于 memSection
+    // 之前），按下标配对安全。
+    $("srows").querySelectorAll("article.hit[data-cid]").forEach((card, i) => {
+      const h = rows[i];
+      card.onclick = () => showDetail(h.content_id, h.filename, "sdetail-panel");
+      card.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          showDetail(h.content_id, h.filename, "sdetail-panel");
+        }
+      };
+    });
   } catch (e) {
     const kind = e?.kind ?? "Internal";
     meta.innerHTML = "";
@@ -628,6 +656,9 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 });
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
 $("btn-search").onclick = doSearch;
+// M10-WP01-T03：检索详情面板关闭——只隐藏面板，结果列表不动（SPEC §2.3
+// 硬约束：关闭后检索结果原样可继续点击）。
+$("sdetail-close").onclick = () => { $("sdetail-panel").style.display = "none"; };
 $("mode-bm25").addEventListener("change", () => { searchMode = "bm25"; if ($("q").value.trim()) doSearch(); });
 $("mode-hybrid").addEventListener("change", () => { searchMode = "hybrid"; if ($("q").value.trim()) doSearch(); });
 $("mode-transcript").addEventListener("change", () => { searchMode = "transcript"; if ($("q").value.trim()) doSearch(); });

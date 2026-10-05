@@ -146,6 +146,13 @@ main { padding: 0 22px 56px; }
 }
 .result-meta b { color: var(--green); font-weight: 400; }
 .hits { min-height: 60px; }
+/* ===== 结果-详情联动（M10-WP01-T03：整卡可点击 + 内联详情双栏） ===== */
+.hit:not(.skel-row) { cursor: pointer; }
+.hit:not(.skel-row):hover { background: rgba(34, 208, 69, 0.04); }
+.hit:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+.s-stage { display: flex; align-items: flex-start; gap: 18px; }
+.s-stage .hits { flex: 1; min-width: 0; }
+.sdetail-close { margin-bottom: 12px; }
 .hit {
   display: flex; gap: 13px; align-items: flex-start;
   padding: 12px 12px 12px 14px;

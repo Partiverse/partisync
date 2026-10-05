@@ -26,8 +26,13 @@
 
 ## 验收
 
-- [ ] 静态探针：命中卡 click → showDetail(h.content_id, h.filename)
-      接线断言 + 结果列表保留断言；
+- [x] 静态探针：命中卡 click → showDetail(h.content_id, h.filename)
+      接线断言 + 结果列表保留断言（`t03_hit_card_click_wires_show_detail_and_keeps_results`）；
 - [ ] GUI 实操截图 `docs/screenshots/M10-WP01-T03-*.png`（点开一张
-      命中卡的详情面板，结果列表同框在镜）；
-- [ ] fmt/clippy/test 绿；改动仅限本卡范围。
+      命中卡的详情面板，结果列表同框在镜）——**待 GUI 验证**：会话窗口
+      不可操控（macOS Stage Manager GloballyEnabled=1 + 控制台无活动
+      app，新窗口塌缩为左缘非绘制缩略图 210×141@负坐标，screencapture
+      全屏只落壁纸、按窗捕获被拒；CUA 后台模式可读 AX 但无法聚焦）。
+      2026-10-05 登记，PR 保持 OPEN 挂 label「待 GUI 验证」；
+- [x] fmt/clippy/test 绿（`mcp_call_real_sidecar_ext_list` 为 main 既有
+      环境依赖失败，stash 基线同败，与本卡零接触面）；改动仅限本卡范围。

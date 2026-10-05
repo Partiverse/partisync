@@ -65,7 +65,16 @@
          §6-R2）；不进 radiogroup（ARIA 语义：三态 radio 保持独立分组） -->
     <label class="mem-toggle" title="并行检索记忆通道（memory_search）；与资产分区展示，分数不可比不混排"><input type="checkbox" id="mode-memory" checked> 含记忆</label>
     <div class="result-meta" id="ssearch-meta"></div>
-    <div id="srows" class="hits"></div>
+    <!-- M10-WP01-T03：结果-详情联动双栏——命中卡点击经既有 asset_detail
+         IPC 渲详情进 #sdetail-panel（动态区 #sdetail-panel-body）；关闭按钮
+         只隐藏面板，#srows 不重写（硬约束：点击不清空结果列表） -->
+    <div class="s-stage">
+      <div id="srows" class="hits"></div>
+      <aside id="sdetail-panel" class="detail" style="display:none">
+        <button id="sdetail-close" class="btn ghost sdetail-close" aria-label="关闭详情">[×] 关闭</button>
+        <div id="sdetail-panel-body"></div>
+      </aside>
+    </div>
   </section>
 
   <!-- 记忆（M9-WP03-T02：可验证记忆层浏览面板；经 mcp_call 透传

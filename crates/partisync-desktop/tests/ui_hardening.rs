@@ -222,6 +222,70 @@ fn t03_flagship_memory_toggle_wired() {
     );
 }
 
+// ── M10-WP01-T03：检索结果-详情联动静态契约（SPEC §2.3 + §3） ──
+
+const UI_CSS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/styles-v3.css"));
+
+/// 联动探针（SPEC §3「联动探针」）：命中卡 click → `showDetail(h.content_id,
+/// h.filename)` 接线断言 + 打开详情路径零 #srows 写入（硬约束：点击不清空
+/// 结果列表）+ 关闭仅隐藏面板 + 整卡可点击的可访问语义与样式。
+#[test]
+fn t03_hit_card_click_wires_show_detail_and_keeps_results() {
+    // 1) 接线断言（SPEC §3 字面）：命中卡 onclick → 既有 showDetail 渲染
+    //    契约（asset_detail IPC 零新增 command），入参恰为 (content_id,
+    //    filename)——标题回落语义收敛在 showDetail 内（§2.1 沿革）。
+    assert!(
+        UI_JS.contains(
+            "card.onclick = () => showDetail(h.content_id, h.filename, \"sdetail-panel\");"
+        ),
+        "命中卡 click 必须接 showDetail(h.content_id, h.filename)（SPEC §2.3）"
+    );
+    // 2) 点击不清空结果列表：命中卡接线块内零 innerHTML 写入——详情
+    //    面板独立于 #srows（SPEC §2.3 硬约束）。
+    let bind_at = UI_JS.find("article.hit[data-cid]").expect("命中卡接线存在");
+    let seg = &UI_JS[bind_at..];
+    let bind_end = seg.find("});").expect("命中卡接线闭合");
+    let wiring = &seg[..bind_end];
+    assert!(
+        !wiring.contains("innerHTML"),
+        "打开详情路径不得重写 #srows（点击不得清空结果列表）"
+    );
+    // 3) 键盘可达（可访问语义）：Enter/Space 触发 + role=button/tabindex。
+    assert!(
+        UI_JS.contains("e.key === \"Enter\" || e.key === \" \""),
+        "命中卡必须支持键盘触发"
+    );
+    assert!(
+        UI_JS.contains("role=\"button\" tabindex=\"0\" data-cid="),
+        "命中卡模板必须带 role=button + tabindex 可访问语义"
+    );
+    // 4) 面板结构：检索视图内联详情面板 + 常驻关闭按钮（DOM id 对账）。
+    assert!(
+        UI_HTML.contains("id=\"sdetail-panel\"") && UI_HTML.contains("id=\"sdetail-close\""),
+        "index.html 缺检索详情面板/关闭按钮"
+    );
+    assert!(
+        UI_JS.contains("$(\"sdetail-close\").onclick"),
+        "关闭按钮必须接线"
+    );
+    let close_at = UI_JS
+        .find("$(\"sdetail-close\").onclick")
+        .expect("关闭接线存在");
+    let close_seg = &UI_JS[close_at..];
+    let close_end = close_seg.find(";").expect("关闭接线闭合");
+    assert!(
+        close_seg[..close_end].contains("display = \"none\"")
+            && !close_seg[..close_end].contains("innerHTML"),
+        "关闭详情只隐藏面板，不得动结果列表"
+    );
+    // 5) 整卡可点击样式（cursor:pointer，骨架行除外 + 键盘焦点态）。
+    assert!(
+        UI_CSS.contains(".hit:not(.skel-row) { cursor: pointer; }"),
+        "命中卡缺 cursor:pointer（骨架行除外）"
+    );
+    assert!(UI_CSS.contains(".hit:focus-visible"), "命中卡缺键盘焦点态");
+}
+
 /// 分区展示 + 跨通道不混排（§6-R2）：通道名分区标题、记忆行三字段
 /// （content 截断 + tags + score）esc 全覆盖、资产行模板零记忆字段、
 /// 双通道结果不合并数组（各自内部排序不变）。
