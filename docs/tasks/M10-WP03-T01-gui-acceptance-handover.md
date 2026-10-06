@@ -44,8 +44,27 @@ memory 库 = 生产库 `~/.partisync/graph.db`（gateway mcp.rs:313 默认）。
 
 ## 验收
 
-- [ ] 截图归档 `docs/screenshots/M10-WP03-T01-*.png`（三态 + 巡检
-      ≥7 帧）；
-- [ ] 篡改安全流留痕（PR 正文：备份/单行/收尾三步说明）；
-- [ ] M9-WP03 §3 T04 勾选 + M9-WP00 §1-WP03 行回填随 PR；
-- [ ] 零代码 diff（docs/ + screenshots/ 之外无改动）。
+- [x] 截图归档 `docs/screenshots/M10-WP03-T01-*.png`（三态 + 巡检
+      ≥7 帧）——10 帧：memory-empty / memory-green / memory-tamper-red /
+      memory-restored + tab-browse/search/sync/dups/jobs/ext；
+- [x] 篡改安全流留痕（PR 正文：备份/单行/收尾三步说明）——db+wal+shm
+      三件备份 /tmp/graph.db.wp03t01.bak* → `UPDATE … WHERE
+      memory_id=<演示行A>`（changes()=1）→ DELETE 演示行 + memory_root
+      还原为演示前原值（5 行、root e167fe58… 一致，残留 0）；
+- [x] M9-WP03 §3 T04 勾选 + M9-WP00 §1-WP03 行回填随 PR；
+- [x] 零代码 diff（docs/ + screenshots/ 之外无改动）。
+
+## 实施留痕（2026-10-06）
+
+- 空态帧经临时 `--data-dir` 空库实例采集（生产库已有 5 条真实记忆，
+  不清不动）；绿态/红态/还原态对生产库 `~/Library/Application
+  Support/.partisync/partisync.db`（桌面侧车 `--db` 实际指向，即
+  `state.rs:52` 同源库）执行。
+- GUI 工具链新判例：`setValue` 经 System Events 对 WKWebView 文本域
+  静默失效、`<input>` 文本框呈幽灵别名（写它实写 textarea，bounds
+  越窗）——可靠通路 = Swift AX 直设 `kAXValueAttribute`（textarea）
+  + 剪贴板粘贴（input）+ AXPress（按钮）；拼音输入法会劫持 keystroke
+  英文（「demo」混入中文），粘贴通路不受影响。
+- 巡检新缺陷登记 M10-WP03 §6-D5：sidecar 持 tantivy 写锁致桌面自身
+  检索 LockBusy（记忆 tab 先用后）；检索帧以先检索后 sidecar 顺序
+  绕行采集。
