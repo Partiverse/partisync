@@ -23,5 +23,5 @@ SPEC §2.3）：① 既有件盘点（fastembed ai-embed + usearch VectorStore
 
 ## 验收
 
-- [ ] 六问齐备、行级证据可核；零代码 diff；
-- [ ] 提交挂 Task-ID `M10-WP04-T05`。
+- [x] 六问齐备、行级证据可核；零代码 diff；
+- [x] 提交挂 Task-ID `M10-WP04-T05`。
