@@ -41,15 +41,33 @@
 
 ## 遗留登记
 
-1. **GUI 实操环境不可得（2026-10-06）**：实操会话中窗口全部被窗口
-   服务器挂到负坐标幻影屏（AppKit 仅报主屏 1440×900；CGWindowList 中
-   app 主窗退化 210×140@(-226,191)，与 M9-WP01-T04 登记的「210×141@
-   负坐标环境异常」同款，本次幻影屏离线更甚）；System Events AX 对
-   partisd-desktop / 终端 / ZCode 全局 0 windows（AXPress 驱动不可
-   用）；`screencapture -x` 仅得主屏壁纸、`-l <主窗id>` 报 could not
-   create image。**app 本体无恙**：`--bench-cold-start` 探针
-   `__BENCH_READY__ 293` 证实窗口+webview+page load 全链正常；CGWindow
-   List 确认窗口对象存在（onscreen=1）。另登记：Bash 沙箱内启动的
-   GUI 子进程不进窗口服务器（非沙箱启动才可见）——后续实操会话注意。
-   补验动作：环境恢复后按 §2.4 清单实操 + 截图归档 + SPEC §3 GUI 行
-   回填。
+1. **GUI 实操环境不可得（2026-10-06，二次重试仍未恢复）**：实操会话中
+   窗口全部被窗口服务器挂到负坐标幻影屏（AppKit 仅报主屏 1440×900；
+   CGWindowList 中 app 主窗退化 210×140@(-226,191)，与 M9-WP01-T04 登记
+   的「210×141@负坐标环境异常」同款，本次幻影屏离线更甚）；System
+   Events AX 对 partisd-desktop / 终端 / ZCode 全局 0 windows（AXPress
+   驱动不可用）；`screencapture -x` 仅得主屏壁纸、`-l <主窗id>` 报
+   could not create image。**app 本体无恙**：`--bench-cold-start` 探针
+   `__BENCH_READY__ 293` 证实窗口+webview+page load 全链正常；评审同日
+   二次实测（启动 → CGWindowList 主窗 47998 仍 @(-226,191) 退化几何、
+   AX 对 Terminal 仍 0 窗口、`screencapture -l` 主窗仍失败、辅助窗
+   48000 仍黑面）。另登记：Bash 沙箱内启动的 GUI 子进程不进窗口服务
+   器（非沙箱启动才可见）——后续实操会话注意。补验动作：环境恢复后
+   按 §2.4 清单实操 + 截图归档 + SPEC §3 GUI 行回填。
+2. **T01/T02 合入时的组合验证义务（评审 finding，medium）**：本 PR 基
+   线无 T01（排序）/T02（详情展开），「过滤×排序」「过滤×详情展开」
+   组合结果正确性当前不可验证。已落结构锁：探针
+   `t03_mem_rows_source_through_filtered_single_point` 锁 renderMemRows
+   行源唯一经 `filteredMemRows()`（行模板禁止直取 lastMemRows 原始快
+   照——绕过滤即组合失效，合入即红）。**后续流程义务：T01/T02 合入时
+   必须显式验证组合正确性**（排序管线落在 renderMemRows 内沿此单点叠
+   加；详情展开行不得破坏过滤后行集与 meta 计数），以探针或 GUI 任一
+   形式留档，否则 SPEC §2.3「正交可叠加」验收悬空。
+3. **TDD 红态留痕不可复核（评审 finding，low，非缺陷指控）**：首 commit
+   单 commit 无法事后复核「先红」。如实记录：红态验证发生于 2026-10-06
+   实现会话——6 个 t03 探针先行全红（`function memTime(ns) {` 必须存在
+   /`filteredMemRows` 必须存在 等 6 处 panic，17 既有探针同时全绿），
+   实现后 23/23 绿；本修复 commit 追加第 24 个探针并对 memTime 阈值探
+   针做**突变验证**（`s<3600` 临时写错为 `s<6000` → 探针红「memTime 缺
+   档界 if (s < 3600)」→ 还原 24/24 绿），红绿两侧均有本会话可复算的
+   命令输出佐证。

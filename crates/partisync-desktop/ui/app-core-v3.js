@@ -775,11 +775,12 @@ async function memCall(tool, args) {
 
 // tags canonical JSON 串（memory.rs canonical_tags）→ 字符串数组；解析失败
 // 原样单元素透出。行内显示（memTags 逗号列表）与 T03 chips 派生共用同一
-// 解析，防两处语义漂移。
+// 解析，防两处语义漂移。null 元素经 ?? "" 归空——与旧 memTags 的
+// Array.join 对 null 的语义逐字等价（评审 finding：map(String) 会产 "null"）。
 function memTagArr(s) {
   try {
     const arr = JSON.parse(s);
-    return Array.isArray(arr) ? arr.map(String) : [String(s ?? "")];
+    return Array.isArray(arr) ? arr.map((t) => t ?? "") : [String(s ?? "")];
   } catch { return [String(s ?? "")]; }
 }
 

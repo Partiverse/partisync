@@ -1272,6 +1272,33 @@ fn t03_memtime_relative_tiers_and_absolute_fallback() {
         body.contains("if (!ns) return timeFmt(ns);"),
         "created_ns 缺失/0 必须回落 timeFmt（既有「—」）"
     );
+    // 分档阈值字面量逐字锁死（评审 finding：静态字符串探针对数值边界无
+    // 行为覆盖，单位写错如 s<600 探针照样绿——档界拼写、档序、同行 return
+    // 一并锁死，误写即红）。Math.max(0,…) 钳制未来时间戳/时钟回拨（负差
+    // 值 → 「刚刚」）。
+    assert!(
+        body.contains("Math.max(0,"),
+        "时间差必须钳制非负（未来时间戳/时钟回拨 → 「刚刚」）"
+    );
+    let tiers = [
+        ("if (s < 60)", "刚刚"),
+        ("if (s < 3600)", "分钟前"),
+        ("if (s < 86400)", "小时前"),
+        ("if (s <= 30 * 86400)", "天前"),
+    ];
+    let mut prev = 0usize;
+    for (threshold, tier) in tiers {
+        let at = body
+            .find(threshold)
+            .unwrap_or_else(|| panic!("memTime 缺档界 {threshold}（单位写错/档序漂移）"));
+        assert!(at >= prev, "memTime 档序漂移：{threshold} 档序错乱");
+        prev = at;
+        let line_end = body[at..].find('\n').unwrap_or(body[at..].len());
+        assert!(
+            body[at..at + line_end].contains(tier),
+            "{threshold} 与「{tier}」必须同一 return 行"
+        );
+    }
     // timeFmt 既有输出不回退：缺失「—」回落仍在。
     let tf = js_fn_body(UI_JS, "function timeFmt(ns) {");
     assert!(
@@ -1347,6 +1374,28 @@ fn t03_mem_filter_applies_to_rendered_rows_only() {
         ),
         "过滤只能作用于已渲染行集快照 lastMemRows（客户端）"
     );
+}
+
+/// 行渲染管线行源单点（SPEC §2.3「与 T01 排序正交可叠加——验收只锁组合
+/// 结果正确」的结构锁）：renderMemRows 的行源必须唯一经 filteredMemRows()
+/// ——chips 过滤是行渲染的必经单点，T01 排序（合入后）无论落在 renderMem
+/// Rows 管线内还是等价组合，「先过滤后排序」语义不因绕过过滤直取原始快
+/// 照而失效；行模板不得出现 lastMemRows 直接 map/filter（绕过滤即组合失
+/// 效）。T01/T02 合入时须补「过滤×排序 / 过滤×详情展开」组合显式验证
+/// （任务卡遗留②登记）。
+#[test]
+fn t03_mem_rows_source_through_filtered_single_point() {
+    let body = js_fn_body(UI_JS, "function renderMemRows(noRowsHint) {");
+    assert!(
+        body.contains("const rows = filteredMemRows();"),
+        "行渲染行源必须唯一经 filteredMemRows()（chips 过滤单点，组合锚点）"
+    );
+    for banned in ["lastMemRows.map", "lastMemRows.filter", "r.results.map"] {
+        assert!(
+            !body.contains(banned),
+            "行渲染不得绕过 filteredMemRows 直取原始快照（组合失效面）：{banned}"
+        );
+    }
 }
 
 /// meta「显示 n / 共 m」同步 + 新检索重置选中态并重派生 chips（沿 T04
