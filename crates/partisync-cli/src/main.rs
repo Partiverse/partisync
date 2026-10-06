@@ -48,11 +48,13 @@ async fn main() {
         Some("dedupe") => dedupe_cmd(&args[1..]).await,
         Some("search") => search_cmd(&args[1..]).await,
         Some("reindex") => reindex::reindex_cmd(&args[1..]).await,
+        Some("memory-gc") => memory_gc_cmd(&args[1..]).await,
         _ => {
             eprintln!(
                 "partisync {}\n\n用法:\n  partisync index <root> [--db <path>] [--cas <dir>]\n  partisync ui [--db <path>] [--cas <dir>] [--addr 127.0.0.1:8080]\n  partisync watch <root> [--db <path>] [--cas <dir>] [--debounce-ms 1000]\n  partisync resume [--job <id>]\n  partisync jobs\n  partisync index-remote --scheme s3 --bucket <b> --endpoint <url> [--prefix /] [--db] [--cas]\n  partisync scan-plan --scheme fs --root <dir> [--prefix /] [--concurrency N] [--journal <path>]  扫描调度 dry-run（分片并行 + 断点续扫）\n  partisync event-drain --source mock [--space <s>] [--journal <path>] [--cursor <tok>]  云事件流增量 journal（v0.1 mock source）\n  partisync ls <path> [--db <path>]\n  partisync find <q> [--db <path>]\n  partisync dedupe [--top N] [--db <path>]
   partisync search <query> [--db <path>] [--index-root <path>] [--mode hybrid|bm25] [--limit N]  混合检索
   partisync reindex [--db <path>] [--cas <dir>] [--index-root <path>] [--source-root <dir>]  检索索引重建（text/* 全文，M9-WP03-T06）
+  partisync memory-gc [--db <path>] [--retention-days N]  记忆墓碑 GC（默认保留 30 天；物理清除过保留期墓碑+根重算，不产 oplog）
   partisync sidecar-run <root> [--db <path>] [--sidecar-dir <dir>]   Sidecar 管线（缩略图/EXIF/嵌入）
   partisync sidecar-status [--db <path>]",
                 env!("CARGO_PKG_VERSION")
@@ -650,6 +652,46 @@ async fn find_cmd(args: &[String]) -> i32 {
                 println!("{:>12}  {}", fmt_bytes(e.size), e.path);
             }
             println!("（{n} 条，上限 200）");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+/// 记忆墓碑 GC（M10-WP04 §2.1 T03）：物理清除 hlc 早于截止水位的墓碑行 +
+/// 根重算（GC 动根）+ FTS 随触发器自动清。默认保留 30 天；`--retention-days
+/// 0` = 立即清偿全部墓碑。本地维护动作不产 oplog（墓碑 op 已传播）。
+async fn memory_gc_cmd(args: &[String]) -> i32 {
+    let db = flag_value(args, "--db").unwrap_or_else(|| DEFAULT_DB.into());
+    let retention: u32 = match flag_value(args, "--retention-days") {
+        Some(v) => match v.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("error: --retention-days 须为非负整数（天）");
+                return 2;
+            }
+        },
+        None => 30,
+    };
+    let Ok(store) = open_db(&db).await else {
+        return 1;
+    };
+    match store.memory_gc(retention).await {
+        Ok(report) => {
+            println!(
+                "memory-gc 完成：物理清除 {} 条过保留期墓碑（保留期 {retention} 天），残余墓碑 {} 条",
+                report.purged, report.remaining_tombstones
+            );
+            if report.purged > 0 {
+                // SPEC M10-WP04 §6-R2 复活边界诚实登记（任务卡交付物 1）
+                println!(
+                    "注：清除后离线旧端重放墓碑前 upsert 可致行复活（SPEC §6-R2）；\
+                     运行口径以保留期 ≥ 多端收敛窗口兜底。"
+                );
+            }
             0
         }
         Err(e) => {

@@ -1,6 +1,7 @@
-//! M10-WP04-T01 探针（SPEC M10-WP04 §2.1/§3 T01；P20 措辞注记判例延伸，
+//! M10-WP04-T01/T03 探针（SPEC M10-WP04 §2.1/§3；P20 措辞注记判例延伸，
 //! wp02_memory.rs 判例）：软删墓碑不动根 / update 墓碑旧+写新 / 复活 /
-//! verify 实态旗标（deleted/tombstones）透出 / oplog ("memory","delete") 面。
+//! verify 实态旗标（deleted/tombstones）透出 / oplog ("memory","delete") 面 /
+//! T03 memory GC——过保留期墓碑物理清除（动根）+ 保留期内不动 + 幂等空转。
 
 use partisync_graph::memory::inclusion_proof;
 use partisync_graph::Store;
@@ -282,4 +283,138 @@ async fn t01_write_revives_tombstone() {
     assert!(again.deduplicated, "活行幂等");
     let row2 = store.memory_by_id(&id).await.expect("查行").unwrap();
     assert_eq!(row2.hlc, row.hlc, "活行幂等不推 hlc");
+}
+
+/// §3-T03 GC 探针（主路）：过保留期墓碑物理清除——行数减、根值变（GC
+/// 动根，与软删不动根对照）、memory_count 更新、verify 重算=快照 ok（P20
+/// 全套不回退）、FTS 随 AFTER DELETE 触发器同步清（store.rs v17 防御段
+/// memory_fts_ad）、检索不见；保留期内墓碑与活行不动；GC 不产 oplog。
+/// 判据 = 墓碑行 hlc（delete op 水位，定宽 hex 字典序=时间序，Hlc::to_key
+/// 判例 partisync-core/src/hlc.rs:100）早于截止水位（now − 保留期）。
+#[tokio::test]
+async fn t03_gc_purges_expired_tombstone_keeps_fresh() {
+    let store = seeded_store().await;
+    let a = store
+        .memory_write("过保留期墓碑 fact row A", &["gc".into()], &json!({}))
+        .await
+        .expect("写 A")
+        .memory_id;
+    let b = store
+        .memory_write("保留期内墓碑 fact row B", &["gc".into()], &json!({}))
+        .await
+        .expect("写 B")
+        .memory_id;
+    let c = store
+        .memory_write("活行 fact row C", &["live".into()], &json!({}))
+        .await
+        .expect("写 C")
+        .memory_id;
+    store.memory_delete(&a).await.expect("删 A（墓碑）");
+    store
+        .memory_delete(&b)
+        .await
+        .expect("删 B（墓碑，保留期内）");
+    // A 回填远古水位（delete op 水位即 GC 判据；定宽 hex 键形同 Hlc::to_key：
+    // phys=1000ms, logic=0, device=1 ⇒ 早于任何截止水位）
+    let ancient = format!("{:016x}-{:08x}-{:016x}", 1_000u64, 0u32, 1u64);
+    sqlx::query("UPDATE memory SET hlc = ? WHERE memory_id = ?")
+        .bind(&ancient)
+        .bind(&a)
+        .execute(store.pool_ref())
+        .await
+        .expect("回填远古 hlc");
+
+    let snap0 = store.memory_root_snapshot().await.expect("快照").unwrap();
+    assert_eq!(store.memory_rows().await.expect("rows").len(), 3);
+    let oplog0 = store.pending_oplog().await.expect("oplog").len();
+
+    let report = store.memory_gc(30).await.expect("gc");
+
+    // 过保留期墓碑清除；保留期内墓碑与活行不动
+    assert_eq!(report.purged, 1, "只清过保留期墓碑");
+    assert_eq!(report.remaining_tombstones, 1, "保留期内墓碑不动");
+    assert_eq!(store.memory_rows().await.expect("rows").len(), 2, "行数减");
+    assert!(
+        store.memory_by_id(&a).await.expect("查 A").is_none(),
+        "过保留期墓碑物理清除"
+    );
+    let row_b = store.memory_by_id(&b).await.expect("查 B").unwrap();
+    assert_eq!(row_b.deleted, 1, "保留期内墓碑保留");
+    let row_c = store.memory_by_id(&c).await.expect("查 C").unwrap();
+    assert_eq!(row_c.deleted, 0, "活行不动");
+
+    // GC 动根（与软删不动根对照）+ memory_count 更新
+    let snap1 = store.memory_root_snapshot().await.expect("快照").unwrap();
+    assert_ne!(snap1.root, snap0.root, "GC 动根");
+    assert_eq!(snap1.memory_count, 2, "memory_count 更新");
+
+    // verify 重算=快照不回退（P20 全套语义）
+    let verify = store.verify_memory().await.expect("全检");
+    assert!(verify.ok, "GC 后重算=快照");
+    assert_eq!(verify.memory_count, 2);
+    assert_eq!(verify.tombstones, 1, "残余墓碑计数");
+
+    // FTS 随 AFTER DELETE 触发器同步清 + 检索面不见
+    let fts_a: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_fts WHERE memory_id = ?")
+        .bind(&a)
+        .fetch_one(store.pool_ref())
+        .await
+        .expect("FTS 计数");
+    assert_eq!(fts_a, 0, "FTS 随物理删除同步清");
+    assert!(
+        store
+            .memory_search(Some("row A"), None, None, 20, 0)
+            .await
+            .expect("search A")
+            .results
+            .is_empty(),
+        "清除后检索不见"
+    );
+    assert_eq!(
+        store
+            .memory_search(Some("row C"), None, None, 20, 0)
+            .await
+            .expect("search C")
+            .total,
+        1,
+        "活行检索不受影响"
+    );
+
+    // GC 本地维护动作不产 oplog（墓碑 op 已传播）
+    assert_eq!(
+        store.pending_oplog().await.expect("oplog").len(),
+        oplog0,
+        "GC 不产 oplog"
+    );
+}
+
+/// §3-T03 GC 幂等探针：空库 gc 空转（purged=0、不建根快照行、连续两次
+/// 结果恒定）；无墓碑库（只有活行）gc 不动根、count 不变。
+#[tokio::test]
+async fn t03_gc_idle_noop_idempotent() {
+    let store = seeded_store().await;
+    // 空库：GC 零状态变化
+    let r1 = store.memory_gc(30).await.expect("空库 gc");
+    assert_eq!(r1.purged, 0);
+    assert_eq!(r1.remaining_tombstones, 0);
+    assert!(
+        store.memory_root_snapshot().await.expect("快照").is_none(),
+        "空库 GC 不建快照行（零状态变化）"
+    );
+    let r2 = store.memory_gc(30).await.expect("空库 gc 二次");
+    assert_eq!(r2.purged, 0, "空库 gc 幂等");
+    assert_eq!(r2.remaining_tombstones, 0);
+
+    // 无墓碑库：根/count 不变
+    store
+        .memory_write("无墓碑 fact row", &[], &json!({}))
+        .await
+        .expect("写活行");
+    let snap = store.memory_root_snapshot().await.expect("快照").unwrap();
+    let r3 = store.memory_gc(30).await.expect("无墓碑 gc");
+    assert_eq!(r3.purged, 0);
+    assert_eq!(r3.remaining_tombstones, 0);
+    let snap2 = store.memory_root_snapshot().await.expect("快照").unwrap();
+    assert_eq!(snap2.root, snap.root, "无墓碑 GC 不动根");
+    assert_eq!(snap2.memory_count, snap.memory_count, "count 不变");
 }
