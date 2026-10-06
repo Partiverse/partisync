@@ -299,6 +299,16 @@ function searchArgs(q) {
   return args;
 }
 
+// M10-WP01-T02（SPEC §2.2）：命中摘要渲染 = esc() 全串**之后**再做
+// sentinel→<mark> 替换。后端（partisync-index bm25.rs）载荷是纯文本 +
+// [[/]] 包裹命中词；不变量：highlight 字段不得以模板插值形态直接进
+// innerHTML（唯一入口本函数），sentinel 之外零 HTML 引入（次序反了 =
+// 文档内容逃逸面）。
+function snippetHtml(h) {
+  if (!h.highlight) return "—";
+  return esc(h.highlight).replaceAll("[[", "<mark>").replaceAll("]]", "</mark>");
+}
+
 function searchSkeleton(n) {
   return Array.from({ length: n }, (_, i) =>
     `<article class="hit skel-row"><div class="skel skel-fp"></div>
@@ -395,7 +405,7 @@ function renderSearchResults() {
       <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
       <div class="body">
         <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
-        <div class="snippet">${h.highlight ? esc(h.highlight) : "—"}</div>
+        <div class="snippet">${snippetHtml(h)}</div>
       </div>
       <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>
       <div class="num">${h.score.toFixed(2)}</div></div>
@@ -837,6 +847,13 @@ async function memWrite() {
 }
 
 // ── 绑定（CSP 禁 inline onclick） ──
+// M10-WP01-T02 GUI 验收实测：CSP `script-src 'self'` 拦截 index.html 的
+// inline `onsubmit="return false"`（M9-WP03-T01 硬化收敛漏网）→ 检索
+// form（资产 + 记忆两处 query-row）默认提交 → 页面 reload（回浏览
+// tab、查询清空），检索 UI 完全不可用。JS 侧 preventDefault 兜底
+// （探针 ui_hardening 锁接线）。
+document.querySelectorAll("form.query-row").forEach(f =>
+  f.addEventListener("submit", (e) => e.preventDefault()));
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.removeAttribute("aria-current"));
   b.setAttribute("aria-current", "page");
