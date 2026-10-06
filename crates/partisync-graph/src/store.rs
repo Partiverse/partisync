@@ -77,6 +77,15 @@ pub struct OplogRow {
     pub at_ns: i64,
 }
 
+/// 记忆 GC 报告（M10-WP04 §2.1 T03，任务卡 `GcReport` 形态）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryGcReport {
+    /// 物理清除的过保留期墓碑行数。
+    pub purged: u64,
+    /// GC 后残余墓碑数（保留期内墓碑 + 无法定年的 NULL `hlc` 墓碑）。
+    pub remaining_tombstones: u64,
+}
+
 /// 远端条目应用结果（M2-WP02）：`path` 为最终落位；
 /// `conflict = Some` 表示触发「保留两者」改挂（P11 血缘由 session 落档）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2665,6 +2674,50 @@ impl Store {
             tombstones: rows.iter().filter(|r| r.deleted != 0).count(),
             ok: root_ok && content_mismatches.is_empty(),
             content_mismatches,
+        })
+    }
+
+    /// 记忆 GC（M10-WP04 §2.1 T03 硬清除）：物理删除「墓碑行 hlc 早于截止
+    /// 水位」的行。判据 = 行 `hlc`（delete op 水位，定宽 hex 字典序=时间序，
+    /// [`Store::apply_remote_tag`] 同口径）；截止水位 = 本地时钟 now − 保留期
+    /// （默认 30 天，CLI `--retention-days N`），device 位取 0 ⇒ 同毫秒并列
+    /// 键排序在先，边界墓碑保守保留。清除即**动根**（与软删不动根对照）：
+    /// purged>0 时重算根快照（根为派生值 P20-c，崩溃后重算即恢复）+
+    /// memory_count 更新；purged=0 零状态变化（不产 oplog、不建/不动快照
+    /// 行）——GC 为本地维护动作，墓碑 op 已传播，不产 oplog（§2.1）。FTS
+    /// 随 AFTER DELETE 触发器自动清（v17 防御段 memory_fts_ad）。
+    /// `hlc` 为 NULL 的行正常写路径不产生（全部落笔臂均回填水位），若存在
+    /// 则无法定年，保守保留。§6-R2 复活边界（诚实登记）：GC 后离线旧端
+    /// 重放墓碑前 upsert 可致行复活（行已缺失无从比对 hlc）——运行口径
+    /// 保留期 ≥ 多端收敛窗口；彻底方案（墓碑 op 水位比对）挂 ADR-0029
+    /// 修订评估（条件触发）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn memory_gc(&self, retention_days: u32) -> Result<MemoryGcReport, PartisyError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let retention_ms = u64::from(retention_days).saturating_mul(86_400_000);
+        let cutoff =
+            partisync_core::Hlc::from_wall(0, now_ms.saturating_sub(retention_ms)).to_key();
+        let result =
+            sqlx::query("DELETE FROM memory WHERE deleted != 0 AND hlc IS NOT NULL AND hlc < ?")
+                .bind(&cutoff)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("memory gc", e))?;
+        let purged = result.rows_affected();
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM memory WHERE deleted != 0")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| db_err("memory gc 计数", e))?;
+        if purged > 0 {
+            self.refresh_memory_root().await?;
+        }
+        Ok(MemoryGcReport {
+            purged,
+            remaining_tombstones: u64::try_from(remaining).unwrap_or(u64::MAX),
         })
     }
 }
