@@ -44,7 +44,16 @@
         <thead><tr><th></th><th>名称</th><th>大小</th><th>修改时间</th><th>内容身份</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
-      <aside id="detail-panel" class="detail" style="display:none"></aside>
+      <!-- M10-WP03-T02（SPEC §2.2）：详情面板静态头（× 常驻 + 内容容器
+           detail-body——面板内容每开重渲，× 头不被 innerHTML 重写）；
+           关闭 = display:none + detail-body 清空（零列表触碰、零重 IPC）。 -->
+      <aside id="detail-panel" class="detail" style="display:none">
+        <div class="detail-head">
+          <span class="section-tag">detail</span>
+          <button id="detail-close" class="detail-close" type="button" aria-label="关闭详情" title="关闭（Esc）">×</button>
+        </div>
+        <div id="detail-body"></div>
+      </aside>
     </div>
   </section>
 

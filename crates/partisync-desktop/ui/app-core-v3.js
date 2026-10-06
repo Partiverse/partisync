@@ -125,35 +125,100 @@ async function browse(path) {
   });
 }
 
-// ── B2. 条目详情面板（M8-WP05-T02；SPEC §2.2） ──
+// ── B2. 条目详情面板（M8-WP05-T02；M10-WP03-T02 关闭/补全/复制，SPEC §2.2） ──
+// 关闭（硬约束）：display:none + 内容清空；不清空/重载浏览列表（#rows 零
+// 触碰）、零重发查询（函数体无查询站点）；再点行重开沿既有行 onclick →
+// showDetail。× 按钮为 index.html 静态头（innerHTML 重写不丢）；加载中途
+// 关闭 → 回包弃渲（可见性门控，不回填已关面板）。
+function closeDetail() {
+  const panel = $("detail-panel");
+  panel.style.display = "none";
+  $("detail-body").innerHTML = "";
+}
+
+// Esc 关闭（§7-R4）：仅面板可见时生效；输入框聚焦时直接交还（INPUT/
+// TEXTAREA 不拦截，保输入框原生 Esc 语义），不抢焦点语义。
+function escClose(e) {
+  if (e.key !== "Escape") return;
+  const panel = $("detail-panel");
+  if (panel.style.display === "none") return;
+  const tag = e.target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+  closeDetail();
+}
+
+// 复制（沿 M10-WP02 §2.2 契约）：webview 内建 navigator.clipboard.writeText
+// （零新增依赖）；API 不可用/拒权 → 隐藏 textarea + execCommand 回落
+// （§7-R2 实现期拍板）。成功反馈 = 按钮文案瞬变「已复制」1.5s 回落；
+// 防重入：原始文案持久存 dataset（防把「已复制」捕获为回落文案）+ 旧
+// timer clearTimeout（防双 timer 竞争致永久停留「已复制」）。
+function detailCopy(btn, text) {
+  if (!btn.dataset.copyLabel) btn.dataset.copyLabel = btn.textContent;
+  const done = () => {
+    clearTimeout(Number(btn.dataset.copyTimer));
+    btn.textContent = "已复制";
+    btn.dataset.copyTimer = String(setTimeout(() => {
+      btn.textContent = btn.dataset.copyLabel;
+      btn.removeAttribute("data-copy-label");
+      btn.removeAttribute("data-copy-timer");
+    }, 1500));
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => detailCopyFallback(text, done));
+  } else {
+    detailCopyFallback(text, done);
+  }
+}
+
+function detailCopyFallback(text, done) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  if (ok) done();
+}
+
 async function showDetail(contentId, name) {
   const panel = $("detail-panel");
+  const body = $("detail-body");
   panel.style.display = "";
-  panel.innerHTML = `<div class="section-tag">detail</div>
-    <div class="empty">加载中…</div>`;
+  body.innerHTML = `<div class="empty">加载中…</div>`;
   let d;
   try {
     d = await call("asset_detail", { prefix: contentId });
   } catch (e) {
-    panel.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
+    if (panel.style.display === "none") return; // 加载中途已关闭——弃渲
+    body.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
     return;
   }
+  if (panel.style.display === "none") return; // 加载中途已关闭——弃渲
   const fp = fpOf(contentId);
   const copies = d.copies.map(c =>
-    `<li>${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></li>`).join("");
-  panel.innerHTML = `
+    `<li><span class="copy-path">${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></span><button type="button" class="btn ghost copy-btn" data-copy-text="${esc(c.path)}" aria-label="复制副本路径">复制</button></li>`).join("");
+  body.innerHTML = `
     <h2>${esc(name)}</h2>
     <dl>
       <dt>大小</dt><dd>${sizeFmt(d.size)}</dd>
+      <dt>修改时间</dt><dd>${timeFmt(d.copies[0]?.mtime_ns)}</dd>
       <dt>副本</dt><dd>${d.copies.length} 处</dd>
     </dl>
     <div class="fingerprint" style="--fp: ${fp}">
       <div class="label">内容身份（blake3）——指纹色由此派生</div>
       <div class="strip">${Array.from({length: 8}, (_, i) =>
         `<i style="background: hsl(${(i * 47 + parseInt(contentId.slice(0, 2), 16) * 137.508) % 360} 55% 55%)"></i>`).join("")}</div>
-      <div class="hash">${contentId.slice(0, 16)}…</div>
+      <div class="hash">${esc(contentId.slice(0, 16))}…</div>
+      <button type="button" class="btn ghost copy-btn" data-copy-text="${esc(contentId)}" aria-label="复制完整 content_id（64 hex）">复制</button>
     </div>
     <div class="copies"><div class="label">副本路径</div><ul>${copies || "<li>—</li>"}</ul></div>`;
+  body.querySelectorAll("button.copy-btn").forEach((b) => {
+    b.onclick = () => detailCopy(b, b.dataset.copyText);
+  });
 }
 
 // ── C. 检索（旗舰；三态全覆盖——设计审计硬约束） ──
@@ -741,6 +806,10 @@ $("btn-ext-call").onclick = doExtCall;
 $("btn-mem-search").onclick = loadMemories;
 $("mem-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadMemories(); });
 $("btn-mem-write").onclick = memWrite;
+// 详情面板关闭（M10-WP03-T02）：× 静态头 + Esc 双通道（CSP 禁 inline
+// onclick；可见性/焦点门控在 escClose 内，SPEC §2.2 + §7-R4）。
+$("detail-close").onclick = closeDetail;
+document.addEventListener("keydown", escClose);
 
 setInterval(async () => {
   await loadStats();
