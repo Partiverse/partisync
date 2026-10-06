@@ -96,9 +96,66 @@ function fpOf(contentId) {
   return `hsl(${h} 55% 55%)`;
 }
 
+// M10-WP03-T03（SPEC §2.3）：表头客户端排序——名称/大小/修改时间三列
+// 可排（内容身份列除外）；null = 服务端序（children() 返回序，ipc.rs:90-96）。
+// 点击循环 升序 → 降序 → 回服务端序；键相同时目录行（kind=1）恒在文件行前
+// （次级键 kind 降序，文件管理器惯例）；换目录（面包屑/目录行导航）重置
+// 排序态（沿 M10-WP02 T01「新检索重置」判例）。children() 无分页、全量
+// 返回该目录条目——排序作用于全集，无「窗口序」误读面。
+let sortKey = null;
+let sortDir = 1; // 1 = 升序，-1 = 降序
+let lastRows = []; // 最近一次 list 快照（服务端序）；排序点击重渲不重发 IPC
+
+function cycleSort(key) {
+  if (sortKey !== key) { sortKey = key; sortDir = 1; }
+  else if (sortDir === 1) sortDir = -1;
+  else { sortKey = null; sortDir = 1; } // 第三点回服务端序
+  renderSortArrows();
+  renderRows();
+}
+
+// 箭头指示：当前键 ▲/▼ 标方向 + th aria-sort 同步；先全清再设（键切换/
+// 回默认不残留旧指示）；无排序态 = 全空。
+function renderSortArrows() {
+  document.querySelectorAll("#view-browse th[data-sort]").forEach((th) => th.removeAttribute("aria-sort"));
+  document.querySelectorAll("#view-browse .sort-arrow").forEach((s) => { s.textContent = ""; });
+  if (!sortKey) return;
+  const th = document.querySelector(`#view-browse th[data-sort="${sortKey}"]`);
+  const arrow = document.querySelector(`#view-browse .sort-arrow[data-key="${sortKey}"]`);
+  if (th) th.setAttribute("aria-sort", sortDir === 1 ? "ascending" : "descending");
+  if (arrow) arrow.textContent = sortDir === 1 ? "▲" : "▼";
+}
+
+// 排序作用于 lastRows 全量副本（不 mutate 服务端序快照）；kind 比较
+// 不乘 dir——目录恒在文件前，升降序双向成立。
+function sortedRows() {
+  if (!sortKey) return lastRows;
+  const dir = sortDir;
+  return [...lastRows].sort((a, b) => {
+    if ((a.kind ?? 0) !== (b.kind ?? 0)) return (b.kind ?? 0) - (a.kind ?? 0);
+    let c;
+    if (sortKey === "name") c = String(a.name ?? "").localeCompare(String(b.name ?? ""), "zh-CN");
+    else if (sortKey === "size") c = (a.size ?? 0) - (b.size ?? 0);
+    else c = (a.mtime_ns ?? 0) - (b.mtime_ns ?? 0);
+    return c * dir;
+  });
+}
+
+// mtime 相对显示（SPEC §2.3）：≤30 天复用既有 relTime；>30 天回落绝对
+// 日期（本卡自含实现，不依赖 M10-WP02-T03 落地顺序）；缺失/0 → 既有
+// 「—」回落（timeFmt 判据）。title 悬浮 = timeFmt 完整本地时间（见行模板）。
+function mtimeDisp(ns) {
+  if (!ns) return "—";
+  const ageS = Math.max(0, (Date.now() - ns / 1e6) / 1000);
+  return ageS > 30 * 86400 ? new Date(ns / 1e6).toLocaleDateString("zh-CN") : relTime(ns);
+}
+
 async function browse(path) {
-  curPath = path || "/";
+  const next = path || "/";
+  if (next !== curPath) { sortKey = null; sortDir = 1; renderSortArrows(); } // 换目录重置排序态
+  curPath = next;
   const rows = await call("list", { prefix: curPath });
+  lastRows = rows;
   const crumbs = breadcrumbFor(curPath);
   $("crumbs").innerHTML = crumbs.map((e, i) =>
     i === crumbs.length - 1
@@ -108,12 +165,19 @@ async function browse(path) {
   $("crumbs").querySelectorAll("a[data-path]").forEach(a => {
     a.onclick = () => browse(a.dataset.path);
   });
+  renderRows();
+}
+
+// 行渲染（自 browse 拆出，供排序点击重渲与 5s 轮询刷新共用）；空态文案
+// 维持原文不动（SPEC §2.3「空态不回退」）。
+function renderRows() {
+  const rows = sortedRows();
   $("rows").innerHTML = rows.length ? rows.map(e => {
     const dir = e.kind === 1;
     return `<tr class="${dir ? "row-dir" : "row-file"}"${dir ? ` data-path="${esc(e.path)}" style="cursor:pointer"` : ` data-cid="${esc(e.content_id)}" data-name="${esc(e.name)}" style="cursor:pointer"`}${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>
       <td class="icon" aria-hidden="true">${dir ? "▸" : "·"}</td>
       <td>${esc(e.name)}</td><td class="size">${dir ? "—" : sizeFmt(e.size)}</td>
-      <td class="mtime">${timeFmt(e.mtime_ns)}</td>
+      <td class="mtime" title="${esc(timeFmt(e.mtime_ns))}">${mtimeDisp(e.mtime_ns)}</td>
       <td class="fp"${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>${e.content_id ? "<i></i>" + esc(e.content_id.slice(0, 8)) : "—"}</td></tr>`;
   }).join("") : `<tr><td colspan="5" class="empty">${curPath === "/" ? "本机还没有索引文件——运行 <b>partisync index &lt;路径&gt;</b> 开始建立索引" : "空目录"}</td></tr>`;
   $("rows").querySelectorAll("tr[data-path]").forEach(tr => {
@@ -810,6 +874,11 @@ $("btn-mem-write").onclick = memWrite;
 // onclick；可见性/焦点门控在 escClose 内，SPEC §2.2 + §7-R4）。
 $("detail-close").onclick = closeDetail;
 document.addEventListener("keydown", escClose);
+// 浏览表头排序（M10-WP03-T03）：三列点击循环 升序→降序→服务端序
+// （CSP 禁 inline onclick；表头为 index.html 静态结构，重渲不丢）。
+document.querySelectorAll("button.th-sort").forEach((b) => {
+  b.onclick = () => cycleSort(b.dataset.key);
+});
 
 setInterval(async () => {
   await loadStats();
