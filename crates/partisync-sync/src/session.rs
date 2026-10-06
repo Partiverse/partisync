@@ -242,6 +242,14 @@ async fn apply_row(
             count_and_relay(dst, row, applied, stats).await?;
             Ok(applied)
         }
+        ("memory", "delete") => {
+            // 软删墓碑（M10-WP04 §2.1）：delete hlc > 行水位才落位，晚到拒绝
+            // （沿 ("tag","remove") 判例）；复活传播 = 胜出 upsert 清墓碑。
+            let id = payload["memory_id"].as_str().unwrap_or_default();
+            let applied = dst.apply_remote_memory_delete(id, &row.hlc).await?;
+            count_and_relay(dst, row, applied, stats).await?;
+            Ok(applied)
+        }
         _ => Ok(false), // 未知实体：v1 忽略（向后兼容）
     }
 }
