@@ -570,6 +570,140 @@ mod tests {
             "错误必须显式指向校验/对账失败（err={err}）"
         );
 
+        // 注入③（对抗评审纵深防御）：清单行被篡改为非法 hash（含路径穿越
+        // 形态）→ 重组入口显式 Err，绝不喂给 CAS object_path（防 <2 字节
+        // 切片 panic 与穿越读）
+        sqlx::query("UPDATE content_chunk SET chunk_hash = '../etc/passwd' WHERE content_id = ? AND seq = 1")
+            .bind(&cid2)
+            .execute(store.pool_ref())
+            .await
+            .unwrap();
+        let err = store
+            .reassemble_content(&cas, &cid2, Some(&root2))
+            .await
+            .expect_err("清单行非法 hash 必显式 Err");
+        assert!(
+            format!("{err}").contains("非法"),
+            "错误必须显式指向非法清单行（err={err}）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 对抗评审修复回归（2026-10-07，v18 FK 级联）：content_chunk 落表后，
+    /// 既有 content 清理面——`remove_entry` 孤儿清理（journal apply_pending
+    /// 删除事件 / trash_entry 底座）与 `add_entry` 换内容旧内容清理——删除
+    /// content 父行不得被 v18 FK 子行炸掉（评审在 PR head 实证复现：code 787
+    /// FOREIGN KEY constraint failed，且 entry 行已删、content+清单永久泄漏）。
+    /// 清单是 content 派生数据 → `ON DELETE CASCADE` 随父行清。
+    /// 必须用 [`Store::open`] 文件库：`open_in_memory` 不启 foreign_keys，
+    /// 验证不了约束与级联（生产路径 open() 才设 foreign_keys(true)）。
+    #[tokio::test]
+    async fn t04_chunked_content_cleanup_survives_manifest_fk() {
+        let dir = std::env::temp_dir().join(format!("t04-cascade-{}", Ulid::now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("partisync.db")).await.unwrap();
+        store
+            .seed_device_volume("dev-a", "Device A", "fp-a")
+            .await
+            .unwrap();
+
+        // ① remove_entry 孤儿清理路径：大文件真实分块入库 → 删条目
+        let big = {
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            let cas = ChunkStore::open(&dir.join("cas")).await.unwrap();
+            let big = big_text(2500 * 1024, "cascadewaldo");
+            std::fs::write(dir.join("src/cascade.md"), &big).unwrap();
+            partisync_graph::indexer::index_path(&store, Some(&cas), &dir.join("src"))
+                .await
+                .unwrap();
+            big
+        };
+        let cid = partisync_cas::content_hash(&big);
+        let manifest_pre: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM content_chunk WHERE content_id = ?")
+                .bind(&cid)
+                .fetch_one(store.pool_ref())
+                .await
+                .unwrap();
+        assert!(
+            manifest_pre >= 2,
+            "前置：大文件必须已落清单（got {manifest_pre}）"
+        );
+        store.remove_entry("/cascade.md").await.unwrap();
+        let entry_left: i64 = sqlx::query_scalar("SELECT count(*) FROM entry WHERE content_id = ?")
+            .bind(&cid)
+            .fetch_one(store.pool_ref())
+            .await
+            .unwrap();
+        let content_left: i64 = sqlx::query_scalar("SELECT count(*) FROM content WHERE id = ?")
+            .bind(&cid)
+            .fetch_one(store.pool_ref())
+            .await
+            .unwrap();
+        let manifest_left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM content_chunk WHERE content_id = ?")
+                .bind(&cid)
+                .fetch_one(store.pool_ref())
+                .await
+                .unwrap();
+        assert_eq!(entry_left, 0);
+        assert_eq!(
+            content_left, 0,
+            "孤儿 content 必须照常清理（不被 FK 子行炸掉）"
+        );
+        assert_eq!(
+            manifest_left, 0,
+            "清单是 content 派生数据，必须随父行级联清（不留孤儿）"
+        );
+
+        // ② add_entry 换内容路径（watch/journal 写面）：旧 content + 旧清单级联清
+        let cid_a = partisync_cas::content_hash(b"content-a-bytes");
+        let refs = ["aa".repeat(32), "bb".repeat(32)];
+        store
+            .add_file_batch(&[partisync_graph::store::FileInsert {
+                id: Ulid::now().to_string(),
+                parent_id: None,
+                name: "swap.md".into(),
+                path: "/swap.md".into(),
+                size: 16,
+                mtime_ns: 1,
+                content: Some((cid_a.clone(), 16)),
+                chunk_root: Some(partisync_cas::chunk_root(
+                    &refs.iter().map(String::as_str).collect::<Vec<_>>(),
+                )),
+                chunk_hashes: refs.to_vec(),
+            }])
+            .await
+            .unwrap();
+        store
+            .add_entry(
+                None,
+                "swap.md",
+                "/swap.md",
+                EntryKind::File,
+                5,
+                2,
+                Some(("content-b-bytes", 5)),
+                None,
+            )
+            .await
+            .unwrap();
+        let swap_content_left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM content WHERE id = ?")
+                .bind(&cid_a)
+                .fetch_one(store.pool_ref())
+                .await
+                .unwrap();
+        let swap_manifest_left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM content_chunk WHERE content_id = ?")
+                .bind(&cid_a)
+                .fetch_one(store.pool_ref())
+                .await
+                .unwrap();
+        assert_eq!(swap_content_left, 0, "换内容后旧 content 必须照常清理");
+        assert_eq!(swap_manifest_left, 0, "换内容后旧清单必须随父行级联清");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -2782,6 +2782,18 @@ impl Store {
                 ),
             });
         }
+        // 防御纵深（对抗评审 2026-10-07）：清单行只应含 put_chunks 的 hex
+        // 输出，但行可能被篡改——非法 hash 不得喂给 CAS object_path
+        // （<2 字节触发 `&hash[..2]` 切片 panic；含 `/`/`..` 可路径穿越读）。
+        if let Some(bad) = hashes.iter().position(|h| !is_blake3_hex(h)) {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!("内容 {content_id} 清单行 seq={bad} 非法 hash（非 64 位小写 hex）")
+                        .into(),
+                ),
+            });
+        }
         let mut bytes = Vec::new();
         for (seq, h) in hashes.iter().enumerate() {
             match cas.get(h).await {
@@ -2828,6 +2840,13 @@ impl Store {
 /// 32 字节 → hex（64 字符小写）。
 fn hex32(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// blake3 hex 输出形态校验：恒 64 字符小写十六进制（v18 content_chunk
+/// 清单行防御校验，对抗评审 2026-10-07——清单行直通 CAS object_path，
+/// 非法形态必须在重组入口拦下）。
+fn is_blake3_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 use std::str::FromStr as _;
