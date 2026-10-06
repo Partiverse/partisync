@@ -41,7 +41,14 @@
     <div class="crumbs" id="crumbs"></div>
     <div class="stage">
       <table class="panel-table" aria-label="目录条目">
-        <thead><tr><th></th><th>名称</th><th>大小</th><th>修改时间</th><th>内容身份</th></tr></thead>
+        <!-- M10-WP03-T03（SPEC §2.3）：名称/大小/修改时间三列表头排序钮
+             （点击循环 升序→降序→服务端序；箭头 span 由 JS 渲方向指示）；
+             内容身份列不排序（静态 th）。 -->
+        <thead><tr><th></th>
+          <th data-sort="name"><button type="button" class="th-sort" data-key="name" aria-label="按名称排序">名称<span class="sort-arrow" data-key="name" aria-hidden="true"></span></button></th>
+          <th data-sort="size"><button type="button" class="th-sort" data-key="size" aria-label="按大小排序">大小<span class="sort-arrow" data-key="size" aria-hidden="true"></span></button></th>
+          <th data-sort="mtime"><button type="button" class="th-sort" data-key="mtime" aria-label="按修改时间排序">修改时间<span class="sort-arrow" data-key="mtime" aria-hidden="true"></span></button></th>
+          <th>内容身份</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <!-- M10-WP03-T02（SPEC §2.2）：详情面板静态头（× 常驻 + 内容容器

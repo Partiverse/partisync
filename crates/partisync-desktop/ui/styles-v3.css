@@ -232,6 +232,17 @@ main { padding: 0 22px 56px; }
 .panel-table td.icon { width: 20px; color: var(--text-dim); }
 .panel-table td.fp i { border-radius: 50%; box-shadow: 0 0 5px var(--fp); }
 
+/* ===== 浏览表头排序（M10-WP03-T03；SPEC §2.3）——三列 th-sort 钮 +
+     箭头指示；th 交出 padding 给按钮（热区 = 整格），基础 th 样式不动 ===== */
+.panel-table th[data-sort] { padding: 0; }
+.th-sort {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  padding: 8px 12px; font: inherit; color: inherit; text-align: left;
+  background: none; border: 0; cursor: pointer;
+}
+.th-sort:hover { color: var(--green); }
+.sort-arrow { color: var(--green); font-size: 9px; min-width: 10px; }
+
 /* ===== 浏览双栏（表 + 详情面板；设计 v4.3 browse wireframe） ===== */
 .stage { display: flex; align-items: flex-start; gap: 18px; }
 .stage .panel-table { flex: 1; min-width: 0; }

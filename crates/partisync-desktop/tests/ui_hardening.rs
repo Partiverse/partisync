@@ -60,6 +60,9 @@ fn no_raw_interpolation_of_dynamic_fields() {
         "${p.root",
         "${r.memory_id",
         "${v.memory_count",
+        // M10-WP03-T03 浏览行 mtime 列：相对/绝对时间一律经 mtimeDisp()，
+        // title 经 esc(timeFmt(...))——裸 `${e.mtime_ns` 插值禁入模板。
+        "${e.mtime_ns",
     ];
     let mut leaked = Vec::new();
     for pat in BARE {
@@ -708,4 +711,195 @@ fn t02_copy_full_cid_and_copies_with_feedback_and_fallback() {
             && body.contains("btn.dataset.copyLabel"),
         "复制反馈必须防重入：clearTimeout 旧 timer + dataset.copyLabel 持久保留原始 label"
     );
+}
+
+// ── M10-WP03-T03：浏览列表 UX 静态契约（SPEC §2.3）——表头客户端排序
+// （名称/大小/修改时间三列 / 回服务端序 / 目录优先次级键 / 换目录重置）
+// + mtime 相对时间（>30 天回落绝对日期 + title 完整时间 + 「—」回落）。 ──
+
+/// 三列接线 + 三态循环 + 目录优先次级键 + 换目录重置（SPEC §2.3）：
+/// 点击按当前渲染行集排序、再点反序、第三点回服务端序（children() 返回
+/// 序，ipc.rs:90-96）；排序作用于 lastRows 副本（点击重渲不重发 IPC）；
+/// 键相同时目录行（kind=1）恒在文件行前（kind 比较不乘 dir，双向成立）；
+/// 换目录（面包屑/目录行导航）后排序态重置默认（沿 M10-WP02 T01 判例）。
+#[test]
+fn t03_browse_sort_cycle_dirs_first_and_path_reset() {
+    // 三列接线：index.html 三列 data-sort th + th-sort 按钮（data-key 一一
+    // 对应）+ JS 绑定（CSP 禁 inline onclick）；内容身份列不设 data-sort。
+    for key in ["name", "size", "mtime"] {
+        assert!(
+            UI_HTML.contains(&format!("th data-sort=\"{key}\"")),
+            "表头缺 data-sort={key} 可排序列"
+        );
+        assert!(
+            UI_HTML.contains(&format!("class=\"th-sort\" data-key=\"{key}\"")),
+            "{key} 列缺 th-sort 排序按钮"
+        );
+    }
+    assert_eq!(
+        UI_HTML.matches("th data-sort=").count(),
+        3,
+        "可排序列必须恰为三列（名称/大小/修改时间；内容身份列除外，SPEC §2.3）"
+    );
+    assert!(
+        UI_JS.contains("b.onclick = () => cycleSort(b.dataset.key);"),
+        "th-sort 按钮必须接线 cycleSort（CSP 禁 inline onclick）"
+    );
+    // 三态循环：asc → desc → null（回服务端序）；循环体零 IPC 站点。
+    let at = UI_JS
+        .find("function cycleSort(key) {")
+        .expect("cycleSort 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (sortKey !== key) { sortKey = key; sortDir = 1; }"),
+        "首点新键 = 升序"
+    );
+    assert!(
+        body.contains("else if (sortDir === 1) sortDir = -1;"),
+        "再点同键 = 反序（降序）"
+    );
+    assert!(
+        body.contains("sortKey = null; sortDir = 1; }") && body.contains("renderRows();"),
+        "第三点回服务端序并重渲当前行集（SPEC §2.3）"
+    );
+    for banned in ["call(", "invoke("] {
+        assert!(
+            !body.contains(banned),
+            "排序点击不得重发 IPC（纯客户端重渲）：{banned}"
+        );
+    }
+    // 排序作用于 lastRows 副本（不 mutate 服务端序快照；null = 原样返回）。
+    let at = UI_JS
+        .find("function sortedRows() {")
+        .expect("sortedRows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (!sortKey) return lastRows;"),
+        "未排序 = 原样返回服务端序（children() 返回序）"
+    );
+    assert!(
+        body.contains("[...lastRows].sort("),
+        "排序必须作用于 lastRows 副本（服务端序快照不可变）"
+    );
+    assert!(
+        body.contains("return (b.kind ?? 0) - (a.kind ?? 0);"),
+        "排序键相同时目录行（kind=1）恒在文件行前（kind 比较不乘 dir，双向成立）"
+    );
+    assert!(body.contains("localeCompare"), "名称列按字典序比较");
+    assert!(
+        body.contains("(a.size ?? 0) - (b.size ?? 0)")
+            && body.contains("(a.mtime_ns ?? 0) - (b.mtime_ns ?? 0)")
+            && body.contains("c * dir"),
+        "大小/修改时间数值比较 + 方向乘子"
+    );
+    // 换目录重置：browse 内路径变化才重置（同目录轮询刷新保留排序态）。
+    let at = UI_JS
+        .find("async function browse(path) {")
+        .expect("browse 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (next !== curPath) { sortKey = null; sortDir = 1; renderSortArrows(); }"),
+        "换目录（面包屑/目录行导航）必须重置排序态为默认（SPEC §2.3）"
+    );
+    assert!(
+        body.contains("lastRows = rows;"),
+        "list 结果必须快照进 lastRows（排序点击重渲不重发 IPC）"
+    );
+}
+
+/// 箭头指示（SPEC §2.3）：renderSortArrows = 全清后再设（切换键/回默认
+/// 不残留旧箭头）；当前键 ▲/▼ 标方向 + th aria-sort 同步（可访问语义）。
+#[test]
+fn t03_browse_sort_arrow_indicators() {
+    let at = UI_JS
+        .find("function renderSortArrows() {")
+        .expect("renderSortArrows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("textContent = \"\";"),
+        "先全清箭头再设（键切换/回默认不残留旧指示）"
+    );
+    assert!(
+        body.contains("\"▲\" : \"▼\""),
+        "箭头指示当前排序键与方向（SPEC §2.3）"
+    );
+    assert!(
+        body.contains("ascending") && body.contains("descending"),
+        "th aria-sort 同步排序方向（可访问语义）"
+    );
+}
+
+/// mtime 相对时间（SPEC §2.3）：mtimeDisp 复用 relTime；>30 天回落绝对
+/// 日期（本卡自含实现，不依赖 M10-WP02-T03 落地顺序）；缺失/0 → 既有
+/// 「—」回落；行模板 title 悬浮 = timeFmt 完整本地时间（不回退）。
+#[test]
+fn t03_mtime_relative_30day_absolute_fallback_and_title() {
+    let at = UI_JS
+        .find("function mtimeDisp(ns) {")
+        .expect("mtimeDisp 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (!ns) return \"—\";"),
+        "mtime_ns 缺失/0 → 「—」回落（timeFmt 既有判据不得回退）"
+    );
+    assert!(
+        body.contains("30 * 86400"),
+        ">30 天回落档判据（SPEC §2.3 字面）"
+    );
+    assert!(
+        body.contains("relTime(ns)"),
+        "≤30 天复用既有 relTime 相对显示"
+    );
+    assert!(body.contains("toLocaleDateString("), ">30 天回落绝对日期");
+    assert!(
+        UI_JS.contains(
+            "<td class=\"mtime\" title=\"${esc(timeFmt(e.mtime_ns))}\">${mtimeDisp(e.mtime_ns)}</td>"
+        ),
+        "mtime 列 = title 完整 timeFmt 本地时间（不回退）+ mtimeDisp 相对显示"
+    );
+}
+
+/// 空态不回退（SPEC §2.3）：browse 空态文案（D6 动作邀请修复）原文不动。
+#[test]
+fn t03_browse_empty_state_copy_untouched() {
+    assert!(
+        UI_JS.contains("本机还没有索引文件——运行 <b>partisync index &lt;路径&gt;</b> 开始建立索引"),
+        "根目录空态文案必须维持原文（D6 动作邀请）"
+    );
+    assert!(
+        UI_JS.contains(": \"空目录\""),
+        "非根目录空态文案必须维持原文"
+    );
+}
+
+/// 排序 DOM/样式对账（沿 chips 判例）：th-sort 三按钮 + 箭头 span 在
+/// index.html；.th-sort / .sort-arrow 样式在 styles-v3.css 落地。
+#[test]
+fn t03_sort_dom_and_style_parity() {
+    assert_eq!(
+        UI_HTML.matches("class=\"th-sort\"").count(),
+        3,
+        "th-sort 按钮必须恰为三枚"
+    );
+    assert_eq!(
+        UI_HTML.matches("class=\"sort-arrow\"").count(),
+        3,
+        "箭头指示 span 必须每列一枚"
+    );
+    for needle in [".th-sort {", ".sort-arrow {"] {
+        assert!(
+            UI_CSS.contains(needle),
+            "styles-v3.css 缺排序指示样式：{needle}"
+        );
+    }
 }

@@ -33,9 +33,24 @@ M10-WP02 指认的记忆面板时间问题同型。`list` → `children()` 全�
 
 ## 验收
 
-- [ ] 静态探针：三列点击排序/反序/回默认 + 箭头指示 + 换目录重置 +
+- [x] 静态探针：三列点击排序/反序/回默认 + 箭头指示 + 换目录重置 +
       目录优先次级键 + relTime 分档与 >30 天回落 + title + 「—」回落
-      + 空态文案不回退 + 无未转义插值；
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP03-T03-*.png`（排序前后 +
-      相对时间 tooltip + 换目录重置）；
-- [ ] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖。
+      + 空态文案不回退 + 无未转义插值。✅ ui_hardening 5 新探针先红
+      后绿（4 新探针初跑红 → 实现 → 28/28 全绿）；裸插值禁列增补
+      `${e.mtime_ns`；
+- [x] GUI 实操截图 `docs/screenshots/M10-WP03-T03-*.png`（8 帧）：
+      sort-before / sort-name-asc（▲+目录优先）/ sort-name-desc（▼+
+      目录仍恒前）/ sort-back-to-server-order（第三点回服务端序）/
+      sort-mtime-desc / sort-size-asc / sort-reset-after-nav（进 d0
+      后箭头消失，列表与 `partisync-cli ls /d0` 逐行对账）/
+      mtime-fallback-30d（临时 `--data-dir` 演示库三档同框：刚刚 /
+      26 天前 / 2026/8/20 回落绝对）。诚实口径：title 悬浮 tooltip
+      视觉帧不可稳定捕获（cliclick 合成 hover 不触发 WKWebView title
+      tooltip + 5s 轮询 innerHTML 重渲打断 hover 链，六轮重渲后即时
+      hover 仍未得；与 M8-WP05 §6 合成事件限制同源）——title =
+      timeFmt 接线以真实实例 AX 对账为证（mtime 列 18 枚 AXCell
+      description = 完整本地时间戳 `2026/9/18 15:35:12` 形态）；
+- [x] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖。✅
+      fmt 一次 rediff 经 `cargo fmt --all` 修正；clippy -D warnings
+      0 warning；`cargo test --workspace` exit 0（ui_hardening
+      28/28，其余套件不回归）。
