@@ -522,3 +522,190 @@ fn t05_index_stats_badge_cached_and_no_polling() {
         "footer IPC command 计数须与 generate_handler 对账（+index_stats = 12）"
     );
 }
+
+/// 裸插值禁列增补（M10-WP03-T02 详情面板动态字段）：content_id / mtime
+/// 载荷插值一律经 esc()/timeFmt()/sizeFmt() 包裹，不得以 `${contentId`、
+/// `${d.copies` 裸形态进 innerHTML 模板。
+#[test]
+fn t02_detail_no_raw_interpolation_of_detail_fields() {
+    // "${d.copies[" 只禁对象/数组取值插值；`${d.copies.length}` 数字插值沿
+    // score.toFixed 判例不入禁列。
+    const BARE: &[&str] = &["${contentId", "${d.copies[", "${c.path", "${c.mtime_ns"];
+    let mut leaked = Vec::new();
+    for pat in BARE {
+        if UI_JS.contains(pat) {
+            leaked.push(*pat);
+        }
+    }
+    assert!(
+        leaked.is_empty(),
+        "详情模板裸插值必须经 esc()/timeFmt()/sizeFmt() 包裹（M10-WP03 §2.2）：{leaked:?}"
+    );
+}
+
+/// 详情面板 DOM 对账（沿 mem 面板判例）：JS 引用的 detail-* 元素必须在
+/// index.html 存在（防 id 漂移）；detail-body 为唯一渲染容器。
+#[test]
+fn t02_detail_dom_parity() {
+    assert!(
+        UI_HTML.contains("id=\"detail-panel\""),
+        "index.html 缺 #detail-panel"
+    );
+    assert!(
+        UI_HTML.contains("id=\"detail-close\""),
+        "index.html 缺 × 静态头按钮（detail-head，面板内容重渲不丢）"
+    );
+    assert!(
+        UI_HTML.contains("aria-label=\"关闭详情\""),
+        "× 按钮必须带可访问标注（SPEC §2.2 aria-label 契约）"
+    );
+    assert!(
+        UI_HTML.contains("id=\"detail-body\""),
+        "index.html 缺 #detail-body 内容容器"
+    );
+    assert!(
+        UI_JS.contains("$(\"detail-body\")"),
+        "showDetail 必须渲染到 #detail-body（× 静态头不被 innerHTML 重写）"
+    );
+}
+
+/// 关闭双通道 + 硬约束（SPEC §2.2）：× 按钮 + Esc 接线；closeDetail 函数
+/// 体 = display:none + 内容清空，且零 call/invoke/browse、零列表（#rows）
+/// 触碰——关闭不清空/重载浏览列表、零重发 IPC；再点行重开沿既有行 onclick。
+#[test]
+fn t02_detail_close_dual_channel_and_zero_requery() {
+    assert!(
+        UI_JS.contains("$(\"detail-close\").onclick = closeDetail;"),
+        "× 必须接线 closeDetail（CSP 禁 inline onclick）"
+    );
+    assert!(
+        UI_JS.contains("document.addEventListener(\"keydown\", escClose);"),
+        "Esc 必须接线 escClose（双通道关闭）"
+    );
+    let at = UI_JS
+        .find("function closeDetail() {")
+        .expect("closeDetail 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("panel.style.display = \"none\";"),
+        "关闭 = 面板 display:none（SPEC §2.2）"
+    );
+    assert!(
+        body.contains("innerHTML = \"\";"),
+        "关闭 = 面板内容清空（SPEC §2.2）"
+    );
+    for banned in ["call(", "invoke(", "browse(", "$(\"rows\")"] {
+        assert!(
+            !body.contains(banned),
+            "关闭不得清空/重载浏览列表或重发 IPC（SPEC §2.2 硬约束）：{banned}"
+        );
+    }
+}
+
+/// Esc 可见性门控（SPEC §2.2 + §7-R4）：仅面板可见时生效；输入框聚焦
+/// （INPUT/TEXTAREA）不拦截，不抢输入框焦点语义。
+#[test]
+fn t02_esc_close_gated_on_visibility_and_input_focus() {
+    let at = UI_JS
+        .find("function escClose(e) {")
+        .expect("escClose 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("e.key !== \"Escape\"") && body.contains("return;"),
+        "Esc 键值判据 + 不可见时直接交还"
+    );
+    assert!(
+        body.contains("panel.style.display === \"none\""),
+        "可见性门控：面板不可见时 Esc 不生效（SPEC §2.2）"
+    );
+    assert!(
+        body.contains("INPUT") && body.contains("TEXTAREA"),
+        "输入框聚焦时 Esc 不拦截（SPEC §7-R4）"
+    );
+    assert!(
+        body.contains("closeDetail();"),
+        "门控通过后走 closeDetail 单点关闭"
+    );
+}
+
+/// 信息补全（SPEC §2.2，零 IPC 变更）：「修改时间」行 = 首副本
+/// `copies[0].mtime_ns`（与 size 取 rows.first() 同口径）；mtime_ns 缺失/0
+/// → 「—」回落（timeFmt 既有判据）；加载中途关闭 → 回包弃渲（可见性门控）。
+#[test]
+fn t02_detail_mtime_row_first_copy_with_dash_fallback() {
+    assert!(
+        UI_JS.contains("<dt>修改时间</dt><dd>${timeFmt(d.copies[0]?.mtime_ns)}</dd>"),
+        "修改时间行必须取首副本 copies[0].mtime_ns（SPEC §2.2，载荷已有字段零 IPC 变更）"
+    );
+    assert!(
+        UI_JS.contains("if (!ns) return \"—\";"),
+        "mtime_ns 缺失/0 → 「—」回落（timeFmt 既有判据不得回退）"
+    );
+    assert!(
+        UI_JS
+            .matches("if (panel.style.display === \"none\") return;")
+            .count()
+            >= 2,
+        "可见性门控 ≥2 处：escClose + showDetail 回包弃渲（加载中途关闭不回填已关面板）"
+    );
+}
+
+/// 复制（SPEC §2.2 + §7-R2）：完整 content_id + 每条副本路径两站点
+/// data-copy-text（数据源 = 原始值全量，不抄 DOM 展示切片）；
+/// navigator.clipboard.writeText 主路径 + execCommand 回落；成功反馈 =
+/// 「已复制」1.5s 回落 + 防重入（原始 label 持久存 dataset + clearTimeout
+/// 旧 timer，沿 M10-WP02 §2.2 / PR #166 F3 判例）。
+#[test]
+fn t02_copy_full_cid_and_copies_with_feedback_and_fallback() {
+    assert!(
+        UI_JS.contains("data-copy-text=\"${esc(contentId)}\""),
+        "content_id 全量复制站点（64 hex 全量，替代「抄 DevTools」）"
+    );
+    assert!(
+        UI_JS.contains("data-copy-text=\"${esc(c.path)}\""),
+        "副本路径复制站点（每条副本路径一枚）"
+    );
+    assert!(
+        UI_JS.matches("class=\"btn ghost copy-btn\"").count() >= 2,
+        "两处复制按钮站点（content_id + 副本路径）"
+    );
+    assert!(
+        UI_JS.contains("if (navigator.clipboard?.writeText) {")
+            && UI_JS.contains(
+                "navigator.clipboard.writeText(text).then(done).catch(() => detailCopyFallback(text, done))"
+            ),
+        "主路径 writeText（可用性检查 + 调用）+ 回落接线（SPEC §7-R2 实现期拍板）"
+    );
+    let at = UI_JS
+        .find("function detailCopyFallback(text, done) {")
+        .expect("execCommand 回落必须存在");
+    let seg = &UI_JS[at..];
+    let end = ["\nfunction ", "\nasync function "]
+        .iter()
+        .filter_map(|m| seg.find(m))
+        .min()
+        .unwrap_or(seg.len());
+    assert!(
+        seg[..end].contains("execCommand(\"copy\")"),
+        "回落 = 隐藏 textarea + execCommand（SPEC §7-R2）"
+    );
+    let at = UI_JS
+        .find("function detailCopy(btn, text) {")
+        .expect("复制助手必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("已复制") && body.contains("1500"),
+        "成功反馈 = 按钮文案瞬变「已复制」+ 1.5s（1500ms）回落"
+    );
+    assert!(
+        body.contains("clearTimeout(Number(btn.dataset.copyTimer))")
+            && body.contains("btn.dataset.copyLabel"),
+        "复制反馈必须防重入：clearTimeout 旧 timer + dataset.copyLabel 持久保留原始 label"
+    );
+}
