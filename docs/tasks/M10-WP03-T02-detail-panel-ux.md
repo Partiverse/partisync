@@ -44,16 +44,22 @@ mtime_ns，store.rs:36）。
       站点（content_id 全量 / 副本路径）经单点助手 `detailCopy` 走同一
       `navigator.clipboard.writeText` 通道 + `detailCopyFallback`
       （execCommand）回落；反馈防重入沿 PR #166 F3 判例。
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP03-T02-*.png`（面板打开 →
-      关闭前后 + 复制到粘贴板验证）；✗ **未完成——主机锁屏**：验证窗口
-      2026-10-06 13:31–13:39 八轮 ×55s 轮询，全进程 AX 零窗口 +
-      screencapture 纯壁纸帧（无 Dock/菜单栏），与 M10-WP02-T02/T03
-      判例同源；PR 保持 OPEN 打 label「待 GUI 验证」不合入。移交清单：
-      ① 浏览 tab 点文件行 → 面板开（修改时间行 + 两类复制钮在镜）截图；
-      ② 点 × → 面板收起且列表原样在镜截图；③ 再点行重开 → 按 Esc →
-      面板收起截图；④ 点 content_id「复制」→ `pbpaste` 为 64 hex；
-      ⑤ 点副本路径「复制」→ `pbpaste` 为该路径；⑥（可选）1.5s 内截
-      「已复制」反馈帧。证据归档 `docs/screenshots/M10-WP03-T02-*.png`。
+- [x] GUI 实操截图 `docs/screenshots/M10-WP03-T02-*.png`（面板打开 →
+      关闭前后 + 复制到粘贴板验证）；✅ 2026-10-06 补验完成（首轮
+      13:31–13:39 主机锁屏八轮 ×55s，13:49 解锁窗口按移交清单执行）。
+      六帧归档：`M10-WP03-T02-detail-open.png`（修改时间行 + 两类复制钮
+      + × 头在镜，列表完好）/ `…-copy-cid-copied.png`（「已复制」反馈
+      在镜；`pbpaste` = 64 hex 全量
+      `1ffdc5397cea41d0…b061eddf`，与行指纹徽章 `1ffdc539` 对账）/
+      `…-copy-path-copied.png`（路径钮「已复制」在镜；`pbpaste` =
+      `/d0001_vacation_photos_2024.md` 逐字）/ `…-x-closed-list-intact.png`
+      （× 关闭后浏览列表原样在镜）/ `…-reopen.png`（再点行重开）/
+      `…-esc-closed-list-intact.png`（Esc 关闭后列表原样在镜）。
+      工具链注记：× 为 27×20 pt 小热区，cliclick 合成点击差 3 pt 未
+      派发 onclick——经 macOS Accessibility AXPress 派发成功
+      （M8-WP05 §6 判例原样再证；CID/路径复制钮 cliclick 均正常派发）。
+      「已复制」1.5s 回落顺带在镜（x-closed 帧中 CID 钮已回落
+      「复制」）。
 - [x] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖；footer
       IPC 计数 12 不变。✅ fmt --check / clippy -D warnings /
       test --workspace 全绿（workspace exit 0；desktop：lib 7 /
