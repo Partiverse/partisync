@@ -108,3 +108,82 @@ async fn capture_memory_upsert_missing_target_is_fatal() {
         partisync_core::error::Severity::Fatal
     ));
 }
+
+/// M10-WP04-T01 收敛探针（SPEC §3-T01 同步行；P6 延伸）：一方 delete →
+/// bisync 不动点 → 双端该行墓碑、`memory_rows` 全等、根相等；晚到 upsert
+/// （旧水位重放注入）被 LWW 拒、墓碑不复活。
+#[tokio::test]
+async fn p20_delete_bisync_converges_and_late_upsert_rejected() {
+    let c = node("c", "dev-c").await;
+    let b = node("b", "dev-b").await;
+    let out = c
+        .memory_write("同步删除探针 fact", &["s".into()], &serde_json::json!({}))
+        .await
+        .unwrap();
+    let id = out.memory_id.clone();
+    let (up_key, up_payload) = c
+        .pending_oplog()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.entity == "memory" && r.op == "upsert")
+        .map(|r| (r.hlc, r.payload))
+        .unwrap();
+
+    session::bisync(&c, &b, session::BisyncOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        b.memory_by_id(&id).await.unwrap().unwrap().deleted,
+        0,
+        "bisync 后对端活行"
+    );
+
+    c.memory_delete(&id).await.unwrap();
+    session::bisync(&c, &b, session::BisyncOpts::default())
+        .await
+        .unwrap();
+
+    let (rows_b, root_b) = memory_state_of(&b).await;
+    let (rows_c, root_c) = memory_state_of(&c).await;
+    assert_eq!(rows_b.len(), 1);
+    assert_eq!(rows_b[0].deleted, 1, "双端该行墓碑");
+    assert_eq!(rows_b, rows_c, "memory_rows 全等（P6 延伸）");
+    assert_eq!(root_b, root_c, "根相等");
+    assert!(b.verify_memory().await.unwrap().ok);
+    assert!(c.verify_memory().await.unwrap().ok);
+
+    // 晚到 upsert：旧 K_up 重放注入（多径到达重复语义，record_oplog_raw 判例）
+    c.record_oplog_raw(
+        &up_key,
+        "default",
+        1,
+        "memory",
+        &id,
+        "upsert",
+        "dev-c",
+        &up_payload,
+        0,
+    )
+    .await
+    .unwrap();
+    let stats = session::push(&c, &b).await.unwrap();
+    assert_eq!(stats.applied, 0, "晚到 upsert 不生效");
+    assert_eq!(stats.skipped_lww, 1, "LWW 水位拒晚到");
+    let (rows_b2, root_b2) = memory_state_of(&b).await;
+    assert_eq!(rows_b2, rows_b, "墓碑不复活");
+    assert_eq!(root_b2, root_b);
+}
+
+/// capture 臂：不存在目标删除必须 Fatal（沿 record_memory_upsert 判例）。
+#[tokio::test]
+async fn capture_memory_delete_missing_target_is_fatal() {
+    let a = node("a", "dev-a").await;
+    let err = capture::record_memory_delete(&a, "no-such-id")
+        .await
+        .expect_err("不存在目标必须 Fatal");
+    assert!(matches!(
+        err.severity,
+        partisync_core::error::Severity::Fatal
+    ));
+}

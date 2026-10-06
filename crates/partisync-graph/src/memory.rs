@@ -47,7 +47,10 @@ pub struct MemoryRootSnapshot {
 pub struct VerifyReport {
     pub snapshot_root: Option<String>,
     pub recomputed_root: String,
+    /// 承诺集规模 = 含墓碑全体行（P20 措辞注记，M10-WP04 §2.1：软删不动根）。
     pub memory_count: usize,
+    /// 墓碑行计数（实态透出：承诺集含墓碑，凭此知可见集小于承诺集）。
+    pub tombstones: usize,
     /// 列级 content_hash 与 content 不符的行（篡改/损坏检出面）。
     pub content_mismatches: Vec<String>,
     pub ok: bool,
@@ -272,6 +275,9 @@ pub struct MemoryInclusionProof {
     pub leaf_hash: String,
     pub audit_path: Vec<String>,
     pub root: String,
+    /// 实态旗标（M10-WP04 §2.1）：true = 该行是软删墓碑——proof 仍通过
+    /// （墓碑留在承诺集，删除不抹除承诺），凭此知实态。
+    pub deleted: bool,
     /// 重算即验：`verify_inclusion(leaf, path, idx, n, root)` 恒真
     /// （构造即验证；字段保留给不信任本进程的下游复核者）。
     pub ok: bool,
@@ -294,6 +300,7 @@ pub fn inclusion_proof(rows: &[MemoryRow], memory_id: &str) -> Option<MemoryIncl
         leaf_hash: hex(&hashes[idx]),
         audit_path: path.iter().map(|p| hex(p)).collect(),
         root: hex(&root),
+        deleted: rows[idx].deleted != 0,
         ok: verify_inclusion(&hashes[idx], &path, idx, rows.len(), &root),
     })
 }

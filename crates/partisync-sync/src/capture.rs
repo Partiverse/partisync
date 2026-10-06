@@ -232,3 +232,15 @@ pub async fn record_memory_upsert(store: &Store, memory_id: &str) -> Result<(), 
         .await?;
     Ok(())
 }
+
+/// 记录一次 memory 删除（软删墓碑；SPEC M10-WP04 §2.1）。
+///
+/// [`Store::memory_delete`] 单入口已自带 oplog（"memory","delete"）+ 行
+/// 墓碑 + 根刷新（沿 `memory_write`/`record_memory_upsert` 分工判例），
+/// 本捕获臂仅转发，供 watch/journal 应用路径统一捕获面。
+///
+/// # Errors
+/// memory 不存在 → Fatal；device 未登记 / DB 错误 → Fatal。
+pub async fn record_memory_delete(store: &Store, memory_id: &str) -> Result<(), PartisyError> {
+    store.memory_delete(memory_id).await
+}
