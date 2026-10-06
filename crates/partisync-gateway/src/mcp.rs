@@ -2,6 +2,7 @@
 //!
 //! 工具清单：asset_search / asset_read / asset_organize / dataset_export / job_status
 //!          + memory_write / memory_search / memory_verify（M9-WP02-T04）
+//!          + memory_update / memory_delete（M10-WP04-T02，tombstone 生命周期）
 //! 传输：stdio（`rmcp::transport::io::stdio()`），无连接状态。
 //!
 //! 错误口径（rmcp 3.4.0 `call_tool` 契约，见 `ServerHandler::call_tool` 文档）：
@@ -499,6 +500,34 @@ fn all_tools() -> Vec<Tool> {
                 }
             })),
         ),
+        // M10-WP04-T02：记忆生命周期工具（SPEC M10-WP04 §2.1）。id 内容
+        // 寻址 ⇒ update 必换身份（墓碑旧 id + 写新行）；delete = 软删除
+        // 墓碑（行留承诺集，软删不动根）。
+        Tool::new(
+            "memory_update",
+            "Update a verifiable memory by id. Identity is content-addressed, so a real update tombstones the old id and writes a new row (canonical-equivalent input is a no-op returning the original id). Omitted fields keep the current row's values. Fails on unknown or tombstoned ids (revive via memory_write).",
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "Memory ID of the live row to update"},
+                    "content": {"type": "string", "description": "New content (non-empty, max 64KiB); omit to keep current"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Replacement tags (max 32 items); omit to keep current"},
+                    "metadata": {"type": "object", "description": "Replacement JSON object metadata (max 16KiB); omit to keep current"}
+                },
+                "required": ["memory_id"]
+            })),
+        ),
+        Tool::new(
+            "memory_delete",
+            "Soft-delete a verifiable memory by id: writes a tombstone. The row stays in the commitment set (root unchanged) and its inclusion proof keeps verifying with deleted=true. Fails on unknown or already-deleted ids.",
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "Memory ID of the live row to soft-delete"}
+                },
+                "required": ["memory_id"]
+            })),
+        ),
         // M7-WP01-T04：扩展列举工具（内建）。桌面壳 UI 经 mcp_call("ext_list")
         // 拿到扩展工具清单——零 IPC 扩口（SPEC §2.3 约定）。
         Tool::new(
@@ -521,7 +550,11 @@ impl ServerHandler for McpServerState {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "PartiSync asset tools: asset_search / asset_read / asset_organize / \
                  dataset_export / job_status. Verifiable memory tools (M9-WP02): \
-                 memory_write / memory_search / memory_verify. All calls are stateless.",
+                 memory_write / memory_search / memory_verify. Memory lifecycle \
+                 (M10-WP04): memory_update (content-addressed: a real update \
+                 tombstones the old id and writes a new row) and memory_delete \
+                 (soft-delete tombstone; the row stays in the commitment set). \
+                 All calls are stateless.",
         )
     }
 
@@ -581,6 +614,8 @@ impl ServerHandler for McpServerState {
             "memory_write" => self.memory_write(&args).await,
             "memory_search" => self.memory_search(&args).await,
             "memory_verify" => self.memory_verify(&args).await,
+            "memory_update" => self.memory_update(&args).await,
+            "memory_delete" => self.memory_delete(&args).await,
             "ext_list" => self.ext_list().await,
             name if name.starts_with("ext_") => self.call_extension(name, &args).await,
             other => {
@@ -599,7 +634,8 @@ impl ServerHandler for McpServerState {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// memory 工具面（M9-WP02-T04，SPEC M9-WP02 §2.4）
+// memory 工具面（M9-WP02-T04 三工具，SPEC M9-WP02 §2.4；
+// M10-WP04-T02 生命周期两工具，SPEC M10-WP04 §2.1）
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -629,6 +665,24 @@ struct MemorySearchInput {
 struct MemoryVerifyInput {
     #[serde(default)]
     memory_id: Option<String>,
+}
+
+/// `memory_update` 入参（M10-WP04-T02，SPEC §2.1）：content/tags/metadata
+/// 全缺省 = 缺省字段回落当前行值 ⇒ canonical 等价 no-op。
+#[derive(Debug, Deserialize)]
+struct MemoryUpdateInput {
+    memory_id: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    metadata: Option<JsonValue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryDeleteInput {
+    memory_id: String,
 }
 
 impl McpServerState {
@@ -731,6 +785,7 @@ impl McpServerState {
                 ok_json(&serde_json::json!({
                     "root": report.snapshot_root,
                     "memory_count": report.memory_count,
+                    "tombstones": report.tombstones,
                     "recomputed_root": report.recomputed_root,
                     "ok": report.ok,
                 }))
@@ -746,6 +801,127 @@ impl McpServerState {
                 }
             }
         }
+    }
+
+    /// `memory_update`（M10-WP04-T02，SPEC M10-WP04 §2.1）：id 内容寻址 ⇒
+    /// 更新必换身份——引擎面同事务墓碑旧 id + 写入新行（T01
+    /// `Store::memory_update`）。缺省字段回落当前行值（schema 对外契约：
+    /// omit = keep current），全缺省 = canonical 等价 no-op 仍返回原 id。
+    /// 限界沿 memory_write（content 非空 ≤64KiB / tags ≤32 项 / metadata
+    /// object ≤16KiB）——超限工具级错误，不截断、不静默；目标不存在或已
+    /// 墓碑 → 工具级错误（不静默建行；墓碑复活走 memory_write）。
+    async fn memory_update(&self, args: &JsonValue) -> Result<CallToolResult, ErrorData> {
+        let input: MemoryUpdateInput = match serde_json::from_value(args.clone()) {
+            Ok(v) => v,
+            Err(e) => return Err(ErrorData::invalid_params(e.to_string(), None)),
+        };
+        if let Some(c) = input.content.as_ref() {
+            if c.is_empty() {
+                return tool_err("memory content 不能为空");
+            }
+            if c.len() > 64 * 1024 {
+                return tool_err(format!("memory content 超限: {} bytes > 64KiB", c.len()));
+            }
+        }
+        if input.tags.as_ref().is_some_and(|t| t.len() > 32) {
+            return tool_err(format!(
+                "memory tags 超限: {} 项 > 32",
+                input.tags.as_ref().map_or(0, Vec::len)
+            ));
+        }
+        if let Some(m) = input.metadata.as_ref() {
+            if !m.is_object() {
+                return tool_err("memory metadata 必须为 JSON object");
+            }
+            if m.to_string().len() > 16 * 1024 {
+                return tool_err(format!(
+                    "memory metadata 超限: {} bytes > 16KiB",
+                    m.to_string().len()
+                ));
+            }
+        }
+        let store = self.graph_store().await?;
+        let row = match store.memory_by_id(&input.memory_id).await {
+            Ok(Some(r)) if r.deleted == 0 => r,
+            Ok(Some(_)) => {
+                return tool_err(format!("memory_update 目标已墓碑: {}", input.memory_id));
+            }
+            Ok(None) => {
+                return tool_err(format!("memory_update 目标不存在: {}", input.memory_id));
+            }
+            Err(e) => return tool_err(format!("memory_update 失败: {e}")),
+        };
+        let content = input.content.unwrap_or_else(|| row.content.clone());
+        let tags = match input.tags {
+            Some(t) => t,
+            None => match serde_json::from_str(&row.tags) {
+                Ok(t) => t,
+                Err(e) => return tool_err(format!("memory_update 当前行 tags 解析失败: {e}")),
+            },
+        };
+        let metadata = match input.metadata {
+            Some(m) => m,
+            None => match serde_json::from_str(&row.metadata) {
+                Ok(m) => m,
+                Err(e) => {
+                    return tool_err(format!("memory_update 当前行 metadata 解析失败: {e}"));
+                }
+            },
+        };
+        let outcome = match store
+            .memory_update(&input.memory_id, &content, &tags, &metadata)
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => return tool_err(format!("memory_update 失败: {e}")),
+        };
+        let root = match store.memory_root_snapshot().await {
+            Ok(s) => s.map(|snap| snap.root),
+            Err(e) => return tool_err(format!("memory_update 读根失败: {e}")),
+        };
+        // tombstoned：本笔是否墓碑了旧 id（canonical 等价 no-op = false；
+        // 真更新/收束到既有活行 = true，与引擎 deduplicated 恰为反演）。
+        ok_json(&serde_json::json!({
+            "old_memory_id": input.memory_id,
+            "memory_id": outcome.memory_id,
+            "root": root,
+            "tombstoned": !outcome.deduplicated,
+        }))
+    }
+
+    /// `memory_delete`（M10-WP04-T02，SPEC M10-WP04 §2.1）：软删除墓碑
+    /// （T01 `Store::memory_delete`）——deleted=1 + 行 hlc 推进 + 根快照
+    /// 刷新；**软删不动根**（墓碑行留在承诺集，inclusion proof 仍过且
+    /// deleted=true 实态透出）。引擎面已墓碑再删为幂等 no-op；工具面对
+    /// 不存在/已墓碑 id 显式工具级错误（不静默）。
+    async fn memory_delete(&self, args: &JsonValue) -> Result<CallToolResult, ErrorData> {
+        let input: MemoryDeleteInput = match serde_json::from_value(args.clone()) {
+            Ok(v) => v,
+            Err(e) => return Err(ErrorData::invalid_params(e.to_string(), None)),
+        };
+        let store = self.graph_store().await?;
+        match store.memory_by_id(&input.memory_id).await {
+            Ok(Some(row)) if row.deleted == 0 => {}
+            Ok(Some(_)) => {
+                return tool_err(format!("memory_delete 目标已墓碑: {}", input.memory_id));
+            }
+            Ok(None) => {
+                return tool_err(format!("memory_delete 目标不存在: {}", input.memory_id));
+            }
+            Err(e) => return tool_err(format!("memory_delete 失败: {e}")),
+        }
+        if let Err(e) = store.memory_delete(&input.memory_id).await {
+            return tool_err(format!("memory_delete 失败: {e}"));
+        }
+        let root = match store.memory_root_snapshot().await {
+            Ok(s) => s.map(|snap| snap.root),
+            Err(e) => return tool_err(format!("memory_delete 读根失败: {e}")),
+        };
+        ok_json(&serde_json::json!({
+            "memory_id": input.memory_id,
+            "root": root,
+            "tombstoned": true,
+        }))
     }
 }
 
@@ -1838,9 +2014,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_tools_returns_nine() {
+    async fn list_tools_returns_eleven() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 11);
         let names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
         for n in [
             "asset_search",
@@ -1851,6 +2027,8 @@ mod tests {
             "memory_write",
             "memory_search",
             "memory_verify",
+            "memory_update",
+            "memory_delete",
             "ext_list",
         ] {
             assert!(names.contains(&n.to_string()), "missing tool {n}");
