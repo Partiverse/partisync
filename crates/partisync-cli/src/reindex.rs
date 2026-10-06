@@ -82,9 +82,11 @@ fn resolve_source(source_root: Option<&Path>, vpath: &str) -> Option<PathBuf> {
 /// 重建核心：全量扫描 graph 内容 → 文本筛选 → 读原文 → BM25 upsert + commit。
 ///
 /// 数据源优先级：源文件（entry.path 经 [`resolve_source`]；indexer 对小
-/// 文件不写 CAS——content_id 仅是哈希身份，字节只在源盘）→ CAS 单块回退
-/// （显式 put 面）。大文件（chunk_root 非空）chunk hash 列表未持久化、
-/// CAS 不可重组——缺口登记 M9-WP03 债（计入 read_errors）。
+/// 文件不写 CAS——content_id 仅是哈希身份，字节只在源盘）→ 回退按文件
+/// 形态分流：大文件（chunk_root 非空）走 v18 `content_chunk` 清单重组
+/// （`Store::reassemble_content`，P22；M9-WP03 债已清偿）；小文件走 CAS
+/// 单块（显式 put 面）。存量无清单（v18 落表前入库，**不可回填**）重组
+/// 显式 Err → 维持 read_errors 计数（诚实边界，不静默截断）。
 ///
 /// # Errors
 /// DB / 索引写入错误 → Fatal 上抛（单文件读失败仅计数不中止）。
@@ -101,10 +103,11 @@ pub async fn reindex_core(
         path: String,
         mime: Option<String>,
         mtime: i64,
+        chunk_root: Option<String>,
     }
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT e.content_id AS cid, MIN(e.name) AS name, MIN(e.path) AS path, \
-                c.mime AS mime, MAX(e.mtime_ns) AS mtime \
+                c.mime AS mime, MAX(e.mtime_ns) AS mtime, MIN(e.chunk_root) AS chunk_root \
          FROM entry e JOIN content c ON c.id = e.content_id \
          WHERE e.kind = 0 GROUP BY e.content_id",
     )
@@ -122,9 +125,24 @@ pub async fn reindex_core(
             stats.skip_binary += 1;
             continue;
         }
-        let bytes = match resolve_source(source_root, &r.path).and_then(|p| std::fs::read(p).ok()) {
-            Some(b) => b,
-            None => match cas.get(&r.cid).await {
+        let bytes = match (
+            r.chunk_root.as_deref(),
+            resolve_source(source_root, &r.path).and_then(|p| std::fs::read(p).ok()),
+        ) {
+            // 源文件主路径（大小文件同优先级，与债前一致）
+            (_, Some(b)) => b,
+            // 大文件回退（chunk_root 非空）：重组读出（P22-b/c——缺块/清单
+            // 缺失显式 Err，计 read_errors 不中止不静默截断）
+            (Some(root), None) => match store.reassemble_content(cas, &r.cid, Some(root)).await {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("warn: 重组 {} ({}): {e}", r.cid, r.name);
+                    stats.read_errors += 1;
+                    continue;
+                }
+            },
+            // 小文件回退：CAS 单块（显式 put 面）
+            (None, None) => match cas.get(&r.cid).await {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("warn: 读 {} ({}): 源缺失 + CAS: {e}", r.cid, r.name);
@@ -388,5 +406,210 @@ mod tests {
         );
         assert!(!is_indexable(None, "no-ext"));
         assert!(is_indexable(Some(""), "readme.md"), "空 mime → 嗅探");
+    }
+
+    // ===== M10-WP04-T04（P22，SPEC M10-WP04 §2.2/§3）=====
+
+    /// 确定性生成 ≥ target 字节的 UTF-8 文本（行号破周期性给 fastcdc 切点；
+    /// 第 2 行嵌 marker 供 bm25 探针）。
+    fn big_text(target: usize, marker: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(target + 512);
+        let mut i: u64 = 0;
+        while out.len() < target {
+            let line = if i == 1 {
+                format!("marker {marker} embedded for bm25 probe\n")
+            } else {
+                format!("partisync lorem line {i:08} argon2 migration weekly sync notes\n")
+            };
+            out.extend_from_slice(line.as_bytes());
+            i += 1;
+        }
+        out
+    }
+
+    async fn t04_env(dir: &Path) -> (Store, ChunkStore, IndexEngine) {
+        let store = Store::open_in_memory().await.unwrap();
+        store
+            .seed_device_volume("dev-a", "Device A", "fp-a")
+            .await
+            .unwrap();
+        let cas = ChunkStore::open(&dir.join("cas")).await.unwrap();
+        let engine = IndexEngine::open_or_create(IndexEngineConfig {
+            index_root: dir.join("index"),
+            enable_reranker: false,
+            reranker_model_dir: None,
+        })
+        .unwrap();
+        (store, cas, engine)
+    }
+
+    /// P22-a/b + reindex 重组路径：大文件索引后清单与 chunk_root 对账相等、
+    /// 重组 roundtrip blake3==content_id；源盘移除后 reindex 经 content_chunk
+    /// 重组读出 → marker 词命中、零 read_errors。
+    #[tokio::test]
+    async fn t04_big_file_manifest_roundtrip_and_reindex_reassembly() {
+        let dir = std::env::temp_dir().join(format!("t04-roundtrip-{}", Ulid::now()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let (store, cas, engine) = t04_env(&dir).await;
+
+        // 2.5 MiB > 256 KiB 阈值 ⇒ 分块入库（indexer.rs 落表站点真实路径）
+        let big = big_text(2500 * 1024, "xyzzyquux");
+        std::fs::write(dir.join("src/big-notes.md"), &big).unwrap();
+        let report = partisync_graph::indexer::index_path(&store, Some(&cas), &dir.join("src"))
+            .await
+            .unwrap();
+        assert_eq!(report.chunked_files, 1, "大文件必须走分块入库");
+
+        let cid = partisync_cas::content_hash(&big);
+        let hashes = store.content_chunk_hashes(&cid).await.unwrap();
+        assert!(
+            hashes.len() >= 2,
+            "2.5MiB 文本必须切成多块（got {}）",
+            hashes.len()
+        );
+        let refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+        let entry_root = store
+            .entry_by_path("/big-notes.md")
+            .await
+            .unwrap()
+            .unwrap()
+            .chunk_root
+            .expect("大文件 entry 必有 chunk_root");
+        assert_eq!(
+            partisync_cas::chunk_root(&refs),
+            entry_root,
+            "P22-a：content_chunk 清单 seq 升序复算必须与 entry.chunk_root 对账相等"
+        );
+
+        let bytes = store
+            .reassemble_content(&cas, &cid, Some(&entry_root))
+            .await
+            .unwrap();
+        assert_eq!(bytes, big, "P22-b：重组 roundtrip 必须逐位还原原文件");
+
+        // reindex 重组路径：源盘移除（source_root=None → 源缺失）→ 大文件经
+        // content_chunk 清单重组读出 → marker 命中
+        let stats = reindex_core(&store, &cas, &engine, None).await.unwrap();
+        assert_eq!(
+            stats.read_errors, 0,
+            "有清单大文件重组必须成功（stats={stats:?}）"
+        );
+        engine.bm25_index().reload().unwrap(); // OnCommitWithDelay：显式 reload（bm25.rs 判例）
+        let result = engine
+            .bm25_only(Bm25Query {
+                query: "xyzzyquux".into(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.hits.len(), 1, "重组路径原文标记词必须命中");
+        assert_eq!(result.hits[0].content_id, cid);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P22-c 两类注入必显式 Err：人为删 CAS 块对象 → 缺块 Err；删清单行 →
+    /// 拼接哈希失配 Err。绝不返回部分字节。
+    #[tokio::test]
+    async fn t04_missing_chunk_or_manifest_row_fails_explicitly() {
+        let dir = std::env::temp_dir().join(format!("t04-inject-{}", Ulid::now()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let (store, cas, _engine) = t04_env(&dir).await;
+
+        // 同 env 双文件（内容不同 ⇒ cid 与块集互不干扰）
+        let big1 = big_text(2500 * 1024, "waldo");
+        let big2 = big_text(2500 * 1024, "quux-waldo");
+        std::fs::write(dir.join("src/inject1.md"), &big1).unwrap();
+        std::fs::write(dir.join("src/inject2.md"), &big2).unwrap();
+        partisync_graph::indexer::index_path(&store, Some(&cas), &dir.join("src"))
+            .await
+            .unwrap();
+        let cid1 = partisync_cas::content_hash(&big1);
+        let cid2 = partisync_cas::content_hash(&big2);
+        let root1 = store
+            .entry_by_path("/inject1.md")
+            .await
+            .unwrap()
+            .unwrap()
+            .chunk_root
+            .unwrap();
+        let root2 = store
+            .entry_by_path("/inject2.md")
+            .await
+            .unwrap()
+            .unwrap()
+            .chunk_root
+            .unwrap();
+
+        // 注入①：人为删一块 CAS 对象（objects/<h[..2]>/<hash>）→ 缺块显式 Err
+        let hashes = store.content_chunk_hashes(&cid1).await.unwrap();
+        let victim = &hashes[hashes.len() / 2];
+        std::fs::remove_file(dir.join("cas/objects").join(&victim[..2]).join(victim)).unwrap();
+        let err = store
+            .reassemble_content(&cas, &cid1, Some(&root1))
+            .await
+            .expect_err("P22-c：任一块 CAS 缺失必 Err，绝不返回部分字节");
+        assert!(
+            format!("{err}").contains("缺块"),
+            "错误必须显式指向缺块（err={err}）"
+        );
+
+        // 注入②：删清单首行（清单扰动）→ 拼接 blake3 失配显式 Err
+        sqlx::query("DELETE FROM content_chunk WHERE content_id = ? AND seq = 0")
+            .bind(&cid2)
+            .execute(store.pool_ref())
+            .await
+            .unwrap();
+        let err = store
+            .reassemble_content(&cas, &cid2, Some(&root2))
+            .await
+            .expect_err("P22-c：清单扰动必显式 Err");
+        assert!(
+            format!("{err}").contains("校验败") || format!("{err}").contains("对账败"),
+            "错误必须显式指向校验/对账失败（err={err}）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 存量无清单（v18 落表前入库，不可回填）→ read_errors 计数不静默。
+    #[tokio::test]
+    async fn t04_legacy_content_without_manifest_counts_read_errors() {
+        let dir = std::env::temp_dir().join(format!("t04-legacy-{}", Ulid::now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (store, cas, engine) = t04_env(&dir).await;
+
+        // 存量形态：entry 带 chunk_root（大文件），但清单从未持久化且源盘缺失
+        let legacy = b"legacy big content bytes marker waldo";
+        let cid = partisync_cas::content_hash(legacy);
+        sqlx::query("INSERT INTO content (id, size, mime) VALUES (?, ?, NULL)")
+            .bind(&cid)
+            .bind(legacy.len() as i64)
+            .execute(store.pool_ref())
+            .await
+            .unwrap();
+        store
+            .add_entry(
+                None,
+                "legacy.md",
+                "/legacy.md",
+                EntryKind::File,
+                legacy.len() as u64,
+                1_700_000_000_000_000_000,
+                Some((cid.as_str(), legacy.len() as u64)),
+                Some(&"ab".repeat(32)),
+            )
+            .await
+            .unwrap();
+
+        let stats = reindex_core(&store, &cas, &engine, None).await.unwrap();
+        assert_eq!(
+            stats.read_errors, 1,
+            "存量无清单必须显式计 read_errors（不可回填，不静默截断）"
+        );
+        assert_eq!(stats.indexed, 0, "清单缺失的内容不得进索引");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

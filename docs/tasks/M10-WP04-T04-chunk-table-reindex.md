@@ -33,6 +33,6 @@ read_errors 计数不静默。
 
 ## 验收
 
-- [ ] §3 T04 探针绿；
-- [ ] fmt/clippy/test 三件套绿；零新增顶层依赖；同步面零 diff；
-- [ ] 提交挂 Task-ID `M10-WP04-T04`。
+- [x] §3 T04 探针绿（P22-a/b + reindex 重组 marker 命中 / P22-c 删块·删清单行双注入显式 Err / 存量无清单 read_errors=1，crates/partisync-cli/src/reindex.rs tests 3 例）；
+- [x] fmt/clippy/test 三件套绿（2026-10-07 本机实跑：`cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` exit 0；cargo deny check 4 项 ok）；零新增顶层依赖；同步面 src 零 diff（仅 sync 测试 FileInsert 构造点机械补 `chunk_hashes: Vec::new()` 一行）；
+- [x] 提交挂 Task-ID `M10-WP04-T04`。
