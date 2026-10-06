@@ -181,6 +181,9 @@ pub struct FileInsert {
     pub mtime_ns: u64,
     pub content: Option<(String, u64)>,
     pub chunk_root: Option<String>,
+    /// v18（M10-WP04-T04，P22-a）：chunk hash 清单（分块序），与 entry 同事务
+    /// 落 content_chunk（INSERT OR IGNORE，content_id 粒度幂等）；小文件为空。
+    pub chunk_hashes: Vec<String>,
 }
 
 impl Store {
@@ -663,6 +666,20 @@ impl Store {
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| db_err("批量登记内容", e))?;
+                // v18（M10-WP04-T04，P22-a）：chunk 清单与 entry 同事务落表
+                // （INSERT OR IGNORE——同 content 多 entry 共享行集，写入幂等）。
+                for (seq, h) in f.chunk_hashes.iter().enumerate() {
+                    sqlx::query(
+                        "INSERT OR IGNORE INTO content_chunk (content_id, seq, chunk_hash) \
+                         VALUES (?, ?, ?)",
+                    )
+                    .bind(hash)
+                    .bind(i64::try_from(seq).unwrap_or(i64::MAX))
+                    .bind(h)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| db_err("批量落 chunk 清单", e))?;
+                }
             }
             let id: String = sqlx::query_scalar(
                 "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device)
@@ -2720,11 +2737,116 @@ impl Store {
             remaining_tombstones: u64::try_from(remaining).unwrap_or(u64::MAX),
         })
     }
+
+    /// v18（M10-WP04-T04，NB5）chunk 清单读出：`content_chunk` 按 seq 升序的
+    /// chunk_hash 列表（P22-a/b 的数据源面）。空清单 = 存量数据（v18 落表前
+    /// 入库，清单从未持久化，**不可回填**——reindex 侧诚实计 read_errors）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn content_chunk_hashes(
+        &self,
+        content_id: &str,
+    ) -> Result<Vec<String>, PartisyError> {
+        sqlx::query_scalar(
+            "SELECT chunk_hash FROM content_chunk WHERE content_id = ? ORDER BY seq ASC",
+        )
+        .bind(content_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("content_chunk 读出", e))
+    }
+
+    /// CAS 内容重组读出（M10-WP04 §2.2）：按 [`Store::content_chunk_hashes`]
+    /// 清单逐块取块拼接，随后双校验——`blake3(拼接) == content_id`（P22-b）
+    /// 且 `chunk_root(list) == expected_chunk_root`（P22-a 对账，caller 传
+    /// entry.chunk_root；None 跳过）。**任一块 CAS 缺失 / 清单缺失（存量数据
+    /// 不可回填）/ 任一校验不过 → 显式 Err，绝不返回部分字节**（P22-c）。
+    ///
+    /// # Errors
+    /// 清单缺失/块缺失/校验败 → Fatal（数据完整性，重试无意义）；DB/CAS
+    /// IO 错误透传原分类。
+    pub async fn reassemble_content(
+        &self,
+        cas: &partisync_cas::ChunkStore,
+        content_id: &str,
+        expected_chunk_root: Option<&str>,
+    ) -> Result<Vec<u8>, PartisyError> {
+        let hashes = self.content_chunk_hashes(content_id).await?;
+        if hashes.is_empty() {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!("内容 {content_id} 无 chunk 清单（存量数据，v18 前入库不可回填）")
+                        .into(),
+                ),
+            });
+        }
+        // 防御纵深（对抗评审 2026-10-07）：清单行只应含 put_chunks 的 hex
+        // 输出，但行可能被篡改——非法 hash 不得喂给 CAS object_path
+        // （<2 字节触发 `&hash[..2]` 切片 panic；含 `/`/`..` 可路径穿越读）。
+        if let Some(bad) = hashes.iter().position(|h| !is_blake3_hex(h)) {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!("内容 {content_id} 清单行 seq={bad} 非法 hash（非 64 位小写 hex）")
+                        .into(),
+                ),
+            });
+        }
+        let mut bytes = Vec::new();
+        for (seq, h) in hashes.iter().enumerate() {
+            match cas.get(h).await {
+                Ok(chunk) => bytes.extend_from_slice(&chunk),
+                Err(e) => {
+                    return Err(PartisyError {
+                        severity: Severity::Fatal,
+                        source: Some(
+                            format!("内容 {content_id} 重组缺块 seq={seq} hash={h}: {e}").into(),
+                        ),
+                    });
+                }
+            }
+        }
+        let digest = partisync_cas::content_hash(&bytes);
+        if digest != content_id {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!("内容 {content_id} 重组校验败：blake3(拼接)={digest} != content_id")
+                        .into(),
+                ),
+            });
+        }
+        if let Some(expected) = expected_chunk_root {
+            let refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+            let root = partisync_cas::chunk_root(&refs);
+            if root != expected {
+                return Err(PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(
+                        format!(
+                            "内容 {content_id} 清单对账败：chunk_root(list)={root} != entry.chunk_root={expected}"
+                        )
+                        .into(),
+                    ),
+                });
+            }
+        }
+        Ok(bytes)
+    }
 }
 
 /// 32 字节 → hex（64 字符小写）。
 fn hex32(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// blake3 hex 输出形态校验：恒 64 字符小写十六进制（v18 content_chunk
+/// 清单行防御校验，对抗评审 2026-10-07——清单行直通 CAS object_path，
+/// 非法形态必须在重组入口拦下）。
+fn is_blake3_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 use std::str::FromStr as _;

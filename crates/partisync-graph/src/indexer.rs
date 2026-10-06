@@ -179,6 +179,7 @@ pub async fn index_path_job(
                 .file_name()
                 .map_or_else(|| "/".to_string(), |n| n.to_string_lossy().into_owned());
             let mut chunk_root = None;
+            let mut chunk_hashes: Vec<String> = Vec::new();
             if let Some(cas) = cas.filter(|_| meta.len() as usize >= chunk_threshold()) {
                 // 内容未变的既有条目跳过分块重入库（防引用计数膨胀，实测踩坑 43→86）
                 let unchanged = match store.entry_by_path(&vpath).await? {
@@ -189,8 +190,12 @@ pub async fn index_path_job(
                     let data = tokio::fs::read(&path)
                         .await
                         .map_err(|e| io_err("读文件分块", e))?;
-                    let (_, r) = put_chunks(cas, &data, CdcConfig::PRODUCTION).await?;
+                    // v18（M10-WP04-T04，P22-a）：改取 put_chunks 的 hash 清单，
+                    // 随 add_file_batch 同事务落 content_chunk（此前被 `(_, r)`
+                    // 丢弃——NB5 债，content→bytes 不可重组）。
+                    let (hashes, r) = put_chunks(cas, &data, CdcConfig::PRODUCTION).await?;
                     chunk_root = Some(r);
+                    chunk_hashes = hashes;
                     report.chunked_files += 1;
                 }
             }
@@ -203,6 +208,7 @@ pub async fn index_path_job(
                 mtime_ns: mtime_of(&meta),
                 content: Some((hash, meta.len())),
                 chunk_root,
+                chunk_hashes,
             });
             last_vpath = vpath;
         }

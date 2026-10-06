@@ -164,6 +164,7 @@ async fn t03_metadata_simulation_100k() {
                     mtime_ns: 1_700_000_000_000_000_000 + i,
                     content: None,
                     chunk_root: None,
+                    chunk_hashes: Vec::new(),
                 }
             })
             .collect();
