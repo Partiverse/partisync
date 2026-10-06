@@ -193,7 +193,17 @@ pub async fn handle_incoming<S: ChunkSink + Clone + Send + 'static>(
 
     let mem_store = iroh_blobs::store::mem::MemStore::default();
     let store: iroh_blobs::api::Store = mem_store.into();
-    let events = iroh_events::EventSender::DEFAULT;
+    // iroh-blobs 0.103.1 安全收紧：EventMask::DEFAULT 将 push 设为
+    // RequestMode::Disabled（所有 push 一律 permission 拒绝；0.103.0 因此被
+    // 上游 yank）。hub 收设备上传是本函数的存在目的，须显式 opt-in：
+    // None = 不产生事件、push 正常处理（Disabled 才是拒绝语义）。
+    let (events, _events_rx) = iroh_events::EventSender::channel(
+        16,
+        iroh_events::EventMask {
+            push: iroh_events::RequestMode::None,
+            ..iroh_events::EventMask::DEFAULT
+        },
+    );
     let mut summary = UploadSummary {
         chunks_received: 0,
         bytes_received: 0,

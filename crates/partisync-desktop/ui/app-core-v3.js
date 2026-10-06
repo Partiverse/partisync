@@ -1,9 +1,9 @@
 // PartiSync Desktop 前端 v3（设计语言 v4.3 落地——旧薄面弃用重写）。
 // M8-WP05-T01：语义检索旗舰（search_hybrid + 三态）。
 // 绑定面：index.html（v4.3 结构：tally 仪表 / hit 卡 / section-tag）。
-// 数据走 11 个 Tauri command（src/ipc.rs）：
-//   get_stats / list / search / search_hybrid / asset_detail / cas_stats /
-//   duplicates / jobs / sync_stats / sync_recent / mcp_call
+// 数据走 12 个 Tauri command（src/ipc.rs）：
+//   get_stats / list / search / search_hybrid / index_stats / asset_detail /
+//   cas_stats / duplicates / jobs / sync_stats / sync_recent / mcp_call
 // 文件名 app-core-v3.js：#39 判例（WKWebView 缓存击穿靠改名）。
 
 const __tauriCore = window.__TAURI__?.core;
@@ -96,9 +96,66 @@ function fpOf(contentId) {
   return `hsl(${h} 55% 55%)`;
 }
 
+// M10-WP03-T03（SPEC §2.3）：表头客户端排序——名称/大小/修改时间三列
+// 可排（内容身份列除外）；null = 服务端序（children() 返回序，ipc.rs:90-96）。
+// 点击循环 升序 → 降序 → 回服务端序；键相同时目录行（kind=1）恒在文件行前
+// （次级键 kind 降序，文件管理器惯例）；换目录（面包屑/目录行导航）重置
+// 排序态（沿 M10-WP02 T01「新检索重置」判例）。children() 无分页、全量
+// 返回该目录条目——排序作用于全集，无「窗口序」误读面。
+let sortKey = null;
+let sortDir = 1; // 1 = 升序，-1 = 降序
+let lastRows = []; // 最近一次 list 快照（服务端序）；排序点击重渲不重发 IPC
+
+function cycleSort(key) {
+  if (sortKey !== key) { sortKey = key; sortDir = 1; }
+  else if (sortDir === 1) sortDir = -1;
+  else { sortKey = null; sortDir = 1; } // 第三点回服务端序
+  renderSortArrows();
+  renderRows();
+}
+
+// 箭头指示：当前键 ▲/▼ 标方向 + th aria-sort 同步；先全清再设（键切换/
+// 回默认不残留旧指示）；无排序态 = 全空。
+function renderSortArrows() {
+  document.querySelectorAll("#view-browse th[data-sort]").forEach((th) => th.removeAttribute("aria-sort"));
+  document.querySelectorAll("#view-browse .sort-arrow").forEach((s) => { s.textContent = ""; });
+  if (!sortKey) return;
+  const th = document.querySelector(`#view-browse th[data-sort="${sortKey}"]`);
+  const arrow = document.querySelector(`#view-browse .sort-arrow[data-key="${sortKey}"]`);
+  if (th) th.setAttribute("aria-sort", sortDir === 1 ? "ascending" : "descending");
+  if (arrow) arrow.textContent = sortDir === 1 ? "▲" : "▼";
+}
+
+// 排序作用于 lastRows 全量副本（不 mutate 服务端序快照）；kind 比较
+// 不乘 dir——目录恒在文件前，升降序双向成立。
+function sortedRows() {
+  if (!sortKey) return lastRows;
+  const dir = sortDir;
+  return [...lastRows].sort((a, b) => {
+    if ((a.kind ?? 0) !== (b.kind ?? 0)) return (b.kind ?? 0) - (a.kind ?? 0);
+    let c;
+    if (sortKey === "name") c = String(a.name ?? "").localeCompare(String(b.name ?? ""), "zh-CN");
+    else if (sortKey === "size") c = (a.size ?? 0) - (b.size ?? 0);
+    else c = (a.mtime_ns ?? 0) - (b.mtime_ns ?? 0);
+    return c * dir;
+  });
+}
+
+// mtime 相对显示（SPEC §2.3）：≤30 天复用既有 relTime；>30 天回落绝对
+// 日期（本卡自含实现，不依赖 M10-WP02-T03 落地顺序）；缺失/0 → 既有
+// 「—」回落（timeFmt 判据）。title 悬浮 = timeFmt 完整本地时间（见行模板）。
+function mtimeDisp(ns) {
+  if (!ns) return "—";
+  const ageS = Math.max(0, (Date.now() - ns / 1e6) / 1000);
+  return ageS > 30 * 86400 ? new Date(ns / 1e6).toLocaleDateString("zh-CN") : relTime(ns);
+}
+
 async function browse(path) {
-  curPath = path || "/";
+  const next = path || "/";
+  if (next !== curPath) { sortKey = null; sortDir = 1; renderSortArrows(); } // 换目录重置排序态
+  curPath = next;
   const rows = await call("list", { prefix: curPath });
+  lastRows = rows;
   const crumbs = breadcrumbFor(curPath);
   $("crumbs").innerHTML = crumbs.map((e, i) =>
     i === crumbs.length - 1
@@ -108,12 +165,19 @@ async function browse(path) {
   $("crumbs").querySelectorAll("a[data-path]").forEach(a => {
     a.onclick = () => browse(a.dataset.path);
   });
+  renderRows();
+}
+
+// 行渲染（自 browse 拆出，供排序点击重渲与 5s 轮询刷新共用）；空态文案
+// 维持原文不动（SPEC §2.3「空态不回退」）。
+function renderRows() {
+  const rows = sortedRows();
   $("rows").innerHTML = rows.length ? rows.map(e => {
     const dir = e.kind === 1;
     return `<tr class="${dir ? "row-dir" : "row-file"}"${dir ? ` data-path="${esc(e.path)}" style="cursor:pointer"` : ` data-cid="${esc(e.content_id)}" data-name="${esc(e.name)}" style="cursor:pointer"`}${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>
       <td class="icon" aria-hidden="true">${dir ? "▸" : "·"}</td>
       <td>${esc(e.name)}</td><td class="size">${dir ? "—" : sizeFmt(e.size)}</td>
-      <td class="mtime">${timeFmt(e.mtime_ns)}</td>
+      <td class="mtime" title="${esc(timeFmt(e.mtime_ns))}">${mtimeDisp(e.mtime_ns)}</td>
       <td class="fp"${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>${e.content_id ? "<i></i>" + esc(e.content_id.slice(0, 8)) : "—"}</td></tr>`;
   }).join("") : `<tr><td colspan="5" class="empty">${curPath === "/" ? "本机还没有索引文件——运行 <b>partisync index &lt;路径&gt;</b> 开始建立索引" : "空目录"}</td></tr>`;
   $("rows").querySelectorAll("tr[data-path]").forEach(tr => {
@@ -125,35 +189,100 @@ async function browse(path) {
   });
 }
 
-// ── B2. 条目详情面板（M8-WP05-T02；SPEC §2.2） ──
+// ── B2. 条目详情面板（M8-WP05-T02；M10-WP03-T02 关闭/补全/复制，SPEC §2.2） ──
+// 关闭（硬约束）：display:none + 内容清空；不清空/重载浏览列表（#rows 零
+// 触碰）、零重发查询（函数体无查询站点）；再点行重开沿既有行 onclick →
+// showDetail。× 按钮为 index.html 静态头（innerHTML 重写不丢）；加载中途
+// 关闭 → 回包弃渲（可见性门控，不回填已关面板）。
+function closeDetail() {
+  const panel = $("detail-panel");
+  panel.style.display = "none";
+  $("detail-body").innerHTML = "";
+}
+
+// Esc 关闭（§7-R4）：仅面板可见时生效；输入框聚焦时直接交还（INPUT/
+// TEXTAREA 不拦截，保输入框原生 Esc 语义），不抢焦点语义。
+function escClose(e) {
+  if (e.key !== "Escape") return;
+  const panel = $("detail-panel");
+  if (panel.style.display === "none") return;
+  const tag = e.target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+  closeDetail();
+}
+
+// 复制（沿 M10-WP02 §2.2 契约）：webview 内建 navigator.clipboard.writeText
+// （零新增依赖）；API 不可用/拒权 → 隐藏 textarea + execCommand 回落
+// （§7-R2 实现期拍板）。成功反馈 = 按钮文案瞬变「已复制」1.5s 回落；
+// 防重入：原始文案持久存 dataset（防把「已复制」捕获为回落文案）+ 旧
+// timer clearTimeout（防双 timer 竞争致永久停留「已复制」）。
+function detailCopy(btn, text) {
+  if (!btn.dataset.copyLabel) btn.dataset.copyLabel = btn.textContent;
+  const done = () => {
+    clearTimeout(Number(btn.dataset.copyTimer));
+    btn.textContent = "已复制";
+    btn.dataset.copyTimer = String(setTimeout(() => {
+      btn.textContent = btn.dataset.copyLabel;
+      btn.removeAttribute("data-copy-label");
+      btn.removeAttribute("data-copy-timer");
+    }, 1500));
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => detailCopyFallback(text, done));
+  } else {
+    detailCopyFallback(text, done);
+  }
+}
+
+function detailCopyFallback(text, done) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  if (ok) done();
+}
+
 async function showDetail(contentId, name) {
   const panel = $("detail-panel");
+  const body = $("detail-body");
   panel.style.display = "";
-  panel.innerHTML = `<div class="section-tag">detail</div>
-    <div class="empty">加载中…</div>`;
+  body.innerHTML = `<div class="empty">加载中…</div>`;
   let d;
   try {
     d = await call("asset_detail", { prefix: contentId });
   } catch (e) {
-    panel.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
+    if (panel.style.display === "none") return; // 加载中途已关闭——弃渲
+    body.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
     return;
   }
+  if (panel.style.display === "none") return; // 加载中途已关闭——弃渲
   const fp = fpOf(contentId);
   const copies = d.copies.map(c =>
-    `<li>${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></li>`).join("");
-  panel.innerHTML = `
+    `<li><span class="copy-path">${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></span><button type="button" class="btn ghost copy-btn" data-copy-text="${esc(c.path)}" aria-label="复制副本路径">复制</button></li>`).join("");
+  body.innerHTML = `
     <h2>${esc(name)}</h2>
     <dl>
       <dt>大小</dt><dd>${sizeFmt(d.size)}</dd>
+      <dt>修改时间</dt><dd>${timeFmt(d.copies[0]?.mtime_ns)}</dd>
       <dt>副本</dt><dd>${d.copies.length} 处</dd>
     </dl>
     <div class="fingerprint" style="--fp: ${fp}">
       <div class="label">内容身份（blake3）——指纹色由此派生</div>
       <div class="strip">${Array.from({length: 8}, (_, i) =>
         `<i style="background: hsl(${(i * 47 + parseInt(contentId.slice(0, 2), 16) * 137.508) % 360} 55% 55%)"></i>`).join("")}</div>
-      <div class="hash">${contentId.slice(0, 16)}…</div>
+      <div class="hash">${esc(contentId.slice(0, 16))}…</div>
+      <button type="button" class="btn ghost copy-btn" data-copy-text="${esc(contentId)}" aria-label="复制完整 content_id（64 hex）">复制</button>
     </div>
     <div class="copies"><div class="label">副本路径</div><ul>${copies || "<li>—</li>"}</ul></div>`;
+  body.querySelectorAll("button.copy-btn").forEach((b) => {
+    b.onclick = () => detailCopy(b, b.dataset.copyText);
+  });
 }
 
 // ── C. 检索（旗舰；三态全覆盖——设计审计硬约束） ──
@@ -188,11 +317,135 @@ function searchSkeleton(n) {
   ).join("");
 }
 
+// ── C3. 空态引导（M10-WP01-T05；SPEC §2.5）——index_stats 一次拉取缓存
+// （含失败态，不轮询）；approx_count 为 reader 快照近似值，UI 只做 0/>0
+// 粗分支 + 规模徽标，不承诺精确计数（§6-R5）。拉取失败 → 徽标隐藏，
+// 检索不受阻。
+let indexDocs = null; // null = 未拉取或拉取失败（徽标隐藏）
+let indexStatsDone = false;
+
+async function loadIndexStats() {
+  if (indexStatsDone) return;
+  indexStatsDone = true;
+  try { indexDocs = (await call("index_stats")).docs; } catch { indexDocs = null; }
+}
+
+// 检索 tab 初始态（未输入查询）：输入引导 + 全文索引规模徽标。已有查询
+// 结果（lastQ 非空）不覆盖——切 tab 回来检索结果原样保留。徽标样式内联
+// （styles-v3.css 不在本卡文件清单；JS 内联样式沿 skeleton/error 判例）。
+async function renderSearchIdle() {
+  await loadIndexStats();
+  if (lastQ) return;
+  $("srows").innerHTML = `<div class="empty">输入关键词或自然语言问题开始检索${
+    indexDocs !== null ? `<div class="idx-badge" style="display:inline-block;margin-top:12px;font-family:var(--mono);font-size:11px;line-height:1;padding:4px 9px;border:1px solid var(--green-dim);border-radius:999px;color:var(--green);background:var(--green-dark)" title="全文索引近似规模（reader 快照）">全文索引 ${indexDocs} docs</div>` : ""
+  }</div>`;
+}
+
+// ── C2. 检索过滤面（M10-WP01-T04；SPEC §2.4）——纯客户端维度：chips
+// 每次结果渲染后从命中集 filename 派生（大小写归一；无扩展名/孤儿行归
+// 「(无)」）；点击 chip 仅过滤已渲染命中（不重发查询、不触后端）；meta
+// 同步「显示 n / 共 m」；全不选 = 不过滤。诚实边界：tags 生产恒空、
+// mime 未入索引 schema——不做空维度过滤面（SPEC §4 非目标登记）。
+let lastQ = "";
+let lastHits = []; // 最近一次资产检索命中（原始序、未过滤快照）
+let lastMem = null; // 记忆通道快照（{rows, error} | null）
+let lastModeLabel = "";
+let selectedExts = new Set();
+
+function extOf(filename) {
+  const base = String(filename ?? "").split("/").pop() || "";
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "(无)";
+  return base.slice(dot + 1).toLowerCase();
+}
+
+function filteredHits() {
+  if (!selectedExts.size) return lastHits;
+  return lastHits.filter((h) => selectedExts.has(extOf(h.filename)));
+}
+
+function renderChips() {
+  const exts = [];
+  for (const h of lastHits) {
+    const e = extOf(h.filename);
+    if (!exts.includes(e)) exts.push(e);
+  }
+  const box = $("filter-chips");
+  box.innerHTML = exts.length
+    ? `<span class="chips-cap">按扩展名过滤</span>` + exts.map((e) =>
+        `<button type="button" class="chip${selectedExts.has(e) ? " on" : ""}" data-ext="${esc(e)}" aria-pressed="${selectedExts.has(e) ? "true" : "false"}">${esc(e)}</button>`
+      ).join("")
+    : "";
+  box.querySelectorAll("button.chip").forEach((b) => {
+    b.onclick = () => toggleExt(b.dataset.ext);
+  });
+}
+
+function toggleExt(ext) {
+  if (selectedExts.has(ext)) selectedExts.delete(ext);
+  else selectedExts.add(ext);
+  renderChips();
+  renderSearchResults();
+}
+
+function renderSearchResults() {
+  const meta = $("ssearch-meta");
+  const rows = filteredHits();
+  const total = lastHits.length;
+  // meta（T04：资产侧同步「显示 n / 共 m」；记忆侧计数不受过滤影响）。
+  meta.innerHTML = lastMem
+    ? ((total || lastMem.rows.length)
+      ? `资产 显示 <b>${rows.length}</b> / 共 ${total} · 记忆 <b>${lastMem.rows.length}</b> hits · ${lastModeLabel}+记忆`
+      : "")
+    : (total ? `显示 <b>${rows.length}</b> / 共 ${total} hits · ${lastModeLabel}` : "");
+  // 资产分区：过滤仅影响展示；过滤致空 ≠ 无结果（给恢复引导，不清 chips）。
+  const assetRows = rows.length ? rows.map(h => {
+    const fp = fpOf(h.content_id);
+    return `<article class="hit" style="--fp: ${fp}">
+      <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
+      <div class="body">
+        <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
+        <div class="snippet">${snippetHtml(h)}</div>
+      </div>
+      <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>
+      <div class="num">${h.score.toFixed(2)}</div></div>
+    </article>`;
+  }).join("")
+    : total
+      ? `<div class="empty">扩展名过滤后无显示命中——点掉上方 chips 恢复全部 ${total} 条。</div>`
+      // T05 空态分支：索引空（docs==0）→ reindex 引导（CLI 命令直出，
+      // §4 非目标：不做 GUI 内执行按钮）；有索引无命中 → 既有建议文案。
+      : (indexDocs === 0
+        ? `<div class="empty">没有找到「${esc(lastQ.slice(0, 24))}」——全文索引还没有建立——运行 <b>partisync reindex</b> 建立内容索引。</div>`
+        : `<div class="empty">没有找到「${esc(lastQ.slice(0, 24))}」——换个更短的关键词${
+            searchMode === "hybrid" ? "" : "，或切到「语义」模式放宽匹配"
+          }。</div>`);
+  // 记忆分区（§2.3：分区标题标明通道名；行 = content 截断 + tags + score，
+  // 全部动态插值经 esc；空态/错误态沿既有 .empty 样式）。
+  let memSection = "";
+  if (lastMem) {
+    memSection = `<div class="section-tag">记忆通道 · memory_search</div>` + (lastMem.error
+      ? `<div class="empty">记忆通道不可用——见顶部错误提示。</div>`
+      : lastMem.rows.length
+        ? `<table class="panel-table" aria-label="记忆命中"><thead><tr><th>内容</th><th>tags</th><th>score</th></tr></thead><tbody>${
+            lastMem.rows.map((m) => `
+              <tr class="mem-row"><td>${esc(trunc(m.content, 90))}</td>
+              <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
+              <td class="size">${(m.score ?? 0).toFixed(2)}</td></tr>`).join("")}</tbody></table>`
+        : `<div class="empty">记忆通道无命中。</div>`);
+  }
+  $("srows").innerHTML = (lastMem ? `<div class="section-tag">资产通道 · ${lastModeLabel}检索</div>` : "")
+    + assetRows + memSection;
+}
+
 async function doSearch() {
   const q = $("q").value.trim();
   const meta = $("ssearch-meta");
+  await loadIndexStats(); // T05：0/>0 空态分支与徽标依赖（一次拉取缓存，不轮询）
   if (!q) {
-    $("srows").innerHTML = `<div class="empty">输入关键词或自然语言问题开始检索</div>`;
+    lastQ = ""; lastHits = []; lastMem = null; selectedExts.clear();
+    renderChips();
+    renderSearchIdle();
     meta.innerHTML = "";
     return;
   }
@@ -206,7 +459,8 @@ async function doSearch() {
   // 资产通道 IPC 参数不变（资产区现状不变）。双通道各自内部排序不变、
   // 不合并数组（score 不可比，§6-R2 分区展示）；记忆通道失败不拖垮资产区
   // （catch → 记忆分区 empty 错误行，error-region 走 call()/mcPayload
-  // 既有链路透传）。
+  // 既有链路透传）。T04 起：命中集落 lastHits 快照，chips 过滤仅重渲
+  // 已渲染命中（renderSearchResults），不再触碰 IPC。
   const withMem = $("mode-memory").checked;
   const memPromise = withMem
     ? memCall("memory_search", { query: q })
@@ -215,44 +469,16 @@ async function doSearch() {
     : Promise.resolve(null);
   try {
     const [rows, mem] = await Promise.all([call(cmd, searchArgs(q)), memPromise]);
-    const modeLabel = searchMode === "hybrid" ? "语义" : searchMode === "transcript" ? "含转写" : "关键词";
-    meta.innerHTML = mem
-      ? ((rows.length || mem.rows.length)
-        ? `资产 <b>${rows.length}</b> hits · 记忆 <b>${mem.rows.length}</b> hits · ${modeLabel}+记忆`
-        : "")
-      : (rows.length ? `<b>${rows.length}</b> hits · ${modeLabel}` : "");
-    // 资产分区：行渲染现状不变；含记忆开启时置通道分区标题（§2.3）。
-    const assetRows = rows.length ? rows.map(h => {
-      const fp = fpOf(h.content_id);
-      return `<article class="hit" style="--fp: ${fp}">
-        <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
-        <div class="body">
-          <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
-          <div class="snippet">${snippetHtml(h)}</div>
-        </div>
-        <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>
-        <div class="num">${h.score.toFixed(2)}</div></div>
-      </article>`;
-    }).join("") : `<div class="empty">没有找到「${esc(q.slice(0, 24))}」——换个更短的关键词${
-      searchMode === "hybrid" ? "" : "，或切到「语义」模式放宽匹配"
-    }。</div>`;
-    // 记忆分区（§2.3：分区标题标明通道名；行 = content 截断 + tags + score，
-    // 全部动态插值经 esc；空态/错误态沿既有 .empty 样式）。
-    let memSection = "";
-    if (mem) {
-      memSection = `<div class="section-tag">记忆通道 · memory_search</div>` + (mem.error
-        ? `<div class="empty">记忆通道不可用——见顶部错误提示。</div>`
-        : mem.rows.length
-          ? `<table class="panel-table" aria-label="记忆命中"><thead><tr><th>内容</th><th>tags</th><th>score</th></tr></thead><tbody>${
-              mem.rows.map((m) => `
-                <tr class="mem-row"><td>${esc(trunc(m.content, 90))}</td>
-                <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
-                <td class="size">${(m.score ?? 0).toFixed(2)}</td></tr>`).join("")}</tbody></table>`
-          : `<div class="empty">记忆通道无命中。</div>`);
-    }
-    $("srows").innerHTML = (mem ? `<div class="section-tag">资产通道 · ${modeLabel}检索</div>` : "")
-      + assetRows + memSection;
+    lastQ = q;
+    lastHits = rows;
+    lastMem = mem;
+    lastModeLabel = searchMode === "hybrid" ? "语义" : searchMode === "transcript" ? "含转写" : "关键词";
+    selectedExts.clear();
+    renderChips();
+    renderSearchResults();
   } catch (e) {
+    lastQ = ""; lastHits = []; lastMem = null; selectedExts.clear();
+    renderChips();
     const kind = e?.kind ?? "Internal";
     meta.innerHTML = "";
     $("srows").innerHTML = `<div class="empty">
@@ -637,13 +863,19 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
     if (el) el.style.display = v === t ? "" : "none";
   });
   if (t === "browse") browse(curPath);
+  if (t === "search") renderSearchIdle(); // T05：初始态 = 输入引导 + 索引规模徽标
   if (t === "memory") { loadMemVerify(); loadMemories(); }
   if (t === "sync") { loadSync(!syncAnimated); syncAnimated = true; }
   if (t === "dups") loadDups();
   if (t === "jobs") loadJobs();
   if (t === "ext") loadExtTools();
 });
-$("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+// 检索 form 防整页重载（M10-WP01-T04 GUI 实操发现的既有 bug）：CSP
+// script-src 'self' 必拦 inline onsubmit（index.html 原 onsubmit 形同
+// 虚设），Enter 隐式提交 / submit 按钮都会把整页刷回 browse tab。JS 侧
+// 双保险：Enter keydown preventDefault + form submit 兜底 preventDefault。
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doSearch(); } });
+document.querySelector("form.query-row").addEventListener("submit", (e) => e.preventDefault());
 $("btn-search").onclick = doSearch;
 $("mode-bm25").addEventListener("change", () => { searchMode = "bm25"; if ($("q").value.trim()) doSearch(); });
 $("mode-hybrid").addEventListener("change", () => { searchMode = "hybrid"; if ($("q").value.trim()) doSearch(); });
@@ -655,6 +887,15 @@ $("btn-ext-call").onclick = doExtCall;
 $("btn-mem-search").onclick = loadMemories;
 $("mem-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadMemories(); });
 $("btn-mem-write").onclick = memWrite;
+// 详情面板关闭（M10-WP03-T02）：× 静态头 + Esc 双通道（CSP 禁 inline
+// onclick；可见性/焦点门控在 escClose 内，SPEC §2.2 + §7-R4）。
+$("detail-close").onclick = closeDetail;
+document.addEventListener("keydown", escClose);
+// 浏览表头排序（M10-WP03-T03）：三列点击循环 升序→降序→服务端序
+// （CSP 禁 inline onclick；表头为 index.html 静态结构，重渲不丢）。
+document.querySelectorAll("button.th-sort").forEach((b) => {
+  b.onclick = () => cycleSort(b.dataset.key);
+});
 
 setInterval(async () => {
   await loadStats();

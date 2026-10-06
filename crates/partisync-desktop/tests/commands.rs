@@ -22,8 +22,9 @@
 use std::path::PathBuf;
 
 use partisync_desktop::ipc::{
-    asset_detail, cas_stats, duplicates, get_stats, jobs, list, mcp_call, search, search_hybrid,
-    sync_recent, sync_stats, DuplicatesArgs, ListArgs, McpCallArgs, SearchArgs, SyncRecentArgs,
+    asset_detail, cas_stats, duplicates, get_stats, index_stats, jobs, list, mcp_call, search,
+    search_hybrid, sync_recent, sync_stats, DuplicatesArgs, ListArgs, McpCallArgs, SearchArgs,
+    SyncRecentArgs,
 };
 use partisync_desktop::mcp_sidecar::McpSidecar;
 use partisync_desktop::state::AppState;
@@ -905,6 +906,79 @@ async fn t02_highlight_centers_on_hit_terms() {
     assert!(!fb.contains("[["), "回落不得引入 sentinel：{fb}");
     // ocr/tx 全空 → None（不 panic）
     assert!(by_id("00770000").highlight.is_none(), "字段全空 → None");
+}
+// ── M10-WP01-T05：检索空态引导（SPEC §2.5 / §3）——index_stats IPC ──
+
+/// e2e `index_stats`（SPEC §3 T05）：空索引 docs=0；直种 IndexedDoc 后
+/// >0（reader reload 后 approx_count 反映种子）。徽标/分支文案的 UI 面
+/// 由 ui_hardening.rs 静态探针钉住。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_index_stats_empty_zero_then_seeded_positive() {
+    use partisync_index::search::bm25::IndexedDoc;
+
+    let (app, _tmp) = make_app().await;
+    let st = app.state::<AppState>();
+
+    // 空索引：docs == 0（index_stats 懒加载打开 IndexEngine，空骨架合法）
+    let stats = index_stats(st.clone()).await.expect("index_stats empty");
+    assert_eq!(stats.docs, 0, "空索引必须报 docs=0");
+
+    // 直种一条文档（沿 t01 判例：upsert + commit + 显式 reload）
+    {
+        let engine = st.index().await.expect("engine");
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "dd440000".into(),
+                filename: "seeded.md".into(),
+                tags: vec![],
+                ocr_text: Some("index stats seed marker wwqq".into()),
+                transcript_text: None,
+                updated_ns: 1,
+            })
+            .expect("seed doc");
+        engine.commit().expect("commit");
+        engine.bm25_index().reload().expect("reload");
+    }
+    let stats = index_stats(st).await.expect("index_stats seeded");
+    assert!(stats.docs > 0, "种子后 approx_count 必须 >0");
+}
+
+/// e2e `index_stats` 失败分支（SPEC §3 T05）：index_root 被普通文件占据
+/// → `IndexEngine::open_or_create` 的 `create_dir_all` 必败。SPEC §2.5
+/// 契约 `kind:"Index"`：state.index() 失败源唯一（PartisyError 经 From
+/// 落 Internal），index_stats 命令面拨回 Index 语义（实测发现 search
+/// 打开失败实际落 Internal——文档漂移，任务卡/PR 披露，不在本卡清单）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_index_stats_open_failure_maps_to_index_error() {
+    use partisync_desktop::error::DesktopError;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let index_root = tmp.path().join("index-blocked");
+    std::fs::write(&index_root, b"placeholder: not a directory").expect("write blocker file");
+
+    let state = AppState::open(
+        tmp.path().join("test.db"),
+        tmp.path().join("cas"),
+        index_root,
+    )
+    .await
+    .expect("open state（懒加载：开 App 时不触索引）");
+    let app = mock_builder()
+        .manage(state)
+        .build(mock_context(noop_assets()))
+        .expect("build app");
+
+    let err = index_stats(app.state::<AppState>())
+        .await
+        .expect_err("打开失败必须报错");
+    assert!(
+        matches!(err, DesktopError::Index(_)),
+        "打开失败必须映射 DesktopError::Index，得到：{err:?}"
+    );
+    // IPC 序列化形状对账：{kind:"Index", msg:…}
+    let kind = serde_json::to_value(&err).expect("serialize DesktopError")["kind"].clone();
+    assert_eq!(kind, json!("Index"), "IPC 错误 kind 必须为 Index");
 }
 
 // ── M9-WP03-T02：记忆浏览面板数据流（SPEC §2.2 + §3「请求 payload 与

@@ -1,5 +1,5 @@
-//! IPC commands（11 个： M6-WP03 基础 6 + T01/T02/T05 增量 + M8-WP05-T03
-//! 同步对）。
+//! IPC commands（12 个： M6-WP03 基础 6 + T01/T02/T05 增量 + M8-WP05-T03
+//! 同步对 + M10-WP01-T05 `index_stats`）。
 //!
 //! 由前端 `window.__TAURI__.invoke(cmd, args)` 调用； 所有命令接收
 //! `tauri::State<AppState>` 句柄， 返回 [`crate::error::DesktopResult`]。
@@ -16,6 +16,7 @@
 //! - `sync_stats` (M8-WP05-T03) → [`SyncStatsView`] 同步状态只读派生
 //! - `sync_recent` (M8-WP05-T03) → `Vec<SyncRecentItem>` 最近活动时间线
 //! - `mcp_call` (T05) → `serde_json::Value` 转发到 `partisync-mcp` 侧车
+//! - `index_stats` (M10-WP01-T05) → [`IndexStats`] 全文索引规模
 //!
 //! [`Stats`]: partisync_graph::store::Stats
 //! [`CasStats`]: partisync_cas::CasStats
@@ -185,6 +186,35 @@ pub async fn search_hybrid(
         .map(|h| (h.content_id, h.rrf_score, h.highlight, "hybrid"))
         .collect();
     Ok(enrich_hits(&state.store, hits).await)
+}
+
+/// 全文索引规模（M10-WP01-T05；SPEC §2.5）：检索空态分支判据 + 初始态
+/// 规模徽标数据源。`docs` 为 reader 快照**近似值**（§6-R5）——UI 只做
+/// 0/>0 粗分支，不承诺精确计数。
+#[derive(Debug, Serialize)]
+pub struct IndexStats {
+    pub docs: u64,
+}
+
+/// 全文索引文档数（M10-WP01-T05；SPEC §2.5）。
+///
+/// `IndexEngine` 懒加载： 首次调用打开， 后续复用。SPEC §2.5 契约：
+/// 打开失败 → `DesktopError::Index`（`kind:"Index"`）。`state.index()`
+/// 的失败源唯一——`IndexEngine::open_or_create` 的 `PartisyError` 经
+/// `From` 落 `Internal`，本命令面把它拨回 `Index` 语义（索引不可用即
+/// Index 错误；不触 `state.rs`，不在 SPEC §5 清单）。
+///
+/// # Errors
+/// 索引引擎打开失败 → `DesktopError::Index`。
+#[tauri::command]
+pub async fn index_stats(state: State<'_, AppState>) -> DesktopResult<IndexStats> {
+    let engine = state.index().await.map_err(|e| match e {
+        DesktopError::Internal(msg) => DesktopError::Index(msg),
+        other => other,
+    })?;
+    Ok(IndexStats {
+        docs: engine.bm25_index().approx_count(),
+    })
 }
 
 /// 条目详情 IPC（M8-WP05-T02；SPEC §2.2）：同 content_id 全部路径 +
