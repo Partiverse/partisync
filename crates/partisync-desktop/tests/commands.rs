@@ -22,8 +22,9 @@
 use std::path::PathBuf;
 
 use partisync_desktop::ipc::{
-    asset_detail, cas_stats, duplicates, get_stats, jobs, list, mcp_call, search, search_hybrid,
-    sync_recent, sync_stats, DuplicatesArgs, ListArgs, McpCallArgs, SearchArgs, SyncRecentArgs,
+    asset_detail, cas_stats, duplicates, get_stats, index_stats, jobs, list, mcp_call, search,
+    search_hybrid, sync_recent, sync_stats, DuplicatesArgs, ListArgs, McpCallArgs, SearchArgs,
+    SyncRecentArgs,
 };
 use partisync_desktop::mcp_sidecar::McpSidecar;
 use partisync_desktop::state::AppState;
@@ -762,6 +763,222 @@ async fn t01_search_hit_carries_graph_filename() {
     .expect("orphan search");
     assert_eq!(hits.len(), 1);
     assert!(hits[0].filename.is_none(), "孤儿行 filename 置 None");
+}
+
+/// M10-WP01-T02：命中词定位摘要（tantivy SnippetGenerator）e2e——
+/// SPEC §3 判别性用例：命中词置于 >200 字符偏移（旧「头部 200 字截断」
+/// 实现必败——摘要绝无命中词），断言 highlight 含 sentinel 包裹的命中词；
+/// 另含中文命中例与无词面回落例（回落 = 头部截断或 None，不 panic）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t02_highlight_centers_on_hit_terms() {
+    use partisync_index::search::bm25::IndexedDoc;
+
+    let (app, _tmp) = make_app().await;
+    let st = app.state::<AppState>();
+    {
+        let engine = st.index().await.expect("engine");
+        // 英文判别例：quokka 置于 >200 字符偏移
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "dd440000".into(),
+                filename: "wildlife-en.md".into(),
+                tags: vec![],
+                ocr_text: Some(format!(
+                    "{}The quokka is a small marsupial native to Australia.",
+                    "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(8)
+                )),
+                transcript_text: None,
+                updated_ns: 1,
+            })
+            .expect("seed en doc");
+        // 中文命中例：夸克 置于 >200 字符偏移
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "ee550000".into(),
+                filename: "物理笔记.md".into(),
+                tags: vec![],
+                ocr_text: Some(format!(
+                    "{}实验发现了新的夸克。",
+                    "粒子物理标准模型描述基本粒子及其相互作用。".repeat(12)
+                )),
+                transcript_text: None,
+                updated_ns: 2,
+            })
+            .expect("seed zh doc");
+        // 无词面回落例：查询词仅命中 filename（ocr 有文本无词面 → 头部
+        // 截断回落；ocr/tx 全空 → None）
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "ff660000".into(),
+                filename: "budget-falcon.md".into(),
+                tags: vec![],
+                ocr_text: Some("这份文档正文完全不含查询词面，用于验证回落行为。".into()),
+                transcript_text: None,
+                updated_ns: 3,
+            })
+            .expect("seed fallback doc");
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "00770000".into(),
+                filename: "empty-falcon.md".into(),
+                tags: vec![],
+                ocr_text: None,
+                transcript_text: None,
+                updated_ns: 4,
+            })
+            .expect("seed empty doc");
+        engine.commit().expect("commit");
+        engine.bm25_index().reload().expect("reader reload");
+    }
+
+    // 1) 英文判别例：sentinel 包裹命中词 + 窗口有界
+    let hits = search(
+        st.clone(),
+        SearchArgs {
+            q: "quokka".into(),
+            limit: Some(10),
+            include_transcript: None,
+        },
+    )
+    .await
+    .expect("en search");
+    assert_eq!(hits.len(), 1);
+    let hl = hits[0]
+        .highlight
+        .as_deref()
+        .expect("命中词在 >200 字符偏移处也必须产出定位摘要");
+    assert!(hl.contains("[[quokka]]"), "sentinel 必须包裹命中词：{hl}");
+    let plain = hl.replace("[[", "").replace("]]", "");
+    assert!(
+        plain.chars().count() <= 200,
+        "snippet 窗口有界（≤~200 字符量级）：{} 字符",
+        plain.chars().count()
+    );
+
+    // 2) 中文命中例：fan-out 词面（bigram「夸克」单独成 token）被包裹
+    let hits = search(
+        st.clone(),
+        SearchArgs {
+            q: "夸克".into(),
+            limit: Some(10),
+            include_transcript: None,
+        },
+    )
+    .await
+    .expect("zh search");
+    assert_eq!(hits.len(), 1);
+    let hl = hits[0]
+        .highlight
+        .as_deref()
+        .expect("中文命中也必须产出定位摘要");
+    assert!(hl.contains("[[夸克]]"), "sentinel 包裹中文命中词：{hl}");
+    assert!(
+        hl.replace("[[", "").replace("]]", "").chars().count() <= 200,
+        "中文窗口有界：{hl}"
+    );
+
+    // 3) 无词面回落例（查询命中 filename 字段）
+    let hits = search(
+        st,
+        SearchArgs {
+            q: "falcon".into(),
+            limit: Some(10),
+            include_transcript: None,
+        },
+    )
+    .await
+    .expect("filename-only search");
+    assert_eq!(hits.len(), 2);
+    let by_id = |cid: &str| {
+        hits.iter()
+            .find(|h| h.content_id == cid)
+            .unwrap_or_else(|| panic!("missing hit {cid}"))
+    };
+    // ocr 有文本无词面 → 头部截断回落（Some，无 sentinel）
+    let fb = by_id("ff660000")
+        .highlight
+        .as_deref()
+        .expect("无词面回落 = 头部截断 Some");
+    assert!(!fb.contains("[["), "回落不得引入 sentinel：{fb}");
+    // ocr/tx 全空 → None（不 panic）
+    assert!(by_id("00770000").highlight.is_none(), "字段全空 → None");
+}
+// ── M10-WP01-T05：检索空态引导（SPEC §2.5 / §3）——index_stats IPC ──
+
+/// e2e `index_stats`（SPEC §3 T05）：空索引 docs=0；直种 IndexedDoc 后
+/// >0（reader reload 后 approx_count 反映种子）。徽标/分支文案的 UI 面
+/// 由 ui_hardening.rs 静态探针钉住。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_index_stats_empty_zero_then_seeded_positive() {
+    use partisync_index::search::bm25::IndexedDoc;
+
+    let (app, _tmp) = make_app().await;
+    let st = app.state::<AppState>();
+
+    // 空索引：docs == 0（index_stats 懒加载打开 IndexEngine，空骨架合法）
+    let stats = index_stats(st.clone()).await.expect("index_stats empty");
+    assert_eq!(stats.docs, 0, "空索引必须报 docs=0");
+
+    // 直种一条文档（沿 t01 判例：upsert + commit + 显式 reload）
+    {
+        let engine = st.index().await.expect("engine");
+        engine
+            .bm25_index()
+            .upsert(IndexedDoc {
+                content_id: "dd440000".into(),
+                filename: "seeded.md".into(),
+                tags: vec![],
+                ocr_text: Some("index stats seed marker wwqq".into()),
+                transcript_text: None,
+                updated_ns: 1,
+            })
+            .expect("seed doc");
+        engine.commit().expect("commit");
+        engine.bm25_index().reload().expect("reload");
+    }
+    let stats = index_stats(st).await.expect("index_stats seeded");
+    assert!(stats.docs > 0, "种子后 approx_count 必须 >0");
+}
+
+/// e2e `index_stats` 失败分支（SPEC §3 T05）：index_root 被普通文件占据
+/// → `IndexEngine::open_or_create` 的 `create_dir_all` 必败。SPEC §2.5
+/// 契约 `kind:"Index"`：state.index() 失败源唯一（PartisyError 经 From
+/// 落 Internal），index_stats 命令面拨回 Index 语义（实测发现 search
+/// 打开失败实际落 Internal——文档漂移，任务卡/PR 披露，不在本卡清单）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_index_stats_open_failure_maps_to_index_error() {
+    use partisync_desktop::error::DesktopError;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let index_root = tmp.path().join("index-blocked");
+    std::fs::write(&index_root, b"placeholder: not a directory").expect("write blocker file");
+
+    let state = AppState::open(
+        tmp.path().join("test.db"),
+        tmp.path().join("cas"),
+        index_root,
+    )
+    .await
+    .expect("open state（懒加载：开 App 时不触索引）");
+    let app = mock_builder()
+        .manage(state)
+        .build(mock_context(noop_assets()))
+        .expect("build app");
+
+    let err = index_stats(app.state::<AppState>())
+        .await
+        .expect_err("打开失败必须报错");
+    assert!(
+        matches!(err, DesktopError::Index(_)),
+        "打开失败必须映射 DesktopError::Index，得到：{err:?}"
+    );
+    // IPC 序列化形状对账：{kind:"Index", msg:…}
+    let kind = serde_json::to_value(&err).expect("serialize DesktopError")["kind"].clone();
+    assert_eq!(kind, json!("Index"), "IPC 错误 kind 必须为 Index");
 }
 
 // ── M9-WP03-T02：记忆浏览面板数据流（SPEC §2.2 + §3「请求 payload 与

@@ -41,19 +41,38 @@
     <div class="crumbs" id="crumbs"></div>
     <div class="stage">
       <table class="panel-table" aria-label="目录条目">
-        <thead><tr><th></th><th>名称</th><th>大小</th><th>修改时间</th><th>内容身份</th></tr></thead>
+        <!-- M10-WP03-T03（SPEC §2.3）：名称/大小/修改时间三列表头排序钮
+             （点击循环 升序→降序→服务端序；箭头 span 由 JS 渲方向指示）；
+             内容身份列不排序（静态 th）。 -->
+        <thead><tr><th></th>
+          <th data-sort="name"><button type="button" class="th-sort" data-key="name" aria-label="按名称排序">名称<span class="sort-arrow" data-key="name" aria-hidden="true"></span></button></th>
+          <th data-sort="size"><button type="button" class="th-sort" data-key="size" aria-label="按大小排序">大小<span class="sort-arrow" data-key="size" aria-hidden="true"></span></button></th>
+          <th data-sort="mtime"><button type="button" class="th-sort" data-key="mtime" aria-label="按修改时间排序">修改时间<span class="sort-arrow" data-key="mtime" aria-hidden="true"></span></button></th>
+          <th>内容身份</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
-      <aside id="detail-panel" class="detail" style="display:none"></aside>
+      <!-- M10-WP03-T02（SPEC §2.2）：详情面板静态头（× 常驻 + 内容容器
+           detail-body——面板内容每开重渲，× 头不被 innerHTML 重写）；
+           关闭 = display:none + detail-body 清空（零列表触碰、零重 IPC）。 -->
+      <aside id="detail-panel" class="detail" style="display:none">
+        <div class="detail-head">
+          <span class="section-tag">detail</span>
+          <button id="detail-close" class="detail-close" type="button" aria-label="关闭详情" title="关闭（Esc）">×</button>
+        </div>
+        <div id="detail-body"></div>
+      </aside>
     </div>
   </section>
 
   <!-- 检索（旗舰） -->
   <section id="view-search" style="display:none">
     <div class="prompt-line"><b>partisync@local:~$</b> query<span class="cursor"></span></div>
-    <form class="query-row" onsubmit="return false">
+    <!-- M10-WP01-T04：按钮 type=button + form 防重载（CSP script-src
+         'self' 必拦 inline onsubmit，form 默认提交 = 整页重载丢结果——
+         GUI 实操实测的既有 bug；防重载接线见 app-core-v3.js 检索绑定区） -->
+    <form class="query-row">
       <input id="q" type="search" placeholder="搜文件名、内容、转写文本…" aria-label="检索">
-      <button id="btn-search" type="submit">[检索]</button>
+      <button id="btn-search" type="button">[检索]</button>
     </form>
     <div class="mode-switch" role="radiogroup" aria-label="检索模式">
       <label><input type="radio" name="mode" id="mode-bm25" checked> 关键词</label>
@@ -65,6 +84,10 @@
          §6-R2）；不进 radiogroup（ARIA 语义：三态 radio 保持独立分组） -->
     <label class="mem-toggle" title="并行检索记忆通道（memory_search）；与资产分区展示，分数不可比不混排"><input type="checkbox" id="mode-memory" checked> 含记忆</label>
     <div class="result-meta" id="ssearch-meta"></div>
+    <!-- M10-WP01-T04（SPEC §2.4）：检索过滤面容器——chips 行由
+         app-core-v3.js 从命中集 filename 派生渲染（大小写归一；无扩展名/
+         孤儿行归「(无)」）；点击仅客户端过滤已渲染命中，不重发查询。 -->
+    <div id="filter-chips" class="chips" role="group" aria-label="按扩展名过滤"></div>
     <!-- M10-WP01-T03：结果-详情联动双栏——命中卡点击经既有 asset_detail
          IPC 渲详情进 #sdetail-panel（动态区 #sdetail-panel-body）；关闭按钮
          只隐藏面板，#srows 不重写（硬约束：点击不清空结果列表） -->
@@ -87,7 +110,7 @@
       <time id="mem-root" title="承诺树根（截断展示）"></time>
     </div>
     <div class="section-tag">search / memory_search（FTS5 trigram · tag 精确 · limit 50）</div>
-    <form class="query-row" onsubmit="return false">
+    <form class="query-row">
       <input id="mem-q" type="search" placeholder="搜记忆内容…" aria-label="记忆检索">
       <input id="mem-tag" type="search" placeholder="tag 精确过滤" aria-label="tag 过滤" class="mem-tag-input">
       <button id="btn-mem-search" type="submit">[检索]</button>
@@ -150,7 +173,7 @@
   </section>
 </main>
 
-<footer>partisync · 内容身份 = BLAKE3 · IPC 11 commands（T01+T02+T03+T05）· 指纹即视觉</footer>
+<footer>partisync · 内容身份 = BLAKE3 · IPC 12 commands（M10-WP01-T05 +index_stats）· 指纹即视觉</footer>
 <script src="app-core-v3.js"></script>
 </body>
 </html>
