@@ -20,7 +20,7 @@ serde = { workspace = true } # hub-demo JSON 载荷
 serde_json = { workspace = true } # hub-demo JSON 响应
 openraft = { workspace = true } # ADR-0013（M3-WP02 分片复制共识）
 iroh = "=1.2.0" # M3-WP04-T06 ADR-0015：hub 侧 iroh 节点（中继/打洞）+ iroh-blobs 接收/发送会话
-iroh-blobs = "=0.103.0" # M4-WP04-T02：iroh-blobs 协议（handle_connection + get::fsm）；仅用 MemStore 无 fs-store 冲突
+iroh-blobs = "=0.103.1" # M4-WP04-T02：iroh-blobs 协议（handle_connection + get::fsm）；仅用 MemStore 无 fs-store 冲突；0.103.0 上游 yank 后 2026-10-06 补丁位替代（M10-WP00-T03，沿 M7 yoke-derive yank 判例）
 iroh-base = "=1.2.0" # M4-WP04-T02：iroh_base::EndpointAddr（download executor 参数类型）
 base64 = "0.22" # M4-WP04-T02：SecretKey 序列化（Base64 编码）
 tracing = "0.1" # M4-WP04-T02：iroh_channel 日志（warn/info/debug）
