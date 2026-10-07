@@ -363,6 +363,53 @@ fn t03_hit_card_click_wires_show_detail_and_keeps_results() {
     );
 }
 
+/// 浏览侧回归探针（PR 161 对抗评审 high）：showDetail body 推导必须按
+/// panelId 显式映射——浏览侧 #detail-panel 无 "-body" 拼接容器（内容容器
+/// 是 #detail-body），旧 `$(panelId+"-body")||panel` 拼接回落把面板本体当
+/// 渲染目标，innerHTML 重写炸掉 .detail-head × 静态头（M10-WP03-T02 契约：
+/// 头不被重写）与面板内 #detail-body（closeDetail 随后对 null 写 innerHTML
+/// 抛未捕获 TypeError）。锚：映射字面 + 渲染目标行走映射 + 旧拼接回落
+/// 消失 + index.html 浏览侧面板结构（detail-head 在前、detail-body 在后）
+/// 存活对账。
+#[test]
+fn t03_show_detail_body_maps_by_panel_id_browse_head_survives() {
+    // 1) 映射表字面：browse 面板 → #detail-body（× 静态头与内容容器分离
+    //    的 M10-WP03-T02 结构在浏览侧生效）；检索面板 → #sdetail-panel-body。
+    assert!(
+        UI_JS.contains("{ \"detail-panel\": \"detail-body\", \"sdetail-panel\": \"sdetail-panel-body\" }"),
+        "showDetail body 推导缺 panelId 显式映射（detail-panel→detail-body / sdetail-panel→sdetail-panel-body）"
+    );
+    // 2) 渲染目标行：body 推导走映射表，不得直渲 panel 本体。
+    assert!(
+        UI_JS.contains("const body = $(detailBodyOf[panelId]) || panel;"),
+        "showDetail body 推导未走 detailBodyOf 映射"
+    );
+    // 3) 根因字面必须消失：`$(panelId + "-body") || panel` 拼接回落是炸
+    //    .detail-head 的根因（#detail-panel-body 不存在 → 回落 panel 本体）。
+    assert!(
+        !UI_JS.contains("$(panelId + \"-body\") || panel"),
+        "showDetail 仍保留 $(panelId+\"-body\")||panel 拼接回落（浏览侧炸头根因）"
+    );
+    // 4) index.html 浏览侧面板结构存活：#detail-panel 内 detail-head（含
+    //    × 关闭钮）在前、#detail-body 在后（静态字面近似 DOM 从属关系）。
+    let panel_at = UI_HTML
+        .find("id=\"detail-panel\"")
+        .expect("index.html 缺 #detail-panel");
+    let head_at = UI_HTML[panel_at..]
+        .find("class=\"detail-head\"")
+        .expect("#detail-panel 内缺 .detail-head × 静态头");
+    let close_at = UI_HTML[panel_at..]
+        .find("id=\"detail-close\"")
+        .expect("#detail-panel 内缺 #detail-close 关闭钮");
+    let body_at = UI_HTML[panel_at..]
+        .find("id=\"detail-body\"")
+        .expect("#detail-panel 内缺 #detail-body 内容容器");
+    assert!(
+        head_at < close_at && close_at < body_at,
+        "浏览侧详情面板结构漂移：.detail-head(×) 必须在 #detail-body 之前"
+    );
+}
+
 /// 分区展示 + 跨通道不混排（§6-R2）：通道名分区标题、记忆行三字段
 /// （content 截断 + tags + score）esc 全覆盖、资产行模板零记忆字段、
 /// 双通道结果不合并数组（各自内部排序不变）。

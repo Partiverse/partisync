@@ -249,12 +249,18 @@ function detailCopyFallback(text, done) {
 }
 
 // ── B2. 条目详情面板（M8-WP05-T02；SPEC §2.2） ──
-// M10-WP01-T03：渲染目标抽参 panelId——浏览侧栏（#detail-panel，无
-// -body 容器时直渲面板本体）与检索内联面板（#sdetail-panel，常驻关闭
-// 按钮，动态区 #sdetail-panel-body）共用同一渲染契约（大小/副本数/
-// 指纹色/副本路径）；标题回落语义（name 缺失 → content_id 切片，沿
-// §2.1）收敛在此——命中卡接线保持 showDetail(h.content_id, h.filename)
-// 字面（SPEC §2.3 探针锚点）。
+// M10-WP01-T03：渲染目标抽参 panelId——浏览侧栏（#detail-panel → 动态区
+// #detail-body，.detail-head × 静态头不被重写，沿 M10-WP03-T02）与检索
+// 内联面板（#sdetail-panel → 动态区 #sdetail-panel-body，常驻关闭按钮）
+// 共用同一渲染契约（大小/副本数/指纹色/副本路径）；标题回落语义（name
+// 缺失 → content_id 切片，沿 §2.1）收敛在此——命中卡接线保持
+// showDetail(h.content_id, h.filename) 字面（SPEC §2.3 探针锚点）。
+// body 推导按 panelId 显式映射（PR 161 对抗评审 high）：浏览侧面板无
+// "-body" 拼接容器，旧 `$(panelId+"-body")||panel` 回落把面板本体当渲染
+// 目标，innerHTML 重写炸掉 .detail-head × 静态头与面板内 #detail-body
+// （closeDetail 随后对 null 写 innerHTML 抛未捕获 TypeError）。已知面板
+// 逐一映射；|| panel 兜底仅防未知 panelId 直接空引用，不得作为路径依赖。
+const detailBodyOf = { "detail-panel": "detail-body", "sdetail-panel": "sdetail-panel-body" };
 // 并发守卫（PR 161 评审 low）：快速连点两张命中卡时多个 asset_detail
 // 并发在途，先发后返的旧响应不得覆盖面板——按 panelId 记请求序号，
 // 迟到响应（seq 已被更新的请求取代）静默丢弃。
@@ -262,7 +268,7 @@ const detailSeq = {};
 async function showDetail(contentId, name, panelId = "detail-panel") {
   const panel = $(panelId);
   panel.style.display = "";
-  const body = $(panelId + "-body") || panel;
+  const body = $(detailBodyOf[panelId]) || panel;
   const seq = (detailSeq[panelId] = (detailSeq[panelId] || 0) + 1);
   body.innerHTML = `<div class="section-tag">detail</div>
     <div class="empty">加载中…</div>`;
