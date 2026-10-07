@@ -161,6 +161,16 @@ main { padding: 0 22px 56px; }
   box-shadow: 0 0 8px rgba(34, 208, 69, 0.25);
 }
 .hits { min-height: 60px; }
+/* ===== 结果-详情联动（M10-WP01-T03：整卡可点击 + 内联详情双栏） ===== */
+.hit:not(.skel-row) { cursor: pointer; }
+.hit:not(.skel-row):hover { background: rgba(34, 208, 69, 0.04); }
+.hit:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+.s-stage { display: flex; align-items: flex-start; gap: 18px; }
+.s-stage .hits { flex: 1; min-width: 0; }
+/* 详情列锁宽：min-width:0 防 flex 内容最小尺寸把 340px 撑宽挤压结果列
+   （PR 161 评审 low——长副本路径 li 已有 word-break:break-all） */
+.s-stage .detail { min-width: 0; max-width: 340px; }
+.sdetail-close { margin-bottom: 12px; }
 .hit {
   display: flex; gap: 13px; align-items: flex-start;
   padding: 12px 12px 12px 14px;

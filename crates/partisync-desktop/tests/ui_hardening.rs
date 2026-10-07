@@ -280,6 +280,136 @@ fn t03_flagship_memory_toggle_wired() {
     );
 }
 
+// ── M10-WP01-T03：检索结果-详情联动静态契约（SPEC §2.3 + §3） ──
+
+/// 联动探针（SPEC §3「联动探针」）：命中卡 click → `showDetail(h.content_id,
+/// h.filename)` 接线断言 + 打开详情路径零 #srows 写入（硬约束：点击不清空
+/// 结果列表）+ 关闭仅隐藏面板 + 整卡可点击的可访问语义与样式。
+#[test]
+fn t03_hit_card_click_wires_show_detail_and_keeps_results() {
+    // 1) 接线断言（SPEC §3 字面）：命中卡 onclick → 既有 showDetail 渲染
+    //    契约（asset_detail IPC 零新增 command），入参恰为 (content_id,
+    //    filename)——标题回落语义收敛在 showDetail 内（§2.1 沿革）。
+    assert!(
+        UI_JS.contains(
+            "card.onclick = () => showDetail(h.content_id, h.filename, \"sdetail-panel\");"
+        ),
+        "命中卡 click 必须接 showDetail(h.content_id, h.filename)（SPEC §2.3）"
+    );
+    // 2) 点击不清空结果列表：命中卡接线块内零 innerHTML 写入——详情
+    //    面板独立于 #srows（SPEC §2.3 硬约束）。
+    let bind_at = UI_JS.find("article.hit[data-cid]").expect("命中卡接线存在");
+    let seg = &UI_JS[bind_at..];
+    let bind_end = seg.find("});").expect("命中卡接线闭合");
+    let wiring = &seg[..bind_end];
+    assert!(
+        !wiring.contains("innerHTML"),
+        "打开详情路径不得重写 #srows（点击不得清空结果列表）"
+    );
+    // 3) 键盘可达（可访问语义）：Enter/Space 触发 + role=button/tabindex。
+    assert!(
+        UI_JS.contains("e.key === \"Enter\" || e.key === \" \""),
+        "命中卡必须支持键盘触发"
+    );
+    assert!(
+        UI_JS.contains("role=\"button\" tabindex=\"0\" data-cid="),
+        "命中卡模板必须带 role=button + tabindex 可访问语义"
+    );
+    // 4) 面板结构：检索视图内联详情面板 + 常驻关闭按钮（DOM id 对账）。
+    assert!(
+        UI_HTML.contains("id=\"sdetail-panel\"") && UI_HTML.contains("id=\"sdetail-close\""),
+        "index.html 缺检索详情面板/关闭按钮"
+    );
+    assert!(
+        UI_JS.contains("$(\"sdetail-close\").onclick"),
+        "关闭按钮必须接线"
+    );
+    let close_at = UI_JS
+        .find("$(\"sdetail-close\").onclick")
+        .expect("关闭接线存在");
+    let close_seg = &UI_JS[close_at..];
+    let close_end = close_seg.find(";").expect("关闭接线闭合");
+    assert!(
+        close_seg[..close_end].contains("display = \"none\"")
+            && !close_seg[..close_end].contains("innerHTML"),
+        "关闭详情只隐藏面板，不得动结果列表"
+    );
+    // 5) 整卡可点击样式（cursor:pointer，骨架行除外 + 键盘焦点态）。
+    assert!(
+        UI_CSS.contains(".hit:not(.skel-row) { cursor: pointer; }"),
+        "命中卡缺 cursor:pointer（骨架行除外）"
+    );
+    assert!(UI_CSS.contains(".hit:focus-visible"), "命中卡缺键盘焦点态");
+    // 6) 并发守卫（PR 161 评审 low）：面板级请求序号——迟到响应静默
+    //    丢弃，快速连点两张命中卡时旧 asset_detail 响应不得覆盖面板。
+    for needle in [
+        "const seq = (detailSeq[panelId] = (detailSeq[panelId] || 0) + 1);",
+        "if (seq !== detailSeq[panelId]) return;",
+    ] {
+        assert!(UI_JS.contains(needle), "showDetail 缺并发守卫：{needle}");
+    }
+    assert_eq!(
+        UI_JS
+            .matches("if (seq !== detailSeq[panelId]) return;")
+            .count(),
+        2,
+        "并发守卫必须同时覆盖成功渲染与失败透出两条路径"
+    );
+    // 7) 详情列锁宽（PR 161 评审 low）：长副本路径不得把 340px 面板
+    //    撑宽挤压结果列表。
+    assert!(
+        UI_CSS.contains(".s-stage .detail { min-width: 0; max-width: 340px; }"),
+        "检索详情面板缺 min-width:0 / max-width 锁宽约束"
+    );
+}
+
+/// 浏览侧回归探针（PR 161 对抗评审 high）：showDetail body 推导必须按
+/// panelId 显式映射——浏览侧 #detail-panel 无 "-body" 拼接容器（内容容器
+/// 是 #detail-body），旧 `$(panelId+"-body")||panel` 拼接回落把面板本体当
+/// 渲染目标，innerHTML 重写炸掉 .detail-head × 静态头（M10-WP03-T02 契约：
+/// 头不被重写）与面板内 #detail-body（closeDetail 随后对 null 写 innerHTML
+/// 抛未捕获 TypeError）。锚：映射字面 + 渲染目标行走映射 + 旧拼接回落
+/// 消失 + index.html 浏览侧面板结构（detail-head 在前、detail-body 在后）
+/// 存活对账。
+#[test]
+fn t03_show_detail_body_maps_by_panel_id_browse_head_survives() {
+    // 1) 映射表字面：browse 面板 → #detail-body（× 静态头与内容容器分离
+    //    的 M10-WP03-T02 结构在浏览侧生效）；检索面板 → #sdetail-panel-body。
+    assert!(
+        UI_JS.contains("{ \"detail-panel\": \"detail-body\", \"sdetail-panel\": \"sdetail-panel-body\" }"),
+        "showDetail body 推导缺 panelId 显式映射（detail-panel→detail-body / sdetail-panel→sdetail-panel-body）"
+    );
+    // 2) 渲染目标行：body 推导走映射表，不得直渲 panel 本体。
+    assert!(
+        UI_JS.contains("const body = $(detailBodyOf[panelId]) || panel;"),
+        "showDetail body 推导未走 detailBodyOf 映射"
+    );
+    // 3) 根因字面必须消失：`$(panelId + "-body") || panel` 拼接回落是炸
+    //    .detail-head 的根因（#detail-panel-body 不存在 → 回落 panel 本体）。
+    assert!(
+        !UI_JS.contains("$(panelId + \"-body\") || panel"),
+        "showDetail 仍保留 $(panelId+\"-body\")||panel 拼接回落（浏览侧炸头根因）"
+    );
+    // 4) index.html 浏览侧面板结构存活：#detail-panel 内 detail-head（含
+    //    × 关闭钮）在前、#detail-body 在后（静态字面近似 DOM 从属关系）。
+    let panel_at = UI_HTML
+        .find("id=\"detail-panel\"")
+        .expect("index.html 缺 #detail-panel");
+    let head_at = UI_HTML[panel_at..]
+        .find("class=\"detail-head\"")
+        .expect("#detail-panel 内缺 .detail-head × 静态头");
+    let close_at = UI_HTML[panel_at..]
+        .find("id=\"detail-close\"")
+        .expect("#detail-panel 内缺 #detail-close 关闭钮");
+    let body_at = UI_HTML[panel_at..]
+        .find("id=\"detail-body\"")
+        .expect("#detail-panel 内缺 #detail-body 内容容器");
+    assert!(
+        head_at < close_at && close_at < body_at,
+        "浏览侧详情面板结构漂移：.detail-head(×) 必须在 #detail-body 之前"
+    );
+}
+
 /// 分区展示 + 跨通道不混排（§6-R2）：通道名分区标题、记忆行三字段
 /// （content 截断 + tags + score）esc 全覆盖、资产行模板零记忆字段、
 /// 双通道结果不合并数组（各自内部排序不变）。

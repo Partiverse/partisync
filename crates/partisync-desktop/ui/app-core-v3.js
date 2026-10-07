@@ -248,25 +248,47 @@ function detailCopyFallback(text, done) {
   if (ok) done();
 }
 
-async function showDetail(contentId, name) {
-  const panel = $("detail-panel");
-  const body = $("detail-body");
+// ── B2. 条目详情面板（M8-WP05-T02；SPEC §2.2） ──
+// M10-WP01-T03：渲染目标抽参 panelId——浏览侧栏（#detail-panel → 动态区
+// #detail-body，.detail-head × 静态头不被重写，沿 M10-WP03-T02）与检索
+// 内联面板（#sdetail-panel → 动态区 #sdetail-panel-body，常驻关闭按钮）
+// 共用同一渲染契约（大小/副本数/指纹色/副本路径）；标题回落语义（name
+// 缺失 → content_id 切片，沿 §2.1）收敛在此——命中卡接线保持
+// showDetail(h.content_id, h.filename) 字面（SPEC §2.3 探针锚点）。
+// body 推导按 panelId 显式映射（PR 161 对抗评审 high）：浏览侧面板无
+// "-body" 拼接容器，旧 `$(panelId+"-body")||panel` 回落把面板本体当渲染
+// 目标，innerHTML 重写炸掉 .detail-head × 静态头与面板内 #detail-body
+// （closeDetail 随后对 null 写 innerHTML 抛未捕获 TypeError）。已知面板
+// 逐一映射；|| panel 兜底仅防未知 panelId 直接空引用，不得作为路径依赖。
+const detailBodyOf = { "detail-panel": "detail-body", "sdetail-panel": "sdetail-panel-body" };
+// 并发守卫（PR 161 评审 low）：快速连点两张命中卡时多个 asset_detail
+// 并发在途，先发后返的旧响应不得覆盖面板——按 panelId 记请求序号，
+// 迟到响应（seq 已被更新的请求取代）静默丢弃。
+const detailSeq = {};
+async function showDetail(contentId, name, panelId = "detail-panel") {
+  const panel = $(panelId);
   panel.style.display = "";
-  body.innerHTML = `<div class="empty">加载中…</div>`;
+  const body = $(detailBodyOf[panelId]) || panel;
+  const seq = (detailSeq[panelId] = (detailSeq[panelId] || 0) + 1);
+  body.innerHTML = `<div class="section-tag">detail</div>
+    <div class="empty">加载中…</div>`;
   let d;
   try {
     d = await call("asset_detail", { prefix: contentId });
   } catch (e) {
-    if (panel.style.display === "none") return; // 加载中途已关闭——弃渲
+    if (seq !== detailSeq[panelId]) return;
+    if (panel.style.display === "none") return; // 加载中途已关闭——弃渲（M10-WP03-T02 可见性门控）
     body.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
     return;
   }
+  if (seq !== detailSeq[panelId]) return;
   if (panel.style.display === "none") return; // 加载中途已关闭——弃渲
+  const title = name || contentId.slice(0, 8) + "…"; // T03 标题回落语义（沿 §2.1，收敛在此）
   const fp = fpOf(contentId);
   const copies = d.copies.map(c =>
     `<li><span class="copy-path">${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></span><button type="button" class="btn ghost copy-btn" data-copy-text="${esc(c.path)}" aria-label="复制副本路径">复制</button></li>`).join("");
   body.innerHTML = `
-    <h2>${esc(name)}</h2>
+    <h2>${esc(title)}</h2>
     <dl>
       <dt>大小</dt><dd>${sizeFmt(d.size)}</dd>
       <dt>修改时间</dt><dd>${timeFmt(d.copies[0]?.mtime_ns)}</dd>
@@ -401,7 +423,7 @@ function renderSearchResults() {
   // 资产分区：过滤仅影响展示；过滤致空 ≠ 无结果（给恢复引导，不清 chips）。
   const assetRows = rows.length ? rows.map(h => {
     const fp = fpOf(h.content_id);
-    return `<article class="hit" style="--fp: ${fp}">
+    return `<article class="hit" role="button" tabindex="0" data-cid="${esc(h.content_id)}" style="--fp: ${fp}">
       <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
       <div class="body">
         <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
@@ -436,11 +458,29 @@ function renderSearchResults() {
   }
   $("srows").innerHTML = (lastMem ? `<div class="section-tag">资产通道 · ${lastModeLabel}检索</div>` : "")
     + assetRows + memSection;
+  // M10-WP01-T03（SPEC §2.3）：命中卡整卡可点击 → 既有 asset_detail IPC
+  //（零新增 command），详情渲进检索内联面板 #sdetail-panel；本路径零 #srows
+  // 重写（硬约束：点击不清空结果列表，关闭后原样可继续点）。卡顺序 =
+  // filteredHits() 顺序（assetRows 恰为 rows.map 产物且位于 memSection
+  // 之前），按下标配对安全；chips 过滤重渲后重绑，行集与快照一致。
+  $("srows").querySelectorAll("article.hit[data-cid]").forEach((card, i) => {
+    const h = rows[i];
+    card.onclick = () => showDetail(h.content_id, h.filename, "sdetail-panel");
+    card.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        showDetail(h.content_id, h.filename, "sdetail-panel");
+      }
+    };
+  });
 }
 
 async function doSearch() {
   const q = $("q").value.trim();
   const meta = $("ssearch-meta");
+  // M10-WP01-T03：新一次查询收起上一轮的详情面板（面板独立于结果列表，
+  // 结果列表仍由下方正常重渲——不违反「点击不清空结果」硬约束）。
+  $("sdetail-panel").style.display = "none";
   await loadIndexStats(); // T05：0/>0 空态分支与徽标依赖（一次拉取缓存，不轮询）
   if (!q) {
     lastQ = ""; lastHits = []; lastMem = null; selectedExts.clear();
@@ -877,6 +917,9 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doSearch(); } });
 document.querySelector("form.query-row").addEventListener("submit", (e) => e.preventDefault());
 $("btn-search").onclick = doSearch;
+// M10-WP01-T03：检索详情面板关闭——只隐藏面板，结果列表不动（SPEC §2.3
+// 硬约束：关闭后检索结果原样可继续点击）。
+$("sdetail-close").onclick = () => { $("sdetail-panel").style.display = "none"; };
 $("mode-bm25").addEventListener("change", () => { searchMode = "bm25"; if ($("q").value.trim()) doSearch(); });
 $("mode-hybrid").addEventListener("change", () => { searchMode = "hybrid"; if ($("q").value.trim()) doSearch(); });
 $("mode-transcript").addEventListener("change", () => { searchMode = "transcript"; if ($("q").value.trim()) doSearch(); });
