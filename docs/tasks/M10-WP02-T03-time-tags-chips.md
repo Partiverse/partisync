@@ -62,6 +62,20 @@
    `screencapture -l` 主窗仍 could not create image——四轮证据一致，
    环境持续不可得。补验动作：环境恢复后
    按 §2.4 清单实操 + 截图归档 + SPEC §3 GUI 行回填。
+   **第五轮重试（2026-10-08）环境部分恢复、根因收窄为 console 锁屏**：
+   幻影屏消退（CGWindowList 主窗 331 正常几何 1200×800@(120,50)
+   onscreen=true layer=0）、`screencapture -l 331` 通道已通（成功出
+   2400×1600 图，标题栏「PartiSync · 资产图谱」清晰）——前四轮的截图
+   通道断与 AX 全盲在本轮定位为锁屏衍生症状：`CGSessionCopyCurrent
+   Dictionary` 实证 `CGSSessionScreenIsLocked = 1`（锁于 1791388188
+   ≈ 2026-10-08 00:29，`CGSSessionSecureInputPID = 485` 即 loginwindow
+   持安全输入）；锁屏下全屏截图仅锁屏壁纸（含「Touch ID or Enter
+   Password」）、WKWebView 因 occlusion 从未绘制（窗口截图黑面）、
+   AX 对用户会话窗口不可见。两实例（cargo run / 裸二进制重启 + 清
+   savedState）一致；caffeinate -u 无法越过硬锁；解锁凭据（Touch ID/
+   密码）在本会话不可得，如实登记不合入。**补验前置检查（经验沉淀）**：
+   环境恢复后先查 `CGSSessionScreenIsLocked`，锁屏状态下窗口黑面/
+   全屏壁纸/AX 失明均为衍生症状，勿再按幻影屏误诊。
 2. **T01/T02 合入时的组合验证义务（评审 finding，medium）**：本 PR 基
    线无 T01（排序）/T02（详情展开），「过滤×排序」「过滤×详情展开」
    组合结果正确性当前不可验证。已落结构锁：探针
