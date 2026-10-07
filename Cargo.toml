@@ -83,6 +83,13 @@ fuser = { version = ">=0.18.0, <0.19", features = ["macos-no-mount"] }
 # ADR-0030（M9-WP04 扩展签名）：minisign 线位纯验签 crate（MIT、零依赖）；
 # 签名产出走 minisign CLI，不进依赖图（ADR-0027 决策 1 口径延伸）
 minisign-verify = "0.3"
+# ADR-0031（M10-WP05-T03 决策 4）：TLS 线位 = rustls 0.23 + tokio-rustls
+# acceptor（0.23 线已在 lock 经 reqwest/iroh 同线，零新 crate，deny 实证随
+# T03 载体 PR 门禁回填）；rcgen 仅 dev 证书（测试自签 fixture，0.14 已在
+# lock 零新 crate；SPEC §6-R6 仓内可复现分支）。
+rustls = "0.23"
+tokio-rustls = "0.26"
+rcgen = "0.14"
 
 [workspace.lints.rust]
 # 安全政策（执行方案 §5.2）：默认全局禁止 unsafe；确需 unsafe 的 crate 必须在
