@@ -10,10 +10,22 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use axum::extract::{Request, State};
 use axum::http::uri::Authority;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::get;
+use axum::Router;
+use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
+use rmcp::transport::streamable_http_server::tower::{
+    StreamableHttpServerConfig, StreamableHttpService,
+};
 use serde_json::json;
+
+use crate::mcp::McpServerState;
 
 /// PRM well-known 根路径（RFC 9728；hub 骨架同形，M9-WP05 判例）。
 pub const PRM_WELLKNOWN_PATH: &str = "/.well-known/oauth-protected-resource";
@@ -132,6 +144,47 @@ pub struct GateRejection {
     pub message: &'static str,
     /// Some = `WWW-Authenticate` 头值（401 挑战）。
     pub www_authenticate: Option<String>,
+}
+
+impl GateRejection {
+    pub fn into_response(self) -> Response {
+        let mut resp = (self.status, self.message).into_response();
+        if let Some(www) = self.www_authenticate {
+            if let Ok(value) = HeaderValue::from_str(&www) {
+                resp.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+            }
+        }
+        resp
+    }
+}
+
+/// 启动守卫（SPEC §2.2：非回环绑定必须 TLS，不静默降级明文）。
+///
+/// 非回环前置条件（评估件 §5 + ADR-0031 决策 4）：①未配置 TLS → 拒绝
+/// 启动；②`allowed_hosts` 未显式覆写（仍为回环默认名单，远程请求将被
+/// host 校验 403 全拒）→ 拒绝启动。授权配置 T03 期由 fail-closed 墙兜底
+/// （一切请求 401），T04 起随授权面接线检查（SPEC §6-R9 窗口期设计）。
+pub fn check_startup(
+    bind_addr: SocketAddr,
+    tls: Option<&TlsFiles>,
+    allowed_hosts: Option<&[String]>,
+) -> Result<(), String> {
+    if bind_addr.ip().is_loopback() {
+        return Ok(());
+    }
+    if tls.is_none() {
+        return Err(format!(
+            "启动守卫拒绝：bind {bind_addr} 为非回环地址且未配置 TLS（不静默降级明文）\
+             ——配置 --tls-cert/--tls-key，或绑定回环 127.0.0.1"
+        ));
+    }
+    if allowed_hosts.is_none() {
+        return Err(format!(
+            "启动守卫拒绝：bind {bind_addr} 为非回环地址且未显式配置 allowed_hosts\
+             （内建回环默认名单会 403 全拒远程请求）——用 --allow-host 显式配置真实主机名"
+        ));
+    }
+    Ok(())
 }
 
 /// 授权墙（fail-closed 默认态，SPEC §2.2「墙先于门」）。T03 期仅
@@ -348,4 +401,73 @@ fn origin_is_allowed(origin: &NormalizedOrigin, allowed_origins: &[String]) -> b
             ) => a_s == o_s && a_h == o_h && (a_p.is_none() || a_p == o_p),
             _ => false,
         })
+}
+
+#[derive(Debug, Clone)]
+struct GateState {
+    allowed_hosts: Vec<String>,
+    allowed_origins: Vec<String>,
+    wall: AuthWall,
+    prm: PrmConfig,
+}
+
+/// 组装远程 MCP router：PRM 公开路由 + gate 中间件包住的 rmcp 服务（`POST
+/// /mcp` 单端点）。T03 期 gate 对一切非 PRM 请求 401（fail-closed 默认态）。
+pub fn build_router(config: &McpRemoteConfig, mcp_state: Arc<McpServerState>) -> Router {
+    let allowed_hosts = config.effective_allowed_hosts();
+    let gate_state = Arc::new(GateState {
+        allowed_hosts: allowed_hosts.clone(),
+        allowed_origins: config.allowed_origins.clone(),
+        wall: AuthWall::FailClosedAll {
+            prm_metadata_url: config.prm.metadata_url(),
+            scopes: config.prm.scopes_supported.join(" "),
+        },
+        prm: config.prm.clone(),
+    });
+    let rmcp_service = StreamableHttpService::new(
+        {
+            let state = Arc::clone(&mcp_state);
+            move || -> std::io::Result<Arc<McpServerState>> { Ok(Arc::clone(&state)) }
+        },
+        Arc::new(NeverSessionManager::default()),
+        // fail-closed 四件套（ADR-0031 决策 2）：stateless + 单 JSON +
+        // 协议头强制（rmcp 默认 false，缺头放行是关键坑位）+ 同源白名单。
+        StreamableHttpServerConfig::default()
+            .with_legacy_session_mode(false)
+            .with_json_response(true)
+            .with_stateless_protocol_metadata_required(true)
+            .with_allowed_hosts(allowed_hosts)
+            .with_allowed_origins(config.allowed_origins.clone()),
+    );
+    let mcp_router: Router<()> = Router::new()
+        .route_service(MCP_ENDPOINT_PATH, rmcp_service)
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&gate_state),
+            gate_middleware,
+        ));
+    Router::new()
+        .route(PRM_WELLKNOWN_PATH, get(prm_handler))
+        .fallback_service(mcp_router)
+        .with_state(gate_state)
+}
+
+async fn gate_middleware(
+    State(gate): State<Arc<GateState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match gate_decision(
+        &gate.allowed_hosts,
+        &gate.allowed_origins,
+        request.uri(),
+        request.headers(),
+        &gate.wall,
+    ) {
+        Some(rejection) => rejection.into_response(),
+        None => next.run(request).await,
+    }
+}
+
+async fn prm_handler(State(gate): State<Arc<GateState>>) -> Json<serde_json::Value> {
+    Json(gate.prm.protected_resource_metadata())
 }
