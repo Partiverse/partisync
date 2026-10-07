@@ -54,6 +54,7 @@ async fn make_files(s: &Store, root: &str, prefix: &str, n: u64, salt: u64) {
                 mtime_ns: 1,
                 content: Some((format!("H{salt}-{i}"), 1024 + i)),
                 chunk_root: None,
+                chunk_hashes: Vec::new(),
             });
         }
         s.add_file_batch(&batch).await.unwrap();

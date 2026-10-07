@@ -161,6 +161,16 @@ main { padding: 0 22px 56px; }
   box-shadow: 0 0 8px rgba(34, 208, 69, 0.25);
 }
 .hits { min-height: 60px; }
+/* ===== 结果-详情联动（M10-WP01-T03：整卡可点击 + 内联详情双栏） ===== */
+.hit:not(.skel-row) { cursor: pointer; }
+.hit:not(.skel-row):hover { background: rgba(34, 208, 69, 0.04); }
+.hit:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+.s-stage { display: flex; align-items: flex-start; gap: 18px; }
+.s-stage .hits { flex: 1; min-width: 0; }
+/* 详情列锁宽：min-width:0 防 flex 内容最小尺寸把 340px 撑宽挤压结果列
+   （PR 161 评审 low——长副本路径 li 已有 word-break:break-all） */
+.s-stage .detail { min-width: 0; max-width: 340px; }
+.sdetail-close { margin-bottom: 12px; }
 .hit {
   display: flex; gap: 13px; align-items: flex-start;
   padding: 12px 12px 12px 14px;
@@ -232,6 +242,17 @@ main { padding: 0 22px 56px; }
 .panel-table td.icon { width: 20px; color: var(--text-dim); }
 .panel-table td.fp i { border-radius: 50%; box-shadow: 0 0 5px var(--fp); }
 
+/* ===== 浏览表头排序（M10-WP03-T03；SPEC §2.3）——三列 th-sort 钮 +
+     箭头指示；th 交出 padding 给按钮（热区 = 整格），基础 th 样式不动 ===== */
+.panel-table th[data-sort] { padding: 0; }
+.th-sort {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  padding: 8px 12px; font: inherit; color: inherit; text-align: left;
+  background: none; border: 0; cursor: pointer;
+}
+.th-sort:hover { color: var(--green); }
+.sort-arrow { color: var(--green); font-size: 9px; min-width: 10px; }
+
 /* ===== 浏览双栏（表 + 详情面板；设计 v4.3 browse wireframe） ===== */
 .stage { display: flex; align-items: flex-start; gap: 18px; }
 .stage .panel-table { flex: 1; min-width: 0; }
@@ -241,6 +262,15 @@ main { padding: 0 22px 56px; }
   padding: 16px 18px 20px;
   position: sticky; top: 14px;
 }
+/* M10-WP03-T02（SPEC §2.2）：详情面板静态头（section-tag + × 关闭钮）。 */
+.detail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.detail-head .section-tag { margin: 0; }
+.detail-close {
+  background: none; border: 1px solid transparent; border-radius: 4px;
+  color: var(--text-dim); cursor: pointer; font-family: var(--mono);
+  font-size: 14px; line-height: 1; padding: 2px 8px;
+}
+.detail-close:hover { border-color: var(--panel-line); color: var(--text); }
 .detail h2 { font-size: 14.5px; font-weight: 700; color: var(--text); line-height: 1.45; margin-bottom: 12px; }
 .detail dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 12.5px; margin-bottom: 14px; }
 .detail dt { color: var(--text-dim); }
@@ -260,8 +290,12 @@ main { padding: 0 22px 56px; }
 .detail .copies .label { font-size: 10.5px; color: var(--text-dim); margin-bottom: 4px; }
 .detail .copies .label::before { content: "// "; color: var(--green); }
 .detail .copies ul { margin: 0; padding: 0; list-style: none; font-size: 12px; }
-.detail .copies li { padding: 3px 0; color: var(--text); word-break: break-all; }
+.detail .copies li { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; color: var(--text); }
+.detail .copies li .copy-path { flex: 1; min-width: 0; word-break: break-all; }
+.detail .copies li .copy-btn { flex-shrink: 0; }
 .detail .copies li .dim { color: var(--text-dim); }
+/* M10-WP03-T02（SPEC §2.2）：复制钮（content_id 全量 / 副本路径）。 */
+.detail .fingerprint .copy-btn { margin-top: 8px; }
 
 /* ===== 同步（T03：状态横幅 + 四格仪表 + 按日时间线；design v4.3 wireframe） ===== */
 .status-banner {

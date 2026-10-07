@@ -49,7 +49,9 @@ fn no_raw_interpolation_of_dynamic_fields() {
         "${r.checkpoint",
         "${t.name}",
         "${q.slice",
-        "${h.highlight ||",
+        // M10-WP01-T02 收紧：`${h.highlight ||` → `${h.highlight`（覆盖
+        // 一切形态——snippet 渲染唯一入口是 snippetHtml(h)，见 T02 探针）。
+        "${h.highlight",
         // M9-WP03-T02 记忆面板动态字段（memory_search 命中行 / 包含证明 /
         // 验证横幅）——字符串插值一律 esc；数字（score.toFixed/length）不入列。
         "${m.memory_id",
@@ -60,6 +62,9 @@ fn no_raw_interpolation_of_dynamic_fields() {
         "${p.root",
         "${r.memory_id",
         "${v.memory_count",
+        // M10-WP03-T03 浏览行 mtime 列：相对/绝对时间一律经 mtimeDisp()，
+        // title 经 esc(timeFmt(...))——裸 `${e.mtime_ns` 插值禁入模板。
+        "${e.mtime_ns",
     ];
     let mut leaked = Vec::new();
     for pat in BARE {
@@ -91,6 +96,59 @@ fn hit_card_prefers_graph_filename() {
     assert!(
         UI_JS.contains("${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + \"…\"}"),
         "命中卡 name 行必须优先 filename（回落哈希切片）"
+    );
+}
+
+// ── M10-WP01-T02：命中词高亮 snippet 渲染契约（SPEC §2.2 / §3） ──
+
+const UI_CSS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/styles-v3.css"));
+
+/// snippet 渲染 = esc() 全串**之后** sentinel→`<mark>`/`</mark>` 替换
+/// （次序锁死——反序 = 文档内容经 sentinel 逃逸为 HTML 的注入面）；
+/// 模板零未转义 `${h.highlight}` 插值（唯一入口 snippetHtml(h)）；
+/// `<mark>` 样式存在于 styles-v3.css。
+#[test]
+fn t02_snippet_mark_escapes_then_replaces_sentinel() {
+    assert!(
+        UI_JS.contains("function snippetHtml("),
+        "snippet 渲染必须收敛到唯一 helper snippetHtml()"
+    );
+    assert!(
+        UI_JS.contains(
+            "return esc(h.highlight).replaceAll(\"[[\", \"<mark>\").replaceAll(\"]]\", \"</mark>\");"
+        ),
+        "必须 esc 全串之后再做 sentinel→<mark> 替换（次序不可反）"
+    );
+    assert!(
+        UI_JS.contains("<div class=\"snippet\">${snippetHtml(h)}</div>"),
+        "命中卡 snippet 行必须经 snippetHtml(h) 渲染"
+    );
+    assert!(
+        !UI_JS.contains("${h.highlight"),
+        "模板不得出现未转义 ${{h.highlight}} 插值（不变量，SPEC §2.2）"
+    );
+    assert!(
+        UI_CSS.contains(".hit .snippet mark"),
+        "<mark> 高亮样式必须存在于 styles-v3.css"
+    );
+}
+
+/// M10-WP01-T02 GUI 验收实测发现：CSP `script-src 'self'` 拦截 index.html
+/// 的 inline `onsubmit="return false"`（M9 硬化收敛漏网）→ 检索 form
+/// 默认提交 → 页面 reload，检索 UI 完全不可用。锁定：submit 必须经 JS
+/// preventDefault 兜底（资产 + 记忆两处 query-row），index.html 不得
+/// 回退到 inline onsubmit 依赖。
+#[test]
+fn t02_search_form_submit_prevent_default_wired() {
+    assert!(
+        UI_JS.contains(
+            "document.querySelectorAll(\"form.query-row\").forEach(f =>\n  f.addEventListener(\"submit\", (e) => e.preventDefault()));"
+        ),
+        "检索 form 必须经 JS preventDefault 阻止默认提交（CSP 挡 inline onsubmit）"
+    );
+    assert!(
+        !UI_HTML.contains("onsubmit="),
+        "index.html 不得依赖 inline onsubmit（CSP script-src 'self' 拦截 = 死代码 + 误导）"
     );
 }
 
@@ -222,6 +280,136 @@ fn t03_flagship_memory_toggle_wired() {
     );
 }
 
+// ── M10-WP01-T03：检索结果-详情联动静态契约（SPEC §2.3 + §3） ──
+
+/// 联动探针（SPEC §3「联动探针」）：命中卡 click → `showDetail(h.content_id,
+/// h.filename)` 接线断言 + 打开详情路径零 #srows 写入（硬约束：点击不清空
+/// 结果列表）+ 关闭仅隐藏面板 + 整卡可点击的可访问语义与样式。
+#[test]
+fn t03_hit_card_click_wires_show_detail_and_keeps_results() {
+    // 1) 接线断言（SPEC §3 字面）：命中卡 onclick → 既有 showDetail 渲染
+    //    契约（asset_detail IPC 零新增 command），入参恰为 (content_id,
+    //    filename)——标题回落语义收敛在 showDetail 内（§2.1 沿革）。
+    assert!(
+        UI_JS.contains(
+            "card.onclick = () => showDetail(h.content_id, h.filename, \"sdetail-panel\");"
+        ),
+        "命中卡 click 必须接 showDetail(h.content_id, h.filename)（SPEC §2.3）"
+    );
+    // 2) 点击不清空结果列表：命中卡接线块内零 innerHTML 写入——详情
+    //    面板独立于 #srows（SPEC §2.3 硬约束）。
+    let bind_at = UI_JS.find("article.hit[data-cid]").expect("命中卡接线存在");
+    let seg = &UI_JS[bind_at..];
+    let bind_end = seg.find("});").expect("命中卡接线闭合");
+    let wiring = &seg[..bind_end];
+    assert!(
+        !wiring.contains("innerHTML"),
+        "打开详情路径不得重写 #srows（点击不得清空结果列表）"
+    );
+    // 3) 键盘可达（可访问语义）：Enter/Space 触发 + role=button/tabindex。
+    assert!(
+        UI_JS.contains("e.key === \"Enter\" || e.key === \" \""),
+        "命中卡必须支持键盘触发"
+    );
+    assert!(
+        UI_JS.contains("role=\"button\" tabindex=\"0\" data-cid="),
+        "命中卡模板必须带 role=button + tabindex 可访问语义"
+    );
+    // 4) 面板结构：检索视图内联详情面板 + 常驻关闭按钮（DOM id 对账）。
+    assert!(
+        UI_HTML.contains("id=\"sdetail-panel\"") && UI_HTML.contains("id=\"sdetail-close\""),
+        "index.html 缺检索详情面板/关闭按钮"
+    );
+    assert!(
+        UI_JS.contains("$(\"sdetail-close\").onclick"),
+        "关闭按钮必须接线"
+    );
+    let close_at = UI_JS
+        .find("$(\"sdetail-close\").onclick")
+        .expect("关闭接线存在");
+    let close_seg = &UI_JS[close_at..];
+    let close_end = close_seg.find(";").expect("关闭接线闭合");
+    assert!(
+        close_seg[..close_end].contains("display = \"none\"")
+            && !close_seg[..close_end].contains("innerHTML"),
+        "关闭详情只隐藏面板，不得动结果列表"
+    );
+    // 5) 整卡可点击样式（cursor:pointer，骨架行除外 + 键盘焦点态）。
+    assert!(
+        UI_CSS.contains(".hit:not(.skel-row) { cursor: pointer; }"),
+        "命中卡缺 cursor:pointer（骨架行除外）"
+    );
+    assert!(UI_CSS.contains(".hit:focus-visible"), "命中卡缺键盘焦点态");
+    // 6) 并发守卫（PR 161 评审 low）：面板级请求序号——迟到响应静默
+    //    丢弃，快速连点两张命中卡时旧 asset_detail 响应不得覆盖面板。
+    for needle in [
+        "const seq = (detailSeq[panelId] = (detailSeq[panelId] || 0) + 1);",
+        "if (seq !== detailSeq[panelId]) return;",
+    ] {
+        assert!(UI_JS.contains(needle), "showDetail 缺并发守卫：{needle}");
+    }
+    assert_eq!(
+        UI_JS
+            .matches("if (seq !== detailSeq[panelId]) return;")
+            .count(),
+        2,
+        "并发守卫必须同时覆盖成功渲染与失败透出两条路径"
+    );
+    // 7) 详情列锁宽（PR 161 评审 low）：长副本路径不得把 340px 面板
+    //    撑宽挤压结果列表。
+    assert!(
+        UI_CSS.contains(".s-stage .detail { min-width: 0; max-width: 340px; }"),
+        "检索详情面板缺 min-width:0 / max-width 锁宽约束"
+    );
+}
+
+/// 浏览侧回归探针（PR 161 对抗评审 high）：showDetail body 推导必须按
+/// panelId 显式映射——浏览侧 #detail-panel 无 "-body" 拼接容器（内容容器
+/// 是 #detail-body），旧 `$(panelId+"-body")||panel` 拼接回落把面板本体当
+/// 渲染目标，innerHTML 重写炸掉 .detail-head × 静态头（M10-WP03-T02 契约：
+/// 头不被重写）与面板内 #detail-body（closeDetail 随后对 null 写 innerHTML
+/// 抛未捕获 TypeError）。锚：映射字面 + 渲染目标行走映射 + 旧拼接回落
+/// 消失 + index.html 浏览侧面板结构（detail-head 在前、detail-body 在后）
+/// 存活对账。
+#[test]
+fn t03_show_detail_body_maps_by_panel_id_browse_head_survives() {
+    // 1) 映射表字面：browse 面板 → #detail-body（× 静态头与内容容器分离
+    //    的 M10-WP03-T02 结构在浏览侧生效）；检索面板 → #sdetail-panel-body。
+    assert!(
+        UI_JS.contains("{ \"detail-panel\": \"detail-body\", \"sdetail-panel\": \"sdetail-panel-body\" }"),
+        "showDetail body 推导缺 panelId 显式映射（detail-panel→detail-body / sdetail-panel→sdetail-panel-body）"
+    );
+    // 2) 渲染目标行：body 推导走映射表，不得直渲 panel 本体。
+    assert!(
+        UI_JS.contains("const body = $(detailBodyOf[panelId]) || panel;"),
+        "showDetail body 推导未走 detailBodyOf 映射"
+    );
+    // 3) 根因字面必须消失：`$(panelId + "-body") || panel` 拼接回落是炸
+    //    .detail-head 的根因（#detail-panel-body 不存在 → 回落 panel 本体）。
+    assert!(
+        !UI_JS.contains("$(panelId + \"-body\") || panel"),
+        "showDetail 仍保留 $(panelId+\"-body\")||panel 拼接回落（浏览侧炸头根因）"
+    );
+    // 4) index.html 浏览侧面板结构存活：#detail-panel 内 detail-head（含
+    //    × 关闭钮）在前、#detail-body 在后（静态字面近似 DOM 从属关系）。
+    let panel_at = UI_HTML
+        .find("id=\"detail-panel\"")
+        .expect("index.html 缺 #detail-panel");
+    let head_at = UI_HTML[panel_at..]
+        .find("class=\"detail-head\"")
+        .expect("#detail-panel 内缺 .detail-head × 静态头");
+    let close_at = UI_HTML[panel_at..]
+        .find("id=\"detail-close\"")
+        .expect("#detail-panel 内缺 #detail-close 关闭钮");
+    let body_at = UI_HTML[panel_at..]
+        .find("id=\"detail-body\"")
+        .expect("#detail-panel 内缺 #detail-body 内容容器");
+    assert!(
+        head_at < close_at && close_at < body_at,
+        "浏览侧详情面板结构漂移：.detail-head(×) 必须在 #detail-body 之前"
+    );
+}
+
 /// 分区展示 + 跨通道不混排（§6-R2）：通道名分区标题、记忆行三字段
 /// （content 截断 + tags + score）esc 全覆盖、资产行模板零记忆字段、
 /// 双通道结果不合并数组（各自内部排序不变）。
@@ -270,8 +458,6 @@ fn t03_flagship_memory_sections_and_no_cross_merge() {
 // chips 每次结果渲染后从命中集 filename 派生（大小写归一；无扩展名/
 // 孤儿行归「(无)」）；点击 chip 仅过滤已渲染命中（不重发查询、不触
 // 后端）；meta 同步「显示 n / 共 m」；全不选 = 不过滤。 ──
-
-const UI_CSS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/styles-v3.css"));
 
 /// chips 派生：extOf 从 filename 派生扩展名——大小写归一（toLowerCase）+
 /// 无扩展名/孤儿行（filename 空）归「(无)」；chips 集合来源必须是命中集
@@ -521,6 +707,384 @@ fn t05_index_stats_badge_cached_and_no_polling() {
         UI_HTML.contains("IPC 12 commands"),
         "footer IPC command 计数须与 generate_handler 对账（+index_stats = 12）"
     );
+}
+
+/// 裸插值禁列增补（M10-WP03-T02 详情面板动态字段）：content_id / mtime
+/// 载荷插值一律经 esc()/timeFmt()/sizeFmt() 包裹，不得以 `${contentId`、
+/// `${d.copies` 裸形态进 innerHTML 模板。
+#[test]
+fn t02_detail_no_raw_interpolation_of_detail_fields() {
+    // "${d.copies[" 只禁对象/数组取值插值；`${d.copies.length}` 数字插值沿
+    // score.toFixed 判例不入禁列。
+    const BARE: &[&str] = &["${contentId", "${d.copies[", "${c.path", "${c.mtime_ns"];
+    let mut leaked = Vec::new();
+    for pat in BARE {
+        if UI_JS.contains(pat) {
+            leaked.push(*pat);
+        }
+    }
+    assert!(
+        leaked.is_empty(),
+        "详情模板裸插值必须经 esc()/timeFmt()/sizeFmt() 包裹（M10-WP03 §2.2）：{leaked:?}"
+    );
+}
+
+/// 详情面板 DOM 对账（沿 mem 面板判例）：JS 引用的 detail-* 元素必须在
+/// index.html 存在（防 id 漂移）；detail-body 为唯一渲染容器。
+#[test]
+fn t02_detail_dom_parity() {
+    assert!(
+        UI_HTML.contains("id=\"detail-panel\""),
+        "index.html 缺 #detail-panel"
+    );
+    assert!(
+        UI_HTML.contains("id=\"detail-close\""),
+        "index.html 缺 × 静态头按钮（detail-head，面板内容重渲不丢）"
+    );
+    assert!(
+        UI_HTML.contains("aria-label=\"关闭详情\""),
+        "× 按钮必须带可访问标注（SPEC §2.2 aria-label 契约）"
+    );
+    assert!(
+        UI_HTML.contains("id=\"detail-body\""),
+        "index.html 缺 #detail-body 内容容器"
+    );
+    assert!(
+        UI_JS.contains("$(\"detail-body\")"),
+        "showDetail 必须渲染到 #detail-body（× 静态头不被 innerHTML 重写）"
+    );
+}
+
+/// 关闭双通道 + 硬约束（SPEC §2.2）：× 按钮 + Esc 接线；closeDetail 函数
+/// 体 = display:none + 内容清空，且零 call/invoke/browse、零列表（#rows）
+/// 触碰——关闭不清空/重载浏览列表、零重发 IPC；再点行重开沿既有行 onclick。
+#[test]
+fn t02_detail_close_dual_channel_and_zero_requery() {
+    assert!(
+        UI_JS.contains("$(\"detail-close\").onclick = closeDetail;"),
+        "× 必须接线 closeDetail（CSP 禁 inline onclick）"
+    );
+    assert!(
+        UI_JS.contains("document.addEventListener(\"keydown\", escClose);"),
+        "Esc 必须接线 escClose（双通道关闭）"
+    );
+    let at = UI_JS
+        .find("function closeDetail() {")
+        .expect("closeDetail 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("panel.style.display = \"none\";"),
+        "关闭 = 面板 display:none（SPEC §2.2）"
+    );
+    assert!(
+        body.contains("innerHTML = \"\";"),
+        "关闭 = 面板内容清空（SPEC §2.2）"
+    );
+    for banned in ["call(", "invoke(", "browse(", "$(\"rows\")"] {
+        assert!(
+            !body.contains(banned),
+            "关闭不得清空/重载浏览列表或重发 IPC（SPEC §2.2 硬约束）：{banned}"
+        );
+    }
+}
+
+/// Esc 可见性门控（SPEC §2.2 + §7-R4）：仅面板可见时生效；输入框聚焦
+/// （INPUT/TEXTAREA）不拦截，不抢输入框焦点语义。
+#[test]
+fn t02_esc_close_gated_on_visibility_and_input_focus() {
+    let at = UI_JS
+        .find("function escClose(e) {")
+        .expect("escClose 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("e.key !== \"Escape\"") && body.contains("return;"),
+        "Esc 键值判据 + 不可见时直接交还"
+    );
+    assert!(
+        body.contains("panel.style.display === \"none\""),
+        "可见性门控：面板不可见时 Esc 不生效（SPEC §2.2）"
+    );
+    assert!(
+        body.contains("INPUT") && body.contains("TEXTAREA"),
+        "输入框聚焦时 Esc 不拦截（SPEC §7-R4）"
+    );
+    assert!(
+        body.contains("closeDetail();"),
+        "门控通过后走 closeDetail 单点关闭"
+    );
+}
+
+/// 信息补全（SPEC §2.2，零 IPC 变更）：「修改时间」行 = 首副本
+/// `copies[0].mtime_ns`（与 size 取 rows.first() 同口径）；mtime_ns 缺失/0
+/// → 「—」回落（timeFmt 既有判据）；加载中途关闭 → 回包弃渲（可见性门控）。
+#[test]
+fn t02_detail_mtime_row_first_copy_with_dash_fallback() {
+    assert!(
+        UI_JS.contains("<dt>修改时间</dt><dd>${timeFmt(d.copies[0]?.mtime_ns)}</dd>"),
+        "修改时间行必须取首副本 copies[0].mtime_ns（SPEC §2.2，载荷已有字段零 IPC 变更）"
+    );
+    assert!(
+        UI_JS.contains("if (!ns) return \"—\";"),
+        "mtime_ns 缺失/0 → 「—」回落（timeFmt 既有判据不得回退）"
+    );
+    assert!(
+        UI_JS
+            .matches("if (panel.style.display === \"none\") return;")
+            .count()
+            >= 2,
+        "可见性门控 ≥2 处：escClose + showDetail 回包弃渲（加载中途关闭不回填已关面板）"
+    );
+}
+
+/// 复制（SPEC §2.2 + §7-R2）：完整 content_id + 每条副本路径两站点
+/// data-copy-text（数据源 = 原始值全量，不抄 DOM 展示切片）；
+/// navigator.clipboard.writeText 主路径 + execCommand 回落；成功反馈 =
+/// 「已复制」1.5s 回落 + 防重入（原始 label 持久存 dataset + clearTimeout
+/// 旧 timer，沿 M10-WP02 §2.2 / PR #166 F3 判例）。
+#[test]
+fn t02_copy_full_cid_and_copies_with_feedback_and_fallback() {
+    assert!(
+        UI_JS.contains("data-copy-text=\"${esc(contentId)}\""),
+        "content_id 全量复制站点（64 hex 全量，替代「抄 DevTools」）"
+    );
+    assert!(
+        UI_JS.contains("data-copy-text=\"${esc(c.path)}\""),
+        "副本路径复制站点（每条副本路径一枚）"
+    );
+    assert!(
+        UI_JS.matches("class=\"btn ghost copy-btn\"").count() >= 2,
+        "两处复制按钮站点（content_id + 副本路径）"
+    );
+    assert!(
+        UI_JS.contains("if (navigator.clipboard?.writeText) {")
+            && UI_JS.contains(
+                "navigator.clipboard.writeText(text).then(done).catch(() => detailCopyFallback(text, done))"
+            ),
+        "主路径 writeText（可用性检查 + 调用）+ 回落接线（SPEC §7-R2 实现期拍板）"
+    );
+    let at = UI_JS
+        .find("function detailCopyFallback(text, done) {")
+        .expect("execCommand 回落必须存在");
+    let seg = &UI_JS[at..];
+    let end = ["\nfunction ", "\nasync function "]
+        .iter()
+        .filter_map(|m| seg.find(m))
+        .min()
+        .unwrap_or(seg.len());
+    assert!(
+        seg[..end].contains("execCommand(\"copy\")"),
+        "回落 = 隐藏 textarea + execCommand（SPEC §7-R2）"
+    );
+    let at = UI_JS
+        .find("function detailCopy(btn, text) {")
+        .expect("复制助手必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("已复制") && body.contains("1500"),
+        "成功反馈 = 按钮文案瞬变「已复制」+ 1.5s（1500ms）回落"
+    );
+    assert!(
+        body.contains("clearTimeout(Number(btn.dataset.copyTimer))")
+            && body.contains("btn.dataset.copyLabel"),
+        "复制反馈必须防重入：clearTimeout 旧 timer + dataset.copyLabel 持久保留原始 label"
+    );
+}
+
+// ── M10-WP03-T03：浏览列表 UX 静态契约（SPEC §2.3）——表头客户端排序
+// （名称/大小/修改时间三列 / 回服务端序 / 目录优先次级键 / 换目录重置）
+// + mtime 相对时间（>30 天回落绝对日期 + title 完整时间 + 「—」回落）。 ──
+
+/// 三列接线 + 三态循环 + 目录优先次级键 + 换目录重置（SPEC §2.3）：
+/// 点击按当前渲染行集排序、再点反序、第三点回服务端序（children() 返回
+/// 序，ipc.rs:90-96）；排序作用于 lastRows 副本（点击重渲不重发 IPC）；
+/// 键相同时目录行（kind=1）恒在文件行前（kind 比较不乘 dir，双向成立）；
+/// 换目录（面包屑/目录行导航）后排序态重置默认（沿 M10-WP02 T01 判例）。
+#[test]
+fn t03_browse_sort_cycle_dirs_first_and_path_reset() {
+    // 三列接线：index.html 三列 data-sort th + th-sort 按钮（data-key 一一
+    // 对应）+ JS 绑定（CSP 禁 inline onclick）；内容身份列不设 data-sort。
+    for key in ["name", "size", "mtime"] {
+        assert!(
+            UI_HTML.contains(&format!("th data-sort=\"{key}\"")),
+            "表头缺 data-sort={key} 可排序列"
+        );
+        assert!(
+            UI_HTML.contains(&format!("class=\"th-sort\" data-key=\"{key}\"")),
+            "{key} 列缺 th-sort 排序按钮"
+        );
+    }
+    assert_eq!(
+        UI_HTML.matches("th data-sort=").count(),
+        3,
+        "可排序列必须恰为三列（名称/大小/修改时间；内容身份列除外，SPEC §2.3）"
+    );
+    assert!(
+        UI_JS.contains("b.onclick = () => cycleSort(b.dataset.key);"),
+        "th-sort 按钮必须接线 cycleSort（CSP 禁 inline onclick）"
+    );
+    // 三态循环：asc → desc → null（回服务端序）；循环体零 IPC 站点。
+    let at = UI_JS
+        .find("function cycleSort(key) {")
+        .expect("cycleSort 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (sortKey !== key) { sortKey = key; sortDir = 1; }"),
+        "首点新键 = 升序"
+    );
+    assert!(
+        body.contains("else if (sortDir === 1) sortDir = -1;"),
+        "再点同键 = 反序（降序）"
+    );
+    assert!(
+        body.contains("sortKey = null; sortDir = 1; }") && body.contains("renderRows();"),
+        "第三点回服务端序并重渲当前行集（SPEC §2.3）"
+    );
+    for banned in ["call(", "invoke("] {
+        assert!(
+            !body.contains(banned),
+            "排序点击不得重发 IPC（纯客户端重渲）：{banned}"
+        );
+    }
+    // 排序作用于 lastRows 副本（不 mutate 服务端序快照；null = 原样返回）。
+    let at = UI_JS
+        .find("function sortedRows() {")
+        .expect("sortedRows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (!sortKey) return lastRows;"),
+        "未排序 = 原样返回服务端序（children() 返回序）"
+    );
+    assert!(
+        body.contains("[...lastRows].sort("),
+        "排序必须作用于 lastRows 副本（服务端序快照不可变）"
+    );
+    assert!(
+        body.contains("return (b.kind ?? 0) - (a.kind ?? 0);"),
+        "排序键相同时目录行（kind=1）恒在文件行前（kind 比较不乘 dir，双向成立）"
+    );
+    assert!(body.contains("localeCompare"), "名称列按字典序比较");
+    assert!(
+        body.contains("(a.size ?? 0) - (b.size ?? 0)")
+            && body.contains("(a.mtime_ns ?? 0) - (b.mtime_ns ?? 0)")
+            && body.contains("c * dir"),
+        "大小/修改时间数值比较 + 方向乘子"
+    );
+    // 换目录重置：browse 内路径变化才重置（同目录轮询刷新保留排序态）。
+    let at = UI_JS
+        .find("async function browse(path) {")
+        .expect("browse 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (next !== curPath) { sortKey = null; sortDir = 1; renderSortArrows(); }"),
+        "换目录（面包屑/目录行导航）必须重置排序态为默认（SPEC §2.3）"
+    );
+    assert!(
+        body.contains("lastRows = rows;"),
+        "list 结果必须快照进 lastRows（排序点击重渲不重发 IPC）"
+    );
+}
+
+/// 箭头指示（SPEC §2.3）：renderSortArrows = 全清后再设（切换键/回默认
+/// 不残留旧箭头）；当前键 ▲/▼ 标方向 + th aria-sort 同步（可访问语义）。
+#[test]
+fn t03_browse_sort_arrow_indicators() {
+    let at = UI_JS
+        .find("function renderSortArrows() {")
+        .expect("renderSortArrows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("textContent = \"\";"),
+        "先全清箭头再设（键切换/回默认不残留旧指示）"
+    );
+    assert!(
+        body.contains("\"▲\" : \"▼\""),
+        "箭头指示当前排序键与方向（SPEC §2.3）"
+    );
+    assert!(
+        body.contains("ascending") && body.contains("descending"),
+        "th aria-sort 同步排序方向（可访问语义）"
+    );
+}
+
+/// mtime 相对时间（SPEC §2.3）：mtimeDisp 复用 relTime；>30 天回落绝对
+/// 日期（本卡自含实现，不依赖 M10-WP02-T03 落地顺序）；缺失/0 → 既有
+/// 「—」回落；行模板 title 悬浮 = timeFmt 完整本地时间（不回退）。
+#[test]
+fn t03_mtime_relative_30day_absolute_fallback_and_title() {
+    let at = UI_JS
+        .find("function mtimeDisp(ns) {")
+        .expect("mtimeDisp 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (!ns) return \"—\";"),
+        "mtime_ns 缺失/0 → 「—」回落（timeFmt 既有判据不得回退）"
+    );
+    assert!(
+        body.contains("30 * 86400"),
+        ">30 天回落档判据（SPEC §2.3 字面）"
+    );
+    assert!(
+        body.contains("relTime(ns)"),
+        "≤30 天复用既有 relTime 相对显示"
+    );
+    assert!(body.contains("toLocaleDateString("), ">30 天回落绝对日期");
+    assert!(
+        UI_JS.contains(
+            "<td class=\"mtime\" title=\"${esc(timeFmt(e.mtime_ns))}\">${mtimeDisp(e.mtime_ns)}</td>"
+        ),
+        "mtime 列 = title 完整 timeFmt 本地时间（不回退）+ mtimeDisp 相对显示"
+    );
+}
+
+/// 空态不回退（SPEC §2.3）：browse 空态文案（D6 动作邀请修复）原文不动。
+#[test]
+fn t03_browse_empty_state_copy_untouched() {
+    assert!(
+        UI_JS.contains("本机还没有索引文件——运行 <b>partisync index &lt;路径&gt;</b> 开始建立索引"),
+        "根目录空态文案必须维持原文（D6 动作邀请）"
+    );
+    assert!(
+        UI_JS.contains(": \"空目录\""),
+        "非根目录空态文案必须维持原文"
+    );
+}
+
+/// 排序 DOM/样式对账（沿 chips 判例）：th-sort 三按钮 + 箭头 span 在
+/// index.html；.th-sort / .sort-arrow 样式在 styles-v3.css 落地。
+#[test]
+fn t03_sort_dom_and_style_parity() {
+    assert_eq!(
+        UI_HTML.matches("class=\"th-sort\"").count(),
+        3,
+        "th-sort 按钮必须恰为三枚"
+    );
+    assert_eq!(
+        UI_HTML.matches("class=\"sort-arrow\"").count(),
+        3,
+        "箭头指示 span 必须每列一枚"
+    );
+    for needle in [".th-sort {", ".sort-arrow {"] {
+        assert!(
+            UI_CSS.contains(needle),
+            "styles-v3.css 缺排序指示样式：{needle}"
+        );
+    }
 }
 
 // ── M10-WP02-T02：记忆详情联动展开 + 复制静态契约（SPEC §2.2）——行点击

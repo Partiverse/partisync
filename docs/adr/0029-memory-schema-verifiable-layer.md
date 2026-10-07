@@ -74,5 +74,11 @@ merkle.rs 既有注释口径）。
 - MCP 生态出现事实标准的可验证记忆 schema（如 MCP 官方 memory 能力
   进 protocol spec）→ 对齐评估，工具面命名兼容优先。
 - 记忆删除/更新/GC 需求落地（AI workflow 阶段）→ 本 ADR 增补修订登记
-  （tombstone 叶口径须评估根稳定性）。
+  （tombstone 叶口径须评估根稳定性）。**已触发，见修订登记 2026-10-06 行。**
 - entry 域需要同类防篡改承诺（对账树升级为承诺树）→ 评估两树合一。
+
+## 修订登记
+
+| 日期 | 触发 | 内容 |
+|---|---|---|
+| 2026-10-06 | SPEC M10-WP04-T01（记忆删除/更新落地，「重新评估条件」第 3 条触发） | **墓碑叶口径拍板：墓碑行留在承诺集，软删除不动根**。依据：叶编码不含 deleted/hlc（memory.rs `leaf_data`），墓碑不动叶 ⇒ 根天然稳定；透明日志语义 = 删除不抹除承诺，被删记忆仍可出示 inclusion proof（防删史）。备选「可见集 = 活行、删除动根」否决：改叶编码破坏 P20 确定性存量兼容，且丢失删史承诺。生命周期语义：delete/upsert 同走 ("memory","delete")/("memory","upsert") oplog 臂，行 hlc = LWW 水位（delete 键回填，晚到写按定宽 hex 字典序拒，沿 tag 墓碑口径）；复活 = 同 id 重写，胜出 upsert 清墓碑（deleted=0），根不变；update = 同笔墓碑旧 id + 写入新行（内容寻址换身份）。**memory_count 口径 = 含墓碑承诺集规模**（诚实透出，verify 增 deleted/tombstones 实态旗标）。**GC（硬清除，M10-WP04-T03）动根**：物理删行 → 叶集变更 → 根重算，与软删不动根对照；GC 复活边界（离线旧设备在 GC 后重放墓碑前 upsert）挂后续评估（SPEC M10-WP04 §4/§6-R2），保留期口径 ≥ 多端收敛窗口。 |
