@@ -110,9 +110,11 @@
    档界 if (s < 3600)」→ 还原 24/24 绿），红绿两侧均有本会话可复算的
    命令输出佐证。
 4. **PR diff 超限豁免裁准（主会话 2026-10-08，不拆分）**：终态实测
-   `git diff --stat origin/main..HEAD` = 5 文件 **+486/−25**——additions
-   486>400、additions+deletions 511>400，双口径超铁律 3「单 PR ≤400
-   拆 PR」。三项分列行数账（实测）：① 探针与加固 `ui_hardening.rs`
+   `git diff --numstat bfded23..HEAD` = 5 文件 **+499/−25**——additions
+   499>400、additions+deletions 524>400，双口径超铁律 3「单 PR ≤400
+   拆 PR」。（首版落档误记 +486/−25——测量时点早于本条自身段落 13 行
+   的自指增量；四轮评审 F2 指正后更正为终值 499，本更正行自身的 ±1
+   不再追账。）三项分列行数账（实测）：① 探针与加固 `ui_hardening.rs`
    +263（T03 探针×9 + T02 组合锁×2 + memTime 阈值字面量/行点击突变加
    固 + 禁列扩面）；② T02 组合接线 `app-core-v3.js` ≈+15（memIndex 单
    点同步 + 行点击绑定入重渲管线 + openMemDetails 展开态重放）；③
