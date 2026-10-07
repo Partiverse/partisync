@@ -270,6 +270,11 @@ fn startup_guard_matrix_non_loopback_requires_tls_and_hosts() {
     let err = check_startup(non_loopback, Some(&tls), None).expect_err("must reject");
     assert!(err.contains("allowed_hosts"), "{err}");
 
+    // 非回环 + TLS + 显式空名单 → 拒绝（host 校验整体关闭 = DNS rebinding
+    // 防线失效；rmcp 空名单语义为放行，启动面必须拦住）。
+    let err = check_startup(non_loopback, Some(&tls), Some(&[])).expect_err("must reject");
+    assert!(err.contains("空名单"), "{err}");
+
     // 非回环 + TLS + 显式 allowed_hosts → 放行。
     let hosts = vec!["mcp.example.test".to_string()];
     assert!(check_startup(non_loopback, Some(&tls), Some(&hosts)).is_ok());

@@ -93,7 +93,7 @@ impl PrmConfig {
     }
 }
 
-/// TLS 证书文件对（PEM）；由 TLS 线位在 serve 期加载。
+/// TLS 证书文件对（PEM）；由 TLS 线位在 bind 期（`bind_server`）加载。
 #[derive(Debug, Clone)]
 pub struct TlsFiles {
     /// 证书链 PEM（leaf 在前）。
@@ -169,8 +169,10 @@ impl GateRejection {
 ///
 /// 非回环前置条件（评估件 §5 + ADR-0031 决策 4）：①未配置 TLS → 拒绝
 /// 启动；②`allowed_hosts` 未显式覆写（仍为回环默认名单，远程请求将被
-/// host 校验 403 全拒）→ 拒绝启动。授权配置 T03 期由 fail-closed 墙兜底
-/// （一切请求 401），T04 起随授权面接线检查（SPEC §6-R9 窗口期设计）。
+/// host 校验 403 全拒）或显式**空名单**（host 校验整体关闭 = DNS
+/// rebinding 防线失效，rmcp 空名单语义为放行）→ 拒绝启动。授权配置
+/// T03 期由 fail-closed 墙兜底（一切请求 401），T04 起随授权面接线
+/// 检查（SPEC §6-R9 窗口期设计）。
 pub fn check_startup(
     bind_addr: SocketAddr,
     tls: Option<&TlsFiles>,
@@ -185,11 +187,20 @@ pub fn check_startup(
              ——配置 --tls-cert/--tls-key，或绑定回环 127.0.0.1"
         ));
     }
-    if allowed_hosts.is_none() {
-        return Err(format!(
-            "启动守卫拒绝：bind {bind_addr} 为非回环地址且未显式配置 allowed_hosts\
-             （内建回环默认名单会 403 全拒远程请求）——用 --allow-host 显式配置真实主机名"
-        ));
+    match allowed_hosts {
+        None => {
+            return Err(format!(
+                "启动守卫拒绝：bind {bind_addr} 为非回环地址且未显式配置 allowed_hosts\
+                 （内建回环默认名单会 403 全拒远程请求）——用 --allow-host 显式配置真实主机名"
+            ));
+        }
+        Some([]) => {
+            return Err(format!(
+                "启动守卫拒绝：bind {bind_addr} 为非回环地址且 allowed_hosts 为空名单\
+                 （host 校验整体关闭，DNS rebinding 防线失效）——用 --allow-host 显式配置真实主机名"
+            ));
+        }
+        Some(_) => {}
     }
     Ok(())
 }
@@ -516,7 +527,10 @@ fn load_tls_server_config(tls: &TlsFiles) -> Result<rustls::ServerConfig, String
 /// TLS 监听器：TcpListener + TLS acceptor 的 [`axum::serve::Listener`] 实现
 /// （axum 0.8 内建 Listener 仅明文 TCP；该 trait 未 sealed，允许外部落位）。
 /// 单条连接的 TLS 握手在 accept 线位内串行完成——握手失败丢弃该连接继续
-/// 服务；握手时延/速率放大面归部署面处置（SPEC §4 非目标：速率限制/反代）。
+/// 服务。**已知债务（T03 评审登记）**：串行握手可被慢握手客户端放大
+/// （slowloris 型）——SPEC §4 明列速率限制/反代为非目标且 T03 墙后无
+/// 数据通路，当前不可利用；公网暴露前（T-R7 处置）须改握手 spawn 化
+/// （每连接任务内完成握手）。
 pub struct TlsListener {
     tcp: TcpListener,
     acceptor: TlsAcceptor,
