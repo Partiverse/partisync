@@ -21,6 +21,11 @@
 
 ## 验收
 
-- [ ] 勾选与交付证据一一对应（本 PR diff 即证）；未交付项不勾；
-- [ ] fmt/clippy 本地绿（纯文档 diff 零 Rust 触面）；
-- [ ] 提交挂 Task-ID `M10-WP04-T06`。
+- [x] 勾选与交付证据一一对应（本 PR diff 即证）；未交付项不勾；
+      （SPEC §3 九项全部有实名探针/评估件 + PR 号注记，T01–T05 交付
+      齐备无缺项，无需「不勾」标注项）
+- [x] fmt/clippy 本地绿（纯文档 diff 零 Rust 触面）——并加跑
+      `cargo test --workspace` exit 0（2026-10-07 本机实跑，T06 三门禁
+      全绿；点名的 WP04 探针逐具实跑 pass：graph 5 / sync 5 / gateway
+      2 / cli reindex 6 / mcp.rs `list_tools_returns_eleven`）；
+- [x] 提交挂 Task-ID `M10-WP04-T06`。
