@@ -38,7 +38,11 @@
       红后绿 + memTime 探针与行点击绑定探针突变验证，T02（bfded23）
       合入 rebase 后 ui_hardening 合入基线 45/45 绿（2026-10-08 实测）；
 - [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T03-*.png`（chips 过滤
-      前后 + 相对时间 tooltip 入镜）——**环境受阻待验**（见遗留①），
+      前后 + meta「显示 n / 共 m」+ 相对时间 tooltip 入镜 + **四档边界
+      全覆盖**：沿 T04 判例 `--data-dir` 隔离目录 CLI 播种 created_ns =
+      now−30s（「刚刚」）/ −5min（「n 分钟前」）/ −2h（「n 小时前」）/
+      −3d（「n 天前」）/ −40d（>30 天回落绝对日期）五条记忆，一帧截全
+      四档 + 回落；执行时勿省边界档）——**环境受阻待验**（见遗留①），
       PR 保持 OPEN 挂「待 GUI 验证」label，不自行合入；
 - [x] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖。
 

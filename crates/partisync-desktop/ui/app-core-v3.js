@@ -913,7 +913,10 @@ function renderMemRows(noRowsHint) {
     tr.onclick = () => memToggleDetail(tr.dataset.mid);
   });
   // 过滤×详情展开组合语义（SPEC §2.3 正交叠加）：重渲后重放展开态——
-  // 仍命中过滤行集者恢复展开行；被过滤掉/已不存在者移出展开集。
+  // 仍命中过滤行集者恢复展开行；被过滤掉/已不存在者移出展开集。语义
+  // 拍板（二轮评审 F3 注记）：「过滤即收起」——chip 过滤改变所见行集，
+  // 展开态不跨过滤保留，点掉 chip 恢复后列表回到未展开态（集合移出
+  // 同时避免死条目残留，非移出的必要理由——行缺失检查本身已淘汰）。
   for (const mid of [...openMemDetails]) {
     const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(mid)}"]`);
     if (!row || !memIndex.get(mid)) { openMemDetails.delete(mid); continue; }
@@ -979,7 +982,8 @@ function memDetailHtml(m) {
 
 // 展开/收起切换：已开 → 只删该行详情行；未开 → 在本行后插入。既有证明
 // 行与列表本体一概不触碰。展开 mid 集 openMemDetails（T03 组合接线）：
-// chips 过滤重渲后由 renderMemRows 重放展开态（被过滤掉者移出集合）。
+// chips 过滤重渲后由 renderMemRows 重放展开态；语义为「过滤即收起」——
+// 被过滤移出的展开行视为收起，点掉 chip 恢复后不自动展开。
 function memToggleDetail(memoryId) {
   const open = $("mem-rows").querySelector(`tr.mem-detail[data-detail="${CSS.escape(memoryId)}"]`);
   if (open) { open.remove(); openMemDetails.delete(memoryId); return; }

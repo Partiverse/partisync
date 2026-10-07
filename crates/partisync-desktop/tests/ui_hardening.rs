@@ -1427,9 +1427,12 @@ fn t03_mem_row_click_binding_inside_rerender_pipeline() {
     );
 }
 
-/// 过滤×详情展开组合锁（展开态保留）：memToggleDetail 维护 openMemDetails
+/// 过滤×详情展开组合锁（展开态语义）：memToggleDetail 维护 openMemDetails
 /// 展开集（开 +add / 收 −delete）；renderMemRows 重渲后重放——仍命中过滤
-/// 行集者恢复展开，被过滤掉者移出集合（不移出则死条目泄漏）。
+/// 行集者恢复展开。语义拍板（二轮评审 F3 注记）：被过滤移出的展开行视为
+/// 收起（「过滤即收起」，点掉 chip 恢复后不自动展开）；集合移出为该语义
+/// 的落地动作，兼避免死条目残留（行缺失检查本身已淘汰死条目，非必要理
+/// 由）。
 #[test]
 fn t03_mem_detail_state_restored_after_filter_rerender() {
     let toggle = js_fn_body(UI_JS, "function memToggleDetail(memoryId) {");
@@ -1446,7 +1449,7 @@ fn t03_mem_detail_state_restored_after_filter_rerender() {
     );
     assert!(
         body.contains("openMemDetails.delete(mid);"),
-        "重放时被过滤掉/不存在的展开 mid 必须移出集合（防死条目泄漏）"
+        "被过滤移出的展开 mid 必须移出集合（「过滤即收起」语义落地，兼防死条目残留）"
     );
     assert!(
         UI_JS.contains("let openMemDetails = new Set();"),
