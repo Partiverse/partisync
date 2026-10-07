@@ -65,6 +65,11 @@ fn no_raw_interpolation_of_dynamic_fields() {
         // M10-WP03-T03 浏览行 mtime 列：相对/绝对时间一律经 mtimeDisp()，
         // title 经 esc(timeFmt(...))——裸 `${e.mtime_ns` 插值禁入模板。
         "${e.mtime_ns",
+        // M10-WP02-T03：记忆 meta 计数与 chips 循环变量——「显示 n / 共 m」
+        // 的 m 走 esc(lastMemTotal)，chip 文案走 esc(t)，裸插值禁入。
+        "${m.created_ns",
+        "${lastMemTotal",
+        "${t}",
     ];
     let mut leaked = Vec::new();
     for pat in BARE {
@@ -1381,8 +1386,10 @@ fn t03_mem_filter_applies_to_rendered_rows_only() {
 /// ——chips 过滤是行渲染的必经单点，T01 排序（合入后）无论落在 renderMem
 /// Rows 管线内还是等价组合，「先过滤后排序」语义不因绕过过滤直取原始快
 /// 照而失效；行模板不得出现 lastMemRows 直接 map/filter（绕过滤即组合失
-/// 效）。T01/T02 合入时须补「过滤×排序 / 过滤×详情展开」组合显式验证
-/// （任务卡遗留②登记）。
+/// 效）。T02 已合入（bfded23）：「过滤×详情展开」组合已由
+/// t03_mem_row_click_binding_inside_rerender_pipeline /
+/// t03_mem_detail_state_restored_after_filter_rerender 落锁；「过滤×排
+/// 序」待 T01 合入时补显式验证。
 #[test]
 fn t03_mem_rows_source_through_filtered_single_point() {
     let body = js_fn_body(UI_JS, "function renderMemRows(noRowsHint) {");
@@ -1396,6 +1403,55 @@ fn t03_mem_rows_source_through_filtered_single_point() {
             "行渲染不得绕过 filteredMemRows 直取原始快照（组合失效面）：{banned}"
         );
     }
+}
+
+/// 过滤×详情展开组合锁（T02 已合入 bfded23，任务卡遗留②义务到期）：
+/// T02 行点击绑定必须位于 renderMemRows 重渲管线内——chips 过滤整表重建
+/// innerHTML 后行点击不丢；T02 memIndex 数据源在 loadMemories 随行集单点
+/// 同步（全量快照不随过滤裁剪，过滤后行点击仍可展开详情）。
+#[test]
+fn t03_mem_row_click_binding_inside_rerender_pipeline() {
+    let body = js_fn_body(UI_JS, "function renderMemRows(noRowsHint) {");
+    assert!(
+        body.contains("tr.onclick = () => memToggleDetail(tr.dataset.mid);"),
+        "行点击绑定必须在 renderMemRows 管线内（chips 过滤重渲后行点击不丢）"
+    );
+    let load = js_fn_body(UI_JS, "async function loadMemories() {");
+    assert!(
+        load.contains("memIndex = new Map(lastMemRows.map((x) => [x.memory_id, x]));"),
+        "memIndex 必须在 loadMemories 随行集快照单点同步（T02 详情数据源接入 T03 管线）"
+    );
+    assert!(
+        load.contains("memIndex = new Map();"),
+        "失败路径必须同步清空 memIndex（行集清空 → 详情索引清空）"
+    );
+}
+
+/// 过滤×详情展开组合锁（展开态保留）：memToggleDetail 维护 openMemDetails
+/// 展开集（开 +add / 收 −delete）；renderMemRows 重渲后重放——仍命中过滤
+/// 行集者恢复展开，被过滤掉者移出集合（不移出则死条目泄漏）。
+#[test]
+fn t03_mem_detail_state_restored_after_filter_rerender() {
+    let toggle = js_fn_body(UI_JS, "function memToggleDetail(memoryId) {");
+    assert!(
+        toggle.contains("openMemDetails.add(memoryId);")
+            && toggle.contains("openMemDetails.delete(memoryId);"),
+        "memToggleDetail 必须维护展开集（开 +add / 收 −delete）"
+    );
+    let body = js_fn_body(UI_JS, "function renderMemRows(noRowsHint) {");
+    assert!(
+        body.contains("for (const mid of [...openMemDetails])")
+            && body.contains("memToggleDetail(mid);"),
+        "重渲后必须重放展开态（过滤×详情展开组合语义）"
+    );
+    assert!(
+        body.contains("openMemDetails.delete(mid);"),
+        "重放时被过滤掉/不存在的展开 mid 必须移出集合（防死条目泄漏）"
+    );
+    assert!(
+        UI_JS.contains("let openMemDetails = new Set();"),
+        "展开集声明必须存在（renderMemRows/memToggleDetail 共享态）"
+    );
 }
 
 /// meta「显示 n / 共 m」同步 + 新检索重置选中态并重派生 chips（沿 T04

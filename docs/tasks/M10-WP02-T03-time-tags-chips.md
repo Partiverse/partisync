@@ -32,9 +32,11 @@
 
 - [x] 静态探针：相对时间四档 + >30 天回落 + title 完整时间 + 缺失
       「—」不回退 + chips 派生/客户端过滤/meta 计数/全不选/换查询
-      重置/样式 parity（沿 t04 五探针句式）——t03 探针×7（五探针 +
-      memTime 阈值字面量/档序加固 + 行源单点组合锁，含裸插值禁列扩
-      面），先红后绿 + memTime 探针突变验证，ui_hardening 24/24 绿；
+      重置/样式 parity（沿 t04 五探针句式）——t03 探针×9（五探针 +
+      memTime 阈值字面量/档序加固 + 行源单点组合锁 + T02 组合锁×2：
+      行点击绑定在重渲管线内/展开态重渲重放，含裸插值禁列扩面），先
+      红后绿 + memTime 探针与行点击绑定探针突变验证，T02（bfded23）
+      合入 rebase 后 ui_hardening 合入基线 45/45 绿（2026-10-08 实测）；
 - [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T03-*.png`（chips 过滤
       前后 + 相对时间 tooltip 入镜）——**环境受阻待验**（见遗留①），
       PR 保持 OPEN 挂「待 GUI 验证」label，不自行合入；
@@ -85,6 +87,16 @@
    必须显式验证组合正确性**（排序管线落在 renderMemRows 内沿此单点叠
    加；详情展开行不得破坏过滤后行集与 meta 计数），以探针或 GUI 任一
    形式留档，否则 SPEC §2.3「正交可叠加」验收悬空。
+   **【2026-10-08 清账】T02 已于 bfded23 合入 main，本 PR rebase 整合，
+   「过滤×详情展开」组合义务到期即落**：memIndex 数据源随行集在
+   loadMemories 单点同步（失败路径同步清空）、T02 行点击绑定接入
+   renderMemRows 重渲管线（chip 过滤整表重建后行点击不丢）、详情展开
+   态经 `openMemDetails` 集合重放（仍命中过滤行集者保持展开、被过滤掉
+   者移出集合防死条目）；组合锁探针
+   `t03_mem_row_click_binding_inside_rerender_pipeline` /
+   `t03_mem_detail_state_restored_after_filter_rerender` 落地（行点击
+   绑定突变验证红→还原绿，ui_hardening 合入基线 45/45 绿）。「过滤×
+   排序」组合义务随 T01（PR #165）合入到期，届时沿本卡句式落锁。
 3. **TDD 红态留痕不可复核（评审 finding，low，非缺陷指控）**：首 commit
    单 commit 无法事后复核「先红」。如实记录：红态验证发生于 2026-10-06
    实现会话——6 个 t03 探针先行全红（`function memTime(ns) {` 必须存在
