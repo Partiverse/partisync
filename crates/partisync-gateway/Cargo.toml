@@ -30,6 +30,11 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
+# M10-WP05-T03（远程 MCP 传输面）：axum 组装 Streamable HTTP router 与
+# gate 中间件——workspace 既有 pin（hub mcp_remote 骨架先例），零新增
+# 顶层（铁律 8）。rmcp transport-streamable-http-server feature 随 PR-2
+# router 组装翻转（ADR-0031 决策 2）。
+axum.workspace = true
 sqlx = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-io"] }
 uuid = { version = "1", features = ["v4"] }

@@ -7577,6 +7577,7 @@ dependencies = [
 name = "partisync-gateway"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chrono",
  "dirs 5.0.1",
  "fuser",
