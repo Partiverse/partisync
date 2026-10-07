@@ -1,13 +1,16 @@
 //! M10-WP05-T03 远程 MCP 传输面全栈探针（SPEC docs/specs/M10-WP05.md §3.1
 //! T03 行；hub 骨架探针判例 M9-WP05）。行为契约：PRM 公开面四字段、
-//! fail-closed 默认态（任意 Bearer 必 401）、Origin/host 白名单先于授权面。
-//! 启动守卫矩阵与 TLS 线位 roundtrip 探针随 PR-3（rustls 线位落地同批）。
+//! fail-closed 默认态（任意 Bearer 必 401）、Origin/host 白名单先于授权面、
+//! 非回环启动守卫矩阵、TLS 线位 roundtrip（自签证书到 PRM/墙）。
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use partisync_gateway::mcp::McpServerState;
-use partisync_gateway::mcp_remote::{build_router, McpRemoteConfig, PrmConfig, PRM_WELLKNOWN_PATH};
+use partisync_gateway::mcp_remote::{
+    bind_server, build_router, check_startup, McpRemoteConfig, PrmConfig, TlsFiles,
+    PRM_WELLKNOWN_PATH,
+};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -239,4 +242,163 @@ async fn foreign_host_rejected_403_loopback_host_passes_to_wall() {
     )
     .await;
     assert_eq!(status, 401);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 非回环启动守卫（SPEC §3.1 T03 探针②后半：显式拒绝，不静默降级明文）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 启动守卫矩阵：回环无条件放行；非回环必须 TLS，且必须显式 allowed_hosts。
+#[test]
+fn startup_guard_matrix_non_loopback_requires_tls_and_hosts() {
+    let loopback: SocketAddr = "127.0.0.1:8424".parse().expect("addr");
+    let non_loopback: SocketAddr = "192.0.2.1:8424".parse().expect("addr"); // TEST-NET-1，纯裁决不 bind
+    let tls = TlsFiles {
+        cert_path: "cert.pem".into(),
+        key_path: "key.pem".into(),
+    };
+
+    // 回环：无 TLS 亦放行（本地开发默认态）。
+    assert!(check_startup(loopback, None, None).is_ok());
+    assert!(check_startup(loopback, Some(&tls), None).is_ok());
+
+    // 非回环无 TLS → 拒绝，错误显式指明 TLS 前置条件。
+    let err = check_startup(non_loopback, None, None).expect_err("must reject");
+    assert!(err.contains("TLS"), "{err}");
+
+    // 非回环 + TLS 但未显式 allowed_hosts → 拒绝（回环默认名单会 403 全拒）。
+    let err = check_startup(non_loopback, Some(&tls), None).expect_err("must reject");
+    assert!(err.contains("allowed_hosts"), "{err}");
+
+    // 非回环 + TLS + 显式 allowed_hosts → 放行。
+    let hosts = vec!["mcp.example.test".to_string()];
+    assert!(check_startup(non_loopback, Some(&tls), Some(&hosts)).is_ok());
+}
+
+/// bind_server 运行时守卫：非回环无 TLS 显式报错；TLS 文件缺失显式报错
+/// （不 panic、不回退明文）。
+#[tokio::test(flavor = "multi_thread")]
+async fn bind_server_rejects_non_loopback_without_tls_and_bad_cert_paths() {
+    let state = test_state().await;
+
+    let config = McpRemoteConfig {
+        bind_addr: "192.0.2.1:8424".parse().expect("addr"),
+        ..Default::default()
+    };
+    let err = match bind_server(&config, state.clone()).await {
+        Ok(_) => panic!("non-loopback without TLS must be rejected"),
+        Err(e) => e,
+    };
+    assert!(err.contains("TLS"), "{err}");
+
+    let config = McpRemoteConfig {
+        bind_addr: "127.0.0.1:0".parse().expect("addr"),
+        tls: Some(TlsFiles {
+            cert_path: "/nonexistent/partisync-test/cert.pem".into(),
+            key_path: "/nonexistent/partisync-test/key.pem".into(),
+        }),
+        ..Default::default()
+    };
+    let err = match bind_server(&config, state).await {
+        Ok(_) => panic!("missing TLS files must be an explicit error"),
+        Err(e) => e,
+    };
+    assert!(err.contains("TLS 证书"), "{err}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TLS 线位 roundtrip（SPEC §3.1 T03 探针②前半：自签证书经 TLS 到 PRM/墙）
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tls_roundtrip_self_signed_cert_reaches_prm_and_wall() {
+    // 自签 fixture（ADR-0031 决策 4：rcgen dev 证书，SPEC §6-R6 仓内可复现分支；
+    // "127.0.0.1" 经 rcgen CertificateParams::new 落为 iPAddress SAN）。
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()])
+            .expect("self-signed cert");
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    std::fs::write(&cert_path, certified.cert.pem()).expect("write cert");
+    std::fs::write(&key_path, certified.signing_key.serialize_pem()).expect("write key");
+
+    let config = McpRemoteConfig {
+        bind_addr: "127.0.0.1:0".parse().expect("addr"),
+        tls: Some(TlsFiles {
+            cert_path,
+            key_path,
+        }),
+        prm: test_prm(),
+        ..Default::default()
+    };
+    let server = bind_server(&config, test_state().await)
+        .await
+        .expect("bind with TLS");
+    let addr = server.local_addr().expect("addr");
+    let task = tokio::spawn(async move { server.serve().await.expect("serve") });
+
+    // 自签证书作为唯一受信 root 注入客户端（**不关闭证书校验**）：经 TLS
+    // 线位走完整 X.509 验证链（IP SAN 匹配 127.0.0.1）roundtrip 到 PRM。
+    // 单请求 5s 超时 + 10s 重试预算——workspace 全量并行下 serve 任务
+    // 调度可能迟滞，重试必须能扛过 CPU 争抢窗口。
+    let root = reqwest::Certificate::from_der(certified.cert.der().as_ref()).expect("DER cert");
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let url = format!("https://{addr}{PRM_WELLKNOWN_PATH}");
+    let mut resp = None;
+    let mut last_err = None;
+    for _ in 0..200 {
+        match client.get(&url).send().await {
+            Ok(r) => {
+                resp = Some(r);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    let resp = resp.unwrap_or_else(|| {
+        panic!(
+            "PRM reachable over TLS roundtrip (serve task alive={}); last error: {}",
+            !task.is_finished(),
+            last_err.as_deref().unwrap_or("<none>")
+        )
+    });
+    assert_eq!(resp.status(), 200);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    assert_eq!(doc["resource"], "https://mcp.example.test");
+    assert!(
+        !doc["authorization_servers"]
+            .as_array()
+            .expect("array")
+            .is_empty(),
+        "authorization_servers >= 1 over TLS"
+    );
+
+    // 授权墙经 TLS 线位同样 fail-closed：任意 Bearer → 401 挑战（墙先于门）。
+    let resp = client
+        .post(format!("https://{addr}/mcp"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer arbitrary-token")
+        .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        .send()
+        .await
+        .expect("post over TLS");
+    assert_eq!(resp.status(), 401, "any bearer must 401 over TLS");
+    let www = resp
+        .headers()
+        .get("www-authenticate")
+        .expect("challenge")
+        .to_str()
+        .expect("utf-8");
+    assert!(www.contains("resource_metadata="), "A-2 shape: {www}");
+
+    task.abort();
 }
