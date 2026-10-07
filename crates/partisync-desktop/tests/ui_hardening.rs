@@ -708,3 +708,37 @@ fn t01_sort_rerender_preserves_proof_row_and_empty_text() {
         "空态/错误态文案必须落 memEmptyText 且排序重渲透传（防空态被点表头清成空白 empty 行）"
     );
 }
+
+// 对抗评审二轮 finding（low）：排序 × in-flight 验证竞态——memVerifyRow
+// 在 await memCall 之前抓取行引用，await 期间点表头触发 renderMemRows
+// 全量重写 tbody 后行变 detached 节点，row.after(tr) 把证明行插进游离
+// DOM（静默不可见）。锁死修复：证明行插入必须按 memory_id 延迟寻址——
+// await 返回后现查当前 tbody 锚点；行不在当前窗口时落 append 兜底
+// （保持可见，不游离）。
+#[test]
+fn t01_verify_proof_insert_readdresses_after_await() {
+    let at = UI_JS
+        .find("async function memVerifyRow(memoryId, btn) {")
+        .expect("memVerifyRow 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nasync function ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    let await_at = body
+        .find("await memCall(\"memory_verify\"")
+        .expect("memory_verify 调用必须存在");
+    assert!(
+        !body.contains("const row = $(\"mem-rows\").querySelector(`tr.mem-row"),
+        "await 前禁止抓取行引用（重写 tbody 后即 detached，row.after(tr) 游离插入证明行静默不可见）"
+    );
+    let anchor_at = body
+        .find("const anchor = $(\"mem-rows\").querySelector(`tr.mem-row[data-mid=\"${CSS.escape(memoryId)}\"]`)")
+        .expect("插入锚点必须按 memory_id 现查");
+    assert!(
+        anchor_at > await_at,
+        "锚点现查必须位于 await memCall 之后（延迟寻址，规避重渲竞态窗口）"
+    );
+    assert!(
+        body.contains("if (anchor) anchor.after(tr); else $(\"mem-rows\").append(tr);"),
+        "证明行必须插在当前 DOM 锚点之后；行不在窗口时落 append 兜底（保持可见，不游离）"
+    );
+}

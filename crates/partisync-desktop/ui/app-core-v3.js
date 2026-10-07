@@ -708,7 +708,6 @@ async function memVerifyRow(memoryId, btn) {
   const open = $("mem-rows").querySelector(`tr.mem-proof[data-proof="${CSS.escape(memoryId)}"]`);
   if (open) { open.remove(); return; }
   $("mem-rows").querySelectorAll("tr.mem-proof").forEach((tr) => tr.remove());
-  const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(memoryId)}"]`);
   btn.disabled = true;
   const label = btn.textContent;
   btn.textContent = "验证中…";
@@ -722,7 +721,13 @@ async function memVerifyRow(memoryId, btn) {
       包含证明 · leaf <span class="hash">${esc(p.leaf_hash.slice(0, 16))}…</span>
       · audit_path <b>${p.audit_path.length}</b> 节点
       · root <span class="hash">${esc(p.root.slice(0, 16))}…</span></td>`;
-    if (row) row.after(tr); else $("mem-rows").append(tr);
+    // 对抗评审二轮 finding：await 期间点表头 → renderMemRows 全量重写
+    // tbody，await 前抓的行引用已 detached，row.after(tr) 会把证明行插进
+    // 游离 DOM（静默不可见）——按 memory_id 延迟寻址：插入前现查当前
+    // tbody 锚点（无竞态时即原行，行为不变；行已被换出窗口时落 append
+    // 兜底，保持可见不游离）。
+    const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(memoryId)}"]`);
+    if (anchor) anchor.after(tr); else $("mem-rows").append(tr);
   } catch {
     // 工具级错误（如 memory 不存在）已由 mcPayload → error-region 透传。
   } finally {

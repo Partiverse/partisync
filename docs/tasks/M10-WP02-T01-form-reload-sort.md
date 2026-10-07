@@ -45,6 +45,13 @@
       （2026-10-06 本地实测，ui_hardening 20/20；对抗评审 R3 修复后
       成功/失败两处重置分别按上下文锚定，突变实验单删任一处均转红；
       R2/R4 修复：排序重渲保留 mem-proof 展开行 + 空态文案 memEmptyText 透传）。
+- [x] 二轮对抗评审修复：排序 × in-flight 验证竞态——memVerifyRow
+      await 前抓行引用，await 期间点表头重写 tbody 后 row.after(tr)
+      游离插入证明行静默不可见；修复 = 按 memory_id 延迟寻址（await
+      后现查当前 tbody 锚点，行不在窗口落 append 兜底不游离），
+      探针 `t01_verify_proof_insert_readdresses_after_await` 锁死
+      （突变实验恢复旧代码即转红 0 passed/1 failed，2026-10-07 本地
+      实测 ui_hardening 21/21 全绿）。
 - [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T01-*.png`（排序前后 +
       Enter 检索不重载、仍停记忆 tab）——**待 GUI 验证**：验证时段
       （2026-10-06 00:4x）主机屏保→锁屏（HID 空闲 51 min+，Touch ID
