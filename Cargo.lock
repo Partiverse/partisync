@@ -7590,6 +7590,7 @@ dependencies = [
  "partisync-graph",
  "partisync-index",
  "partisync-sync",
+ "reqwest 0.13.5",
  "rmcp",
  "serde",
  "serde_json",
@@ -9181,6 +9182,7 @@ version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b23c62fe489ac1d401ab32688cfacac3737a8978dc3343e5361464c7724fd3cb"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "bytes",
  "chrono",
