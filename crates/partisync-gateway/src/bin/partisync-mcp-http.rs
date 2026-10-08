@@ -1,10 +1,12 @@
-//! `partisync-mcp-http` —— PartiSync MCP 远程入口（Streamable HTTP + TLS，
-//! M10-WP05-T03，SPEC docs/specs/M10-WP05.md §2.2，ADR-0031 决策 2/4）。
+//! `partisync-mcp-http` —— PartiSync MCP 远程入口（Streamable HTTP + TLS +
+//! 真实 OAuth 2.1 RS 授权，M10-WP05-T03/T04，SPEC docs/specs/M10-WP05.md
+//! §2.2/§2.3，ADR-0031 决策 2/3/4）。
 //!
-//! 缺省 bind `127.0.0.1:8424`（回环可明文）；**非回环 bind 必须 TLS 且显式
-//! `--allow-host`**——启动守卫（[`check_startup`]）直接拒绝启动，不静默
-//! 降级明文。T03 期为 fail-closed 默认态：除 PRM 公开发现面外一切请求 401
-//! 挑战（授权面随 T04 开放，墙先于门）。
+//! 缺省 bind `127.0.0.1:8424`（回环可明文）；**非回环 bind 必须 TLS、显式
+//! `--allow-host` 且显式授权配置**——启动守卫（[`check_startup`]）直接拒绝
+//! 启动，不静默降级。授权面（T04）：`--issuer/--jwks-uri` 配置受信授权服
+//! 务器后走 Bearer 验签（iss/aud(RFC 8707)/exp fail-closed，`aud` 取
+//! `--resource`）；缺省 = fail-closed 墙态（除 PRM 外一切 401，无数据通路）。
 //!
 //! PRM 四字段缺省值用 `.invalid` 不可解析 mock 域（不冒充真实授权服务器）；
 //! 公网部署必须 `--resource`/`--auth-server` 显式覆写。
@@ -15,6 +17,7 @@
 //! partisync-mcp-http [--bind <ip:port>] [--tls-cert <pem>] [--tls-key <pem>]
 //!     [--allow-host <host>]... [--allow-origin <origin>]...
 //!     [--resource <url>] [--auth-server <url>]... [--scope <scope>]...
+//!     [--issuer <url> --jwks-uri <url>]...（成对，可多组）
 //!     [--db <graph.db>] [--index-root <dir>]
 //! ```
 
@@ -24,7 +27,7 @@ use std::sync::Arc;
 
 use partisync_gateway::mcp::build_server_state;
 use partisync_gateway::mcp_remote::{
-    bind_server, McpRemoteConfig, PrmConfig, TlsFiles, DEFAULT_BIND_PORT,
+    bind_server, AuthConfig, McpRemoteConfig, PrmConfig, TlsFiles, TrustedIssuer, DEFAULT_BIND_PORT,
 };
 
 fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
@@ -39,8 +42,9 @@ fn print_usage() {
         "用法: partisync-mcp-http [--bind <ip:port>] [--tls-cert <pem>] [--tls-key <pem>]\n\
          \x20 [--allow-host <host>]... [--allow-origin <origin>]...\n\
          \x20 [--resource <url>] [--auth-server <url>]... [--scope <scope>]...\n\
+         \x20 [--issuer <url> --jwks-uri <url>]...（成对，可多组受信授权服务器）\n\
          \x20 [--db <graph.db>] [--index-root <目录>]\n\
-         缺省: bind 127.0.0.1:{DEFAULT_BIND_PORT}；非回环 bind 必须 TLS + --allow-host（启动守卫）"
+         缺省: bind 127.0.0.1:{DEFAULT_BIND_PORT}；非回环 bind 必须 TLS + --allow-host + 授权配置（启动守卫）"
     );
 }
 
@@ -55,6 +59,9 @@ async fn main() {
     let mut resource: Option<String> = None;
     let mut auth_servers: Vec<String> = Vec::new();
     let mut scopes: Vec<String> = Vec::new();
+    let mut issuer: Option<String> = None;
+    let mut jwks_uri: Option<String> = None;
+    let mut issuers: Vec<TrustedIssuer> = Vec::new();
     let mut db_path: Option<PathBuf> = None;
     let mut index_root: Option<PathBuf> = None;
 
@@ -68,6 +75,8 @@ async fn main() {
             "--resource" => resource = Some(next_arg(&mut args, "--resource")),
             "--auth-server" => auth_servers.push(next_arg(&mut args, "--auth-server")),
             "--scope" => scopes.push(next_arg(&mut args, "--scope")),
+            "--issuer" => issuer = Some(next_arg(&mut args, "--issuer")),
+            "--jwks-uri" => jwks_uri = Some(next_arg(&mut args, "--jwks-uri")),
             "--db" => db_path = Some(PathBuf::from(next_arg(&mut args, "--db"))),
             "--index-root" => index_root = Some(PathBuf::from(next_arg(&mut args, "--index-root"))),
             "--help" | "-h" => {
@@ -94,6 +103,19 @@ async fn main() {
             std::process::exit(2);
         }
     };
+
+    // 受信 issuer 对必须成对给出（单边即配置错误）；可重复配置多组。
+    match (issuer, jwks_uri) {
+        (None, None) => {}
+        (Some(iss), Some(uri)) => issuers.push(TrustedIssuer {
+            issuer: iss,
+            jwks_uri: uri,
+        }),
+        _ => {
+            eprintln!("partisync-mcp-http: --issuer 与 --jwks-uri 必须成对给出");
+            std::process::exit(2);
+        }
+    }
 
     let config = McpRemoteConfig {
         bind_addr: bind
@@ -123,6 +145,11 @@ async fn main() {
                 scopes
             },
         },
+        // 授权配置缺省 = fail-closed 墙态（AuthWall::FailClosedAll）。
+        auth: (!issuers.is_empty()).then(|| AuthConfig {
+            issuers,
+            ..AuthConfig::default()
+        }),
     };
 
     let state = match build_server_state(db_path, index_root).await {
@@ -136,8 +163,9 @@ async fn main() {
     let server = match bind_server(&config, Arc::new(state)).await {
         Ok(server) => server,
         Err(e) => {
-            // 含启动守卫拒绝（非回环无 TLS / 无显式 allowed_hosts）与
-            // TLS 装配、bind 失败——全部显式错误退出，不静默降级。
+            // 含启动守卫拒绝（非回环无 TLS / 无显式 allowed_hosts / 无授权
+            // 配置）、JWKS 预拉失败与 TLS 装配、bind 失败——全部显式错误
+            // 退出，不静默降级。
             eprintln!("partisync-mcp-http: {e}");
             std::process::exit(1);
         }
@@ -146,8 +174,13 @@ async fn main() {
         .local_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|_| "unknown".to_string());
+    let auth_mode = if config.auth.is_some() {
+        "bearer 验签（fail-closed）"
+    } else {
+        "墙态：除 PRM 外一切请求 401（授权配置缺省）"
+    };
     eprintln!(
-        "partisync-mcp-http: listening on {addr} (tls={}，fail-closed：除 PRM 外一切请求 401)",
+        "partisync-mcp-http: listening on {addr} (tls={}，{auth_mode})",
         config.tls.is_some()
     );
     if let Err(e) = server.serve().await {

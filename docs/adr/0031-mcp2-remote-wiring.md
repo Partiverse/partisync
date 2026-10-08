@@ -57,10 +57,18 @@ SPEC §2.2）；⑤deny 白名单不改（红线，deny 拦截即回本 ADR 修�
    （不接受 token header 指定任一算法）。feature 集（aws_lc_rs vs
    rust_crypto 线——aws-lc-rs 已在 lock 经 rustls 0.23 默认 provider）与
    精确 pin 在 T04 载体 PR 以本地源码查证钉定后回填本 ADR 修订登记
-   （禁凭记忆红线，评估件 §7）。dev 侧 mock AS 签发同用 jsonwebtoken
-   （dev-dependency 批次）。**否决**：手写 HMAC 自发 token（偏离标准
-   JWT/JWKS，外接 IdP 时全重写）；oauth2/jsonwebtoken 之外再加 jwks 客户
-   端 crate（依赖面无谓扩张）。
+   （禁凭记忆红线，评估件 §7）。**查证结论回填（2026-10-08，T04 载体
+   PR）**：pin = `=11.1.0`（crates.io 11 线最新，2026-09-16 发布；本地
+   .crate 源码解包查证）· feature = `default-features = false,
+   features = ["aws_lc_rs"]`（aws_lc 后端全算法含 EdDSA/Ed25519，
+   `Jwk::from_encoding_key` 经 `ed_pub_components_from_private_key` 实
+   证可用；不启 `use_pem`——产品/测试路径均走 JWK/DER 零 PEM，少拉
+   pem/simple_asn1 两件）· MSRV 1.88 ≤ 工具链钉子 1.94.0 · 依赖闭包
+   全既有（aws-lc-rs 1.18.1 ≥ 源码要求 1.15.0）。dev 侧 mock AS 签发同用
+   jsonwebtoken（主依赖对 integration tests 可见，零 dev-dependency 批次
+   增量；测试密钥经 rcgen 既有 dev 依赖 Ed25519 生成）。**否决**：手写
+   HMAC 自发 token（偏离标准 JWT/JWKS，外接 IdP 时全重写）；
+   oauth2/jsonwebtoken 之外再加 jwks 客户端 crate（依赖面无谓扩张）。
 
 4. **TLS 机制 = rustls 0.23 线位内建 + rcgen dev 证书（评估件 §4）**。
    服务端 TLS acceptor 用 tokio-rustls（0.23 线已在 lock 经 iroh/reqwest，
@@ -86,8 +94,14 @@ SPEC §2.2）；⑤deny 白名单不改（红线，deny 拦截即回本 ADR 修�
   落且 fail-closed 可探针化；传输 feature 翻转零新 crate（cargo tree
   实证，评估件 §1.6）；校验件/TLS/证书三件与 lock 既有线同源，deny 面
   新增量集中于 jsonwebtoken 本体；外接 AS 未来 = 纯配置切换。
-- 负面/风险：jsonwebtoken 为新顶层依赖（铁律 8 载体 = 本 ADR；deny
-  check 输出随 T04 载体 PR 回填下方待批准项）；`stateless_protocol_
+- 负面/风险：jsonwebtoken 为新顶层依赖（铁律 8 载体 = 本 ADR；**deny
+  实证已回填（2026-10-08，T04 载体 PR）**：本地 `cargo deny check` 四项
+  全绿——`advisories ok, bans ok, licenses ok, sources ok`；Cargo.lock
+  净增量 = `jsonwebtoken 11.1.0` + `untrusted 0.7.1`（aws-lc-rs 1.18.1
+  线拉入）两件，依赖闭包其余全既有（aws-lc-rs 1.18.1 ≥ 源码要求
+  1.15.0）；`cargo audit` 10 条 vulnerability 全部为 deny.toml 既有
+  allowlist 债（h2/rsa/rustls-webpki/wasmtime 线），jsonwebtoken/
+  untrusted advisory 零命中）；`stateless_protocol_
   metadata_required`/Origin 白名单若漏配则 fail-closed 破功——SPEC §3.1
   已钉 T03 探针（缺头必拒/非白名单 Origin 必拒）双保险；mock AS 与真实
   IdP 行为差异（R3）= NB-WP05-1 债边界不变。
@@ -100,7 +114,7 @@ SPEC §2.2）；⑤deny 白名单不改（红线，deny 拦截即回本 ADR 修�
 | 版本 | 日期 | 修订内容 | 触发/依据 |
 |---|---|---|---|
 | 0.1 | 2026-10-07 | 初稿随 SPEC M10-WP05-T02：五项决策落锤 | M10-WP00 §2 拍板#3（先评估后落锤） |
-| （预留） | — | jsonwebtoken 精确 pin + feature 线回填 | T04 载体 PR 实施期查证（禁凭记忆红线） |
+| 0.2 | 2026-10-08 | 决策 3 查证结论回填：jsonwebtoken `=11.1.0` + `default-features=false, features=["aws_lc_rs"]`（不启 use_pem）；deny/audit 实证落后果节 | T04 载体 PR 实施期本地源码查证（禁凭记忆红线，本表预留行） |
 | （预留） | — | 生产 AS 外接（配置迁移文档 + 可能的 IdP 兼容注记） | NB-WP05-1 条件触发（可得 IdP/部署环境） |
 | （预留） | — | spec 新 revision 重评（iss SHOULD→MUST 升级预告等） | 新 revision 发布（评估件 §6.1，触发重评不追溯） |
 
@@ -108,9 +122,9 @@ SPEC §2.2）；⑤deny 白名单不改（红线，deny 拦截即回本 ADR 修�
 
 - [ ] 用户确认选型落锤（草稿合入 = 批准，沿 ADR-0030 待批准项①判例——
       合入时勾销）
-- [ ] **deny 实证回填位**：jsonwebtoken 11 依赖批次落地时（T04 载体 PR）
+- [x] **deny 实证回填位**：jsonwebtoken 11 依赖批次落地时（T04 载体 PR）
       本地 `cargo deny check` + `cargo audit` 输出贴入本 ADR 后果节
       （沿 ADR-0030 待批准项判例；deny 拦截即回本 ADR 修订，不改
-      deny.toml 白名单）
+      deny.toml 白名单）——✅ 2026-10-08 回填（后果节）
 - [ ] rcgen/tokio-rustls 启面 deny 核对随 T03 载体 PR 门禁实证（评估件
       §1.6 已证两者在 lock，预期零新 crate，实证回填同上）

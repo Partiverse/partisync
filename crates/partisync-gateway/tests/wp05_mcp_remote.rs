@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use partisync_gateway::mcp::McpServerState;
 use partisync_gateway::mcp_remote::{
-    bind_server, build_router, check_startup, McpRemoteConfig, PrmConfig, TlsFiles,
-    PRM_WELLKNOWN_PATH,
+    bind_server, build_router, check_startup, AuthConfig, McpRemoteConfig, PrmConfig, TlsFiles,
+    TrustedIssuer, PRM_WELLKNOWN_PATH,
 };
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -248,7 +248,8 @@ async fn foreign_host_rejected_403_loopback_host_passes_to_wall() {
 // 非回环启动守卫（SPEC §3.1 T03 探针②后半：显式拒绝，不静默降级明文）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 启动守卫矩阵：回环无条件放行；非回环必须 TLS，且必须显式 allowed_hosts。
+/// 启动守卫矩阵：回环无条件放行；非回环必须 TLS + 显式 allowed_hosts +
+/// 授权配置（T04 接线检查，SPEC §2.3/§6-R9 收口）。
 #[test]
 fn startup_guard_matrix_non_loopback_requires_tls_and_hosts() {
     let loopback: SocketAddr = "127.0.0.1:8424".parse().expect("addr");
@@ -257,27 +258,39 @@ fn startup_guard_matrix_non_loopback_requires_tls_and_hosts() {
         cert_path: "cert.pem".into(),
         key_path: "key.pem".into(),
     };
+    let auth = AuthConfig {
+        issuers: vec![TrustedIssuer {
+            issuer: "https://as.example.test".to_string(),
+            jwks_uri: "https://as.example.test/jwks.json".to_string(),
+        }],
+        ..AuthConfig::default()
+    };
 
-    // 回环：无 TLS 亦放行（本地开发默认态）。
-    assert!(check_startup(loopback, None, None).is_ok());
-    assert!(check_startup(loopback, Some(&tls), None).is_ok());
+    // 回环：无 TLS/无授权配置亦放行（本地开发默认态 = fail-closed 墙态）。
+    assert!(check_startup(loopback, None, None, None).is_ok());
+    assert!(check_startup(loopback, Some(&tls), None, None).is_ok());
 
     // 非回环无 TLS → 拒绝，错误显式指明 TLS 前置条件。
-    let err = check_startup(non_loopback, None, None).expect_err("must reject");
+    let err = check_startup(non_loopback, None, None, None).expect_err("must reject");
     assert!(err.contains("TLS"), "{err}");
 
     // 非回环 + TLS 但未显式 allowed_hosts → 拒绝（回环默认名单会 403 全拒）。
-    let err = check_startup(non_loopback, Some(&tls), None).expect_err("must reject");
+    let err = check_startup(non_loopback, Some(&tls), None, None).expect_err("must reject");
     assert!(err.contains("allowed_hosts"), "{err}");
 
     // 非回环 + TLS + 显式空名单 → 拒绝（host 校验整体关闭 = DNS rebinding
     // 防线失效；rmcp 空名单语义为放行，启动面必须拦住）。
-    let err = check_startup(non_loopback, Some(&tls), Some(&[])).expect_err("must reject");
+    let err = check_startup(non_loopback, Some(&tls), Some(&[]), None).expect_err("must reject");
     assert!(err.contains("空名单"), "{err}");
 
-    // 非回环 + TLS + 显式 allowed_hosts → 放行。
+    // 非回环 + TLS + 显式 allowed_hosts 但授权配置缺省 → 拒绝（T04 接线：
+    // 公网面必须显式配置 issuer/JWKS，不给「忘了配授权」留口）。
     let hosts = vec!["mcp.example.test".to_string()];
-    assert!(check_startup(non_loopback, Some(&tls), Some(&hosts)).is_ok());
+    let err = check_startup(non_loopback, Some(&tls), Some(&hosts), None).expect_err("must reject");
+    assert!(err.contains("授权"), "{err}");
+
+    // 非回环 + TLS + 显式 allowed_hosts + 授权配置 → 放行。
+    assert!(check_startup(non_loopback, Some(&tls), Some(&hosts), Some(&auth)).is_ok());
 }
 
 /// bind_server 运行时守卫：非回环无 TLS 显式报错；TLS 文件缺失显式报错
