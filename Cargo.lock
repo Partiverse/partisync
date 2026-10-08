@@ -7590,13 +7590,16 @@ dependencies = [
  "partisync-graph",
  "partisync-index",
  "partisync-sync",
+ "rcgen",
  "reqwest 0.13.5",
  "rmcp",
+ "rustls 0.23.45",
  "serde",
  "serde_json",
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.5",
  "uuid",
 ]
 

@@ -1,13 +1,16 @@
 //! Gateway 远程 MCP 传输面（M10-WP05-T03，SPEC docs/specs/M10-WP05.md §2.2，
-//! ADR-0031 决策 2）：Streamable HTTP + Origin/host 校验（先于授权面）+
-//! fail-closed 默认态（墙先于门）。端点沿 M9 骨架口径（`POST /mcp` + PRM）。
+//! ADR-0031 决策 2/4）：Streamable HTTP + Origin/host 校验（先于授权面）+
+//! fail-closed 默认态（墙先于门）+ rustls TLS 线位与非回环启动守卫。端点沿
+//! M9 骨架口径（`POST /mcp` + PRM）；远程入口 bin = `partisync-mcp-http`。
 //!
 //! 分派序（[`gate_decision`] 纯函数，探针钉死）：PRM 公开无墙；其余请求过
 //! gate——Host 白名单（rmcp 语义镜像）→ Origin 白名单（名单空 = 关）→
 //! 授权墙 [`AuthWall`]（T03 一切请求 401，含任意 Bearer——无数据通路，
-//! T04 开门前面不可达）→（T04 起）rmcp 服务。探针见
-//! `tests/wp05_mcp_remote.rs`；非回环前置条件见 `check_startup`。
+//! T04 开门前面不可达）→（T04 起）rmcp 服务。运行时面：[`bind_server`]
+//! （启动守卫 + TLS 装配 + bind）→ [`RemoteMcpServer::serve`]。探针见
+//! `tests/wp05_mcp_remote.rs`；非回环前置条件见 [`check_startup`]。
 
+use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,7 +26,11 @@ use rmcp::transport::streamable_http_server::session::never::NeverSessionManager
 use rmcp::transport::streamable_http_server::tower::{
     StreamableHttpServerConfig, StreamableHttpService,
 };
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::json;
+use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsAcceptor;
 
 use crate::mcp::McpServerState;
 
@@ -86,7 +93,7 @@ impl PrmConfig {
     }
 }
 
-/// TLS 证书文件对（PEM）；由 TLS 线位在 serve 期加载。
+/// TLS 证书文件对（PEM）；由 TLS 线位在 bind 期（`bind_server`）加载。
 #[derive(Debug, Clone)]
 pub struct TlsFiles {
     /// 证书链 PEM（leaf 在前）。
@@ -162,8 +169,10 @@ impl GateRejection {
 ///
 /// 非回环前置条件（评估件 §5 + ADR-0031 决策 4）：①未配置 TLS → 拒绝
 /// 启动；②`allowed_hosts` 未显式覆写（仍为回环默认名单，远程请求将被
-/// host 校验 403 全拒）→ 拒绝启动。授权配置 T03 期由 fail-closed 墙兜底
-/// （一切请求 401），T04 起随授权面接线检查（SPEC §6-R9 窗口期设计）。
+/// host 校验 403 全拒）或显式**空名单**（host 校验整体关闭 = DNS
+/// rebinding 防线失效，rmcp 空名单语义为放行）→ 拒绝启动。授权配置
+/// T03 期由 fail-closed 墙兜底（一切请求 401），T04 起随授权面接线
+/// 检查（SPEC §6-R9 窗口期设计）。
 pub fn check_startup(
     bind_addr: SocketAddr,
     tls: Option<&TlsFiles>,
@@ -178,11 +187,20 @@ pub fn check_startup(
              ——配置 --tls-cert/--tls-key，或绑定回环 127.0.0.1"
         ));
     }
-    if allowed_hosts.is_none() {
-        return Err(format!(
-            "启动守卫拒绝：bind {bind_addr} 为非回环地址且未显式配置 allowed_hosts\
-             （内建回环默认名单会 403 全拒远程请求）——用 --allow-host 显式配置真实主机名"
-        ));
+    match allowed_hosts {
+        None => {
+            return Err(format!(
+                "启动守卫拒绝：bind {bind_addr} 为非回环地址且未显式配置 allowed_hosts\
+                 （内建回环默认名单会 403 全拒远程请求）——用 --allow-host 显式配置真实主机名"
+            ));
+        }
+        Some([]) => {
+            return Err(format!(
+                "启动守卫拒绝：bind {bind_addr} 为非回环地址且 allowed_hosts 为空名单\
+                 （host 校验整体关闭，DNS rebinding 防线失效）——用 --allow-host 显式配置真实主机名"
+            ));
+        }
+        Some(_) => {}
     }
     Ok(())
 }
@@ -470,4 +488,134 @@ async fn gate_middleware(
 
 async fn prm_handler(State(gate): State<Arc<GateState>>) -> Json<serde_json::Value> {
     Json(gate.prm.protected_resource_metadata())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TLS 线位 + 运行时面（M10-WP05-T03 PR-3：ADR-0031 决策 4 + SPEC §2.2 入口）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// PEM 证书对 → rustls 服务端配置（`PemObject` 文件加载；证书链 leaf 在前，
+/// 私钥 PKCS8/PKCS1/SEC1 任一自动识别）。任何失败显式报错，不 panic。
+///
+/// provider 显式指定 aws-lc-rs（ADR-0031 决策 4 线位）：workspace 统一
+/// feature 后 rustls 可能同时启用 `aws-lc-rs` 与 `ring`（iroh 线拉入），
+/// `ServerConfig::builder()` 在双 provider 下会 panic 拒绝猜测——测试全量
+/// 并行实发（crypto/mod.rs:249），显式指定消除该不确定性。
+fn load_tls_server_config(tls: &TlsFiles) -> Result<rustls::ServerConfig, String> {
+    let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(&tls.cert_path)
+        .map_err(|e| format!("TLS 证书 {} 读取失败: {e}", tls.cert_path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("TLS 证书 {} 解析失败: {e}", tls.cert_path.display()))?;
+    if certs.is_empty() {
+        return Err(format!(
+            "TLS 证书 {} 为空（需 PEM 证书链，leaf 在前）",
+            tls.cert_path.display()
+        ));
+    }
+    let key = PrivateKeyDer::from_pem_file(&tls.key_path)
+        .map_err(|e| format!("TLS 私钥 {} 读取/解析失败: {e}", tls.key_path.display()))?;
+    rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| format!("TLS provider 协议版本装配失败: {e}"))?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|e| format!("TLS 证书/私钥装配失败（不匹配？）: {e}"))
+}
+
+/// TLS 监听器：TcpListener + TLS acceptor 的 [`axum::serve::Listener`] 实现
+/// （axum 0.8 内建 Listener 仅明文 TCP；该 trait 未 sealed，允许外部落位）。
+/// 单条连接的 TLS 握手在 accept 线位内串行完成——握手失败丢弃该连接继续
+/// 服务。**已知债务（T03 评审登记）**：串行握手可被慢握手客户端放大
+/// （slowloris 型）——SPEC §4 明列速率限制/反代为非目标且 T03 墙后无
+/// 数据通路，当前不可利用；公网暴露前（T-R7 处置）须改握手 spawn 化
+/// （每连接任务内完成握手）。
+pub struct TlsListener {
+    tcp: TcpListener,
+    acceptor: TlsAcceptor,
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = tokio_rustls::server::TlsStream<TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, addr) = match self.tcp.accept().await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // 与 axum 内建 TcpListener::accept 同口径：accept 瞬时
+                    // 错误不终止服务（持续错误打满日志是部署面监控项）。
+                    eprintln!("mcp_remote: tcp accept error: {e}");
+                    continue;
+                }
+            };
+            match self.acceptor.accept(stream).await {
+                Ok(tls) => return (tls, addr),
+                Err(e) => eprintln!("mcp_remote: TLS handshake failed from {addr}: {e}"),
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.tcp.local_addr()
+    }
+}
+
+/// 已绑定的远程 MCP 服务（SPEC §2.2 远程入口运行时面）。bind 期完成启动
+/// 守卫与 TLS 装配（显式错误，不静默降级）；[`serve`](Self::serve) 消费后
+/// 长驻至进程退出。
+pub struct RemoteMcpServer {
+    tcp: TcpListener,
+    tls: Option<TlsAcceptor>,
+    router: Router,
+}
+
+impl RemoteMcpServer {
+    /// 实际绑定地址（bin 日志/探针用；bind 端口 0 时为内核分配端口）。
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.tcp.local_addr()
+    }
+
+    /// 服务至出错或进程终止。TLS 配置存在时走 TLS 线位（自签 fixture 亦然）。
+    pub async fn serve(self) -> io::Result<()> {
+        match self.tls {
+            Some(acceptor) => {
+                axum::serve(
+                    TlsListener {
+                        tcp: self.tcp,
+                        acceptor,
+                    },
+                    self.router,
+                )
+                .await
+            }
+            None => axum::serve(self.tcp, self.router).await,
+        }
+    }
+}
+
+/// 装配并绑定远程 MCP 服务（bin `partisync-mcp-http` 与 TLS 探针共用）：
+/// ①启动守卫 [`check_startup`]（非回环必须 TLS + 显式 allowed_hosts，SPEC
+/// §2.2，显式错误不静默降级明文）；②TLS 装配（文件加载失败显式报错）；
+/// ③TcpListener bind；④router（gate + rmcp fail-closed，PRM 公开）。
+pub async fn bind_server(
+    config: &McpRemoteConfig,
+    state: Arc<McpServerState>,
+) -> Result<RemoteMcpServer, String> {
+    check_startup(
+        config.bind_addr,
+        config.tls.as_ref(),
+        config.allowed_hosts.as_deref(),
+    )?;
+    let tls = match &config.tls {
+        Some(files) => Some(TlsAcceptor::from(Arc::new(load_tls_server_config(files)?))),
+        None => None,
+    };
+    let tcp = TcpListener::bind(config.bind_addr)
+        .await
+        .map_err(|e| format!("bind {} 失败: {e}", config.bind_addr))?;
+    let router = build_router(config, state);
+    Ok(RemoteMcpServer { tcp, tls, router })
 }
