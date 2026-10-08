@@ -1,9 +1,11 @@
-//! Gateway 远程 MCP 传输面 + 授权面（M10-WP05-T03/T04，SPEC
-//! docs/specs/M10-WP05.md §2.2/§2.3，ADR-0031 决策 2/3/4/5）：Streamable
+//! Gateway 远程 MCP 传输面 + 授权面（M10-WP05-T03/T04/T05，SPEC
+//! docs/specs/M10-WP05.md §2.2/§2.3/§2.4，ADR-0031 决策 2/3/4/5）：Streamable
 //! HTTP + Origin/host 校验（先于授权面）+ 真实 OAuth 2.1 RS 验签
 //! （jsonwebtoken 11：iss/aud(RFC 8707)/exp/scope fail-closed，401/403
-//! 语义）+ rustls TLS 线位与非回环启动守卫。端点沿 M9 骨架口径
-//! （`POST /mcp` + PRM）；远程入口 bin = `partisync-mcp-http`。
+//! 语义）+ rustls TLS 线位与非回环启动守卫 + 工具透传（tools/list、
+//! tools/call 经 [`crate::mcp::McpServerState`] 直调与 stdio 同源）与
+//! T-R5 跨请求状态身份键控（[`IdentityBoundHandles`]）。端点沿 M9 骨架
+//! 口径（`POST /mcp` + PRM）；远程入口 bin = `partisync-mcp-http`。
 //!
 //! 分派序（探针钉死，P23）：PRM 公开无墙；其余请求过 gate——Host 白名单
 //! （rmcp 语义镜像）→ Origin 白名单（名单空 = 关）→ 授权墙
@@ -494,6 +496,58 @@ pub fn required_scope_for_tool(tool: &str) -> &'static str {
         "asset_organize" | "memory_write" | "memory_update" | "memory_delete" => WRITE,
         "dataset_export" => EXPORT,
         _ => WRITE,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 工具透传与 T-R5 键控（M10-WP05-T05，SPEC §2.4）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 跨请求状态身份键控登记簿（T-R5 防线，SPEC §2.4「任何 handle/键控以
+/// `<subject>:<handle>` 组织，MUST NOT 以 handle 持有替代鉴权」；评估文档
+/// M9-WP05 §威胁模型 T-R5「state handle hijacking」）。
+///
+/// 口径（探针 `handle_binding_subject_scoped_and_never_a_credential` 钉死）：
+/// - 登记唯一形态 = 复合键 `<subject>:<handle>`（[`Self::composite_key`]）；
+///   subject 必须取自已过 [`AuthWall`] 验签 token 的 `sub`
+///   （[`Authorized::subject`]）；
+/// - 校验唯一形态 = subject+handle 双参全匹配（[`Self::verify`]）——本类型
+///   **不提供** handle-only 查询 API：handle 本体不是凭证；
+/// - 服务端铸造 handle 的来源必须走 [`Self::bind`]。当前远程面为零铸造态
+///   （2026-07-28 stateless + `NeverSessionManager`：rmcp tower.rs POST
+///   路径 `use_session` 恒 false，客户端 `Mcp-Session-Id` 头被忽略且不从
+///   其铸造状态——评估文档 §1-G-2）；未来任何跨请求状态落仓（评估文档
+///   T-R5 预告的 job_status 类任务 handle），铸造点必须先登记本簿、校验点
+///   必须走 [`Self::verify`]，handle-only 的「持有即放行」通道在本 API 形态
+///   上不存在。
+#[derive(Debug, Default)]
+pub struct IdentityBoundHandles {
+    entries: RwLock<std::collections::HashSet<String>>,
+}
+
+impl IdentityBoundHandles {
+    /// 复合键唯一口径：`<subject>:<handle>`。
+    pub fn composite_key(subject: &str, handle: &str) -> String {
+        format!("{subject}:{handle}")
+    }
+
+    /// 服务端铸造 handle 的唯一登记口径（subject 取自已验签身份）。
+    /// 返回是否新登记（同复合键重复登记幂等，返回 false）。
+    pub fn bind(&self, subject: &str, handle: &str) -> bool {
+        self.entries
+            .write()
+            .map(|mut entries| entries.insert(Self::composite_key(subject, handle)))
+            .unwrap_or(false)
+    }
+
+    /// 校验唯一口径：subject+handle 复合键全匹配才认持有。无 subject 即
+    /// 不可校验——调用方 subject 同样必须取自已验签 token，不得采信请求
+    /// 自带头/体的任何身份声明。
+    pub fn verify(&self, subject: &str, handle: &str) -> bool {
+        self.entries
+            .read()
+            .map(|entries| entries.contains(&Self::composite_key(subject, handle)))
+            .unwrap_or(false)
     }
 }
 
