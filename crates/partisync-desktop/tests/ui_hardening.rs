@@ -280,6 +280,136 @@ fn t03_flagship_memory_toggle_wired() {
     );
 }
 
+// ── M10-WP01-T03：检索结果-详情联动静态契约（SPEC §2.3 + §3） ──
+
+/// 联动探针（SPEC §3「联动探针」）：命中卡 click → `showDetail(h.content_id,
+/// h.filename)` 接线断言 + 打开详情路径零 #srows 写入（硬约束：点击不清空
+/// 结果列表）+ 关闭仅隐藏面板 + 整卡可点击的可访问语义与样式。
+#[test]
+fn t03_hit_card_click_wires_show_detail_and_keeps_results() {
+    // 1) 接线断言（SPEC §3 字面）：命中卡 onclick → 既有 showDetail 渲染
+    //    契约（asset_detail IPC 零新增 command），入参恰为 (content_id,
+    //    filename)——标题回落语义收敛在 showDetail 内（§2.1 沿革）。
+    assert!(
+        UI_JS.contains(
+            "card.onclick = () => showDetail(h.content_id, h.filename, \"sdetail-panel\");"
+        ),
+        "命中卡 click 必须接 showDetail(h.content_id, h.filename)（SPEC §2.3）"
+    );
+    // 2) 点击不清空结果列表：命中卡接线块内零 innerHTML 写入——详情
+    //    面板独立于 #srows（SPEC §2.3 硬约束）。
+    let bind_at = UI_JS.find("article.hit[data-cid]").expect("命中卡接线存在");
+    let seg = &UI_JS[bind_at..];
+    let bind_end = seg.find("});").expect("命中卡接线闭合");
+    let wiring = &seg[..bind_end];
+    assert!(
+        !wiring.contains("innerHTML"),
+        "打开详情路径不得重写 #srows（点击不得清空结果列表）"
+    );
+    // 3) 键盘可达（可访问语义）：Enter/Space 触发 + role=button/tabindex。
+    assert!(
+        UI_JS.contains("e.key === \"Enter\" || e.key === \" \""),
+        "命中卡必须支持键盘触发"
+    );
+    assert!(
+        UI_JS.contains("role=\"button\" tabindex=\"0\" data-cid="),
+        "命中卡模板必须带 role=button + tabindex 可访问语义"
+    );
+    // 4) 面板结构：检索视图内联详情面板 + 常驻关闭按钮（DOM id 对账）。
+    assert!(
+        UI_HTML.contains("id=\"sdetail-panel\"") && UI_HTML.contains("id=\"sdetail-close\""),
+        "index.html 缺检索详情面板/关闭按钮"
+    );
+    assert!(
+        UI_JS.contains("$(\"sdetail-close\").onclick"),
+        "关闭按钮必须接线"
+    );
+    let close_at = UI_JS
+        .find("$(\"sdetail-close\").onclick")
+        .expect("关闭接线存在");
+    let close_seg = &UI_JS[close_at..];
+    let close_end = close_seg.find(";").expect("关闭接线闭合");
+    assert!(
+        close_seg[..close_end].contains("display = \"none\"")
+            && !close_seg[..close_end].contains("innerHTML"),
+        "关闭详情只隐藏面板，不得动结果列表"
+    );
+    // 5) 整卡可点击样式（cursor:pointer，骨架行除外 + 键盘焦点态）。
+    assert!(
+        UI_CSS.contains(".hit:not(.skel-row) { cursor: pointer; }"),
+        "命中卡缺 cursor:pointer（骨架行除外）"
+    );
+    assert!(UI_CSS.contains(".hit:focus-visible"), "命中卡缺键盘焦点态");
+    // 6) 并发守卫（PR 161 评审 low）：面板级请求序号——迟到响应静默
+    //    丢弃，快速连点两张命中卡时旧 asset_detail 响应不得覆盖面板。
+    for needle in [
+        "const seq = (detailSeq[panelId] = (detailSeq[panelId] || 0) + 1);",
+        "if (seq !== detailSeq[panelId]) return;",
+    ] {
+        assert!(UI_JS.contains(needle), "showDetail 缺并发守卫：{needle}");
+    }
+    assert_eq!(
+        UI_JS
+            .matches("if (seq !== detailSeq[panelId]) return;")
+            .count(),
+        2,
+        "并发守卫必须同时覆盖成功渲染与失败透出两条路径"
+    );
+    // 7) 详情列锁宽（PR 161 评审 low）：长副本路径不得把 340px 面板
+    //    撑宽挤压结果列表。
+    assert!(
+        UI_CSS.contains(".s-stage .detail { min-width: 0; max-width: 340px; }"),
+        "检索详情面板缺 min-width:0 / max-width 锁宽约束"
+    );
+}
+
+/// 浏览侧回归探针（PR 161 对抗评审 high）：showDetail body 推导必须按
+/// panelId 显式映射——浏览侧 #detail-panel 无 "-body" 拼接容器（内容容器
+/// 是 #detail-body），旧 `$(panelId+"-body")||panel` 拼接回落把面板本体当
+/// 渲染目标，innerHTML 重写炸掉 .detail-head × 静态头（M10-WP03-T02 契约：
+/// 头不被重写）与面板内 #detail-body（closeDetail 随后对 null 写 innerHTML
+/// 抛未捕获 TypeError）。锚：映射字面 + 渲染目标行走映射 + 旧拼接回落
+/// 消失 + index.html 浏览侧面板结构（detail-head 在前、detail-body 在后）
+/// 存活对账。
+#[test]
+fn t03_show_detail_body_maps_by_panel_id_browse_head_survives() {
+    // 1) 映射表字面：browse 面板 → #detail-body（× 静态头与内容容器分离
+    //    的 M10-WP03-T02 结构在浏览侧生效）；检索面板 → #sdetail-panel-body。
+    assert!(
+        UI_JS.contains("{ \"detail-panel\": \"detail-body\", \"sdetail-panel\": \"sdetail-panel-body\" }"),
+        "showDetail body 推导缺 panelId 显式映射（detail-panel→detail-body / sdetail-panel→sdetail-panel-body）"
+    );
+    // 2) 渲染目标行：body 推导走映射表，不得直渲 panel 本体。
+    assert!(
+        UI_JS.contains("const body = $(detailBodyOf[panelId]) || panel;"),
+        "showDetail body 推导未走 detailBodyOf 映射"
+    );
+    // 3) 根因字面必须消失：`$(panelId + "-body") || panel` 拼接回落是炸
+    //    .detail-head 的根因（#detail-panel-body 不存在 → 回落 panel 本体）。
+    assert!(
+        !UI_JS.contains("$(panelId + \"-body\") || panel"),
+        "showDetail 仍保留 $(panelId+\"-body\")||panel 拼接回落（浏览侧炸头根因）"
+    );
+    // 4) index.html 浏览侧面板结构存活：#detail-panel 内 detail-head（含
+    //    × 关闭钮）在前、#detail-body 在后（静态字面近似 DOM 从属关系）。
+    let panel_at = UI_HTML
+        .find("id=\"detail-panel\"")
+        .expect("index.html 缺 #detail-panel");
+    let head_at = UI_HTML[panel_at..]
+        .find("class=\"detail-head\"")
+        .expect("#detail-panel 内缺 .detail-head × 静态头");
+    let close_at = UI_HTML[panel_at..]
+        .find("id=\"detail-close\"")
+        .expect("#detail-panel 内缺 #detail-close 关闭钮");
+    let body_at = UI_HTML[panel_at..]
+        .find("id=\"detail-body\"")
+        .expect("#detail-panel 内缺 #detail-body 内容容器");
+    assert!(
+        head_at < close_at && close_at < body_at,
+        "浏览侧详情面板结构漂移：.detail-head(×) 必须在 #detail-body 之前"
+    );
+}
+
 /// 分区展示 + 跨通道不混排（§6-R2）：通道名分区标题、记忆行三字段
 /// （content 截断 + tags + score）esc 全覆盖、资产行模板零记忆字段、
 /// 双通道结果不合并数组（各自内部排序不变）。
@@ -955,4 +1085,164 @@ fn t03_sort_dom_and_style_parity() {
             "styles-v3.css 缺排序指示样式：{needle}"
         );
     }
+}
+
+// ── M10-WP02-T02：记忆详情联动展开 + 复制静态契约（SPEC §2.2）——行点击
+// 展开 tr.mem-detail：完整 content / tags 全列 / metadata pretty JSON /
+// 完整 memory_id / created_ns 完整本地时间 / score 口径注记（store.rs
+// memory_search docstring：FTS = 匹配秩（-bm25），LIKE·精确路径恒 1.0）；
+// esc 全覆盖；展开/收起不碰证明行、不清空列表；「验证」按钮
+// stopPropagation 隔离；复制经 navigator.clipboard.writeText + §6-R1
+// execCommand 回落 + 「已复制」1.5s 反馈回落。 ──
+
+/// 函数体切片（沿 t05 双指针判例：顶层 `function` / `async function` 取
+/// 先到者——切片恰含本函数，不吃进后继）。
+fn js_fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
+    let at = src.find(sig).unwrap_or_else(|| panic!("{sig} 必须存在"));
+    let seg = &src[at..];
+    let end = ["\nasync function ", "\nfunction "]
+        .iter()
+        .filter_map(|m| seg.find(m))
+        .min()
+        .unwrap_or(seg.len());
+    &seg[..end]
+}
+
+/// 详情行模板字段齐全（SPEC §2.2 字面）+ esc 全覆盖（无未转义插值）。
+#[test]
+fn t02_memory_detail_row_fields_and_esc_coverage() {
+    let body = js_fn_body(UI_JS, "function memDetailHtml(");
+    assert!(
+        !body.contains("esc(trunc(") && body.contains("${esc(m.content)}"),
+        "详情 content 必须完整透出（禁 trunc 截断）且经 esc"
+    );
+    assert!(
+        body.contains("esc(memTags(m.tags))"),
+        "详情 tags 必须全列（memTags 解析 + esc）"
+    );
+    assert!(
+        body.contains("JSON.stringify(JSON.parse(m.metadata), null, 2)"),
+        "metadata 必须 pretty-print JSON（2 空格缩进）"
+    );
+    assert!(
+        body.contains("${esc(m.memory_id)}"),
+        "memory_id 必须完整透出（禁 slice 截断）且经 esc"
+    );
+    assert!(
+        body.contains("timeFmt(m.created_ns)"),
+        "created_ns 必须完整本地时间展示"
+    );
+    assert!(
+        body.contains("匹配秩") && body.contains("恒 1.0"),
+        "score 必须带口径注记（FTS 全文 = 匹配秩（-bm25）/ LIKE·精确路径恒 1.0，store.rs:2281-2282 语义诚实透出）"
+    );
+    // esc 全覆盖：模板内全部 m.* 动态段禁裸插值（数字经 toFixed 格式化不入列）。
+    for banned in [
+        "${m.content}",
+        "${m.memory_id}",
+        "${m.tags}",
+        "${m.metadata}",
+        "${m.created_ns}",
+        "${m.origin_device}",
+        "${m.score}",
+    ] {
+        assert!(
+            !body.contains(banned),
+            "详情模板动态段必须经 esc/格式化包裹（无未转义插值）：{banned}"
+        );
+    }
+    // 详情行样式落地（R3：pretty JSON 区 break-all + max-height 滚动防撑爆）。
+    for needle in [".mem-detail td {", ".mem-detail-meta {", "max-height"] {
+        assert!(
+            UI_CSS.contains(needle),
+            "styles-v3.css 缺详情行样式：{needle}"
+        );
+    }
+}
+
+/// 展开/收起只动本行详情：不碰证明行、不重写列表 innerHTML、不重发检索
+/// （SPEC §2.2 硬约束「不得关闭既有证明行、不得清空列表」）；多行详情
+/// 并存允许（禁全局清理详情行）。
+#[test]
+fn t02_detail_expand_preserves_proof_rows_and_list() {
+    let body = js_fn_body(UI_JS, "function memToggleDetail(");
+    assert!(
+        body.contains("tr.className = \"mem-detail\";")
+            && body.contains("tr.dataset.detail = memoryId;"),
+        "详情行必须是 tr.mem-detail + data-detail 锚点（沿 .mem-proof 展开行判例）"
+    );
+    assert!(
+        body.contains("open.remove();"),
+        "再点已展开行必须只收起该行详情"
+    );
+    assert!(
+        !body.contains("mem-proof"),
+        "展开/收起不得触碰证明行（单开语义维持，SPEC §2.2 硬约束）"
+    );
+    assert!(
+        !body.contains("$(\"mem-rows\").innerHTML"),
+        "展开/收起不得重写列表 innerHTML（不清空列表，SPEC §2.2 硬约束）"
+    );
+    assert!(
+        !body.contains("loadMemories"),
+        "展开/收起不得重发检索（防展开态被打断，沿 M9-WP03-T02 判例）"
+    );
+    assert!(
+        !UI_JS.contains("querySelectorAll(\"tr.mem-detail\").forEach"),
+        "多行详情并存允许——禁止全局清理详情行"
+    );
+}
+
+/// 行点击与「验证」按钮事件隔离（SPEC §6-R4）：验证按钮 stopPropagation，
+/// 行点击接线 memToggleDetail。
+#[test]
+fn t02_row_click_and_verify_button_isolated() {
+    assert!(
+        UI_JS.contains(
+            "b.onclick = (ev) => { ev.stopPropagation(); memVerifyRow(b.dataset.mid, b); };"
+        ),
+        "「验证」按钮必须 stopPropagation 隔离（点击验证不得触发行详情展开）"
+    );
+    assert!(
+        UI_JS.contains("tr.onclick = () => memToggleDetail(tr.dataset.mid);"),
+        "记忆行点击必须接线 memToggleDetail（详情联动入口）"
+    );
+}
+
+/// 复制契约（SPEC §2.2 + §6-R1）：详情行内「复制内容」「复制 ID」两按钮
+/// → navigator.clipboard.writeText（webview 内建，零新增依赖）；API 不可
+/// 用 → execCommand 隐藏 textarea 回落；成功反馈 = 文案瞬变「已复制」
+/// 1.5s 回落；数据源为 memIndex 快照（不抄 DOM 展示文本）。
+#[test]
+fn t02_copy_via_clipboard_write_text_with_fallback_and_feedback() {
+    let body = js_fn_body(UI_JS, "function memCopyDetail(");
+    assert!(
+        UI_JS.contains("复制内容") && UI_JS.contains("复制 ID"),
+        "详情行必须提供「复制内容」「复制 ID」两复制按钮"
+    );
+    assert!(
+        body.contains("navigator.clipboard.writeText("),
+        "复制必须走 webview 内建 clipboard.writeText（零新增依赖）"
+    );
+    assert!(
+        UI_JS.contains("function execCopyFallback(")
+            && js_fn_body(UI_JS, "function execCopyFallback(")
+                .contains("document.execCommand(\"copy\")"),
+        "剪贴板 API 不可用/拒权必须 execCommand 隐藏 textarea 回落（SPEC §6-R1）"
+    );
+    assert!(
+        body.contains("已复制") && body.contains("1500"),
+        "成功反馈 = 按钮文案瞬变「已复制」+ 1.5s（setTimeout 1500ms）回落"
+    );
+    // 防重入（PR #166 对抗评审 F3）：1.5s 窗口内二次点击复制按钮，不得把
+    // 「已复制」捕获为回落 label + 双 setTimeout 竞争致永久停留「已复制」
+    // ——done() 必须 clearTimeout 旧 timer + dataset 持久保留原始 label。
+    assert!(
+        body.contains("clearTimeout(") && body.contains("dataset.copyLabel"),
+        "复制反馈必须防重入：clearTimeout 旧 timer + dataset.copyLabel 持久保留原始 label"
+    );
+    assert!(
+        body.contains("memIndex.get(memoryId)"),
+        "复制数据源必须是 memIndex 命中快照（不抄 DOM 展示文本）"
+    );
 }

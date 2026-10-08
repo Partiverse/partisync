@@ -26,8 +26,17 @@
 
 ## 验收
 
-- [ ] 静态探针：命中卡 click → showDetail(h.content_id, h.filename)
-      接线断言 + 结果列表保留断言；
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP01-T03-*.png`（点开一张
-      命中卡的详情面板，结果列表同框在镜）；
-- [ ] fmt/clippy/test 绿；改动仅限本卡范围。
+- [x] 静态探针：命中卡 click → showDetail(h.content_id, h.filename)
+      接线断言 + 结果列表保留断言（`t03_hit_card_click_wires_show_detail_and_keeps_results`）；
+- [x] GUI 实操截图 `docs/screenshots/M10-WP01-T03-*.png`（点开一张
+      命中卡的详情面板，结果列表同框在镜）——2026-10-05 补验通过：
+      真实实例（--data-dir 隔离语料，检索 `test` 6 hits）实测命中卡
+      点击 → 详情面板（filename 标题/大小/副本数/指纹色/副本路径/
+      [×] 关闭）+ 结果列表 6 卡原样保留；[×] 关闭后结果原样可继续
+      点击；快速连点两卡并发守卫生效（面板最终显示末次点击卡）。
+      证据：`M10-WP01-T03-search-detail-linkage.png`（详情+结果同框）、
+      `M10-WP01-T03-detail-closed-results-kept.png`（关闭后结果保留）。
+      前史：首轮验证遇会话无人值守 + Stage Manager 窗口塌缩（210×141@
+      负坐标）不可操控，曾按规则挂「待 GUI 验证」；会话恢复后补验解除。
+- [x] fmt/clippy/test 绿（`mcp_call_real_sidecar_ext_list` 为 main 既有
+      环境依赖失败，stash 基线同败，与本卡零接触面）；改动仅限本卡范围。

@@ -88,7 +88,16 @@
          app-core-v3.js 从命中集 filename 派生渲染（大小写归一；无扩展名/
          孤儿行归「(无)」）；点击仅客户端过滤已渲染命中，不重发查询。 -->
     <div id="filter-chips" class="chips" role="group" aria-label="按扩展名过滤"></div>
-    <div id="srows" class="hits"></div>
+    <!-- M10-WP01-T03：结果-详情联动双栏——命中卡点击经既有 asset_detail
+         IPC 渲详情进 #sdetail-panel（动态区 #sdetail-panel-body）；关闭按钮
+         只隐藏面板，#srows 不重写（硬约束：点击不清空结果列表） -->
+    <div class="s-stage">
+      <div id="srows" class="hits"></div>
+      <aside id="sdetail-panel" class="detail" style="display:none">
+        <button id="sdetail-close" class="btn ghost sdetail-close" aria-label="关闭详情">[×] 关闭</button>
+        <div id="sdetail-panel-body"></div>
+      </aside>
+    </div>
   </section>
 
   <!-- 记忆（M9-WP03-T02：可验证记忆层浏览面板；经 mcp_call 透传

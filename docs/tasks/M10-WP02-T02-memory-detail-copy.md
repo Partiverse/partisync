@@ -32,9 +32,29 @@ id 不可复制（MCP 工具联调只能开 DevTools 抄 data 属性）。
 
 ## 验收
 
-- [ ] 静态探针：详情模板字段齐全（含 score 口径注记）+ esc 全覆盖 +
+- [x] 静态探针：详情模板字段齐全（含 score 口径注记）+ esc 全覆盖 +
       展开不关证明行/不清列表 + 行点击与验证按钮事件隔离 + 复制经
-      clipboard.writeText + 反馈回落；
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T02-*.png`（详情展开 +
-      复制粘贴到别处验证内容/ID 一致）；
-- [ ] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖。
+      clipboard.writeText + 反馈回落——`t02_memory_detail_row_fields_and_esc_coverage`
+      + `t02_detail_expand_preserves_proof_rows_and_list` +
+      `t02_row_click_and_verify_button_isolated` +
+      `t02_copy_via_clipboard_write_text_with_fallback_and_feedback`
+      全绿（2026-10-06 本地实测，先红后绿：实现前 4 探针全红，实现后
+      ui_hardening 21/21）；
+- [x] GUI 实操截图 `docs/screenshots/M10-WP02-T02-*.png`（详情展开 +
+      复制粘贴到别处验证内容/ID 一致）——**✅ GUI 实操验证通过
+      （2026-10-07 解锁窗口补验）**：2026-10-06 首验因主机锁屏实操不可得
+      （PR 曾打 label「待 GUI 验证」），2026-10-07 解锁后以 AX（AXPress）
+      操控本分支重建实例五步全过：① 记忆 tab 5/5 条、>90 字行列表「…」
+      截断；② 详情行完整透出（content 无截断/metadata pretty JSON/完整
+      64-hex id/score 口径注记）；③ 复制内容→「已复制」反馈 +
+      `pbpaste` 与库内 content 逐字节一致（191 字/401 字节）；④ 复制
+      ID→`pbpaste` = 完整 64 hex；⑤ 验证→证明行（root e167fe58…=
+      banner 承诺根）与详情共存，再点行详情收起、证明行与列表原样。
+      五帧归档 docs/screenshots/（list-truncated / detail-expand /
+      copy-feedback / verify-proof-coexist / collapsed-proof-intact）；
+- [x] fmt/clippy/test 绿（2026-10-06：`cargo fmt --all --check` ✅ /
+      `cargo clippy --workspace --all-targets -- -D warnings` ✅ /
+      `cargo test --workspace` ✅ exit 0）；改动仅限本卡范围
+      （app-core-v3.js / styles-v3.css / ui_hardening.rs / 本卡 / SPEC §3
+      回填；index.html 未触碰——T02 无需 HTML 结构变更）；零新增顶层
+      依赖（剪贴板走 webview 内建 navigator.clipboard + execCommand 回落）。
