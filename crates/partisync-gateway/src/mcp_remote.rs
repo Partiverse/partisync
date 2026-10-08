@@ -440,9 +440,11 @@ impl TokenValidator {
         let key = DecodingKey::from_jwk(jwk).map_err(|_| "invalid jwk")?;
         // ④ 验签 + iss/aud(RFC 8707)/exp + required claims 全 fail-closed
         //    （`aud`/`iss` 仅在 claim 存在时才校验，故 required 钉死三者，
-        //    防「缺 claim 绕过受众绑定」）。
+        //    防「缺 claim 绕过受众绑定」）。Validation 锁定 header.alg 单
+        //    算法——jsonwebtoken 要求 allowlist 与 verifier 同族（decoding.rs
+        //    verify_signature_body 逐项 family 断言），config 级跨族 allowlist
+        //    由步骤①先行门控，两层叠加等价白名单语义。
         let mut validation = Validation::new(header.alg);
-        validation.algorithms = self.algorithms.clone();
         validation.set_issuer(&[trusted.issuer.as_str()]);
         validation.set_audience(&[self.audience.as_str()]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
