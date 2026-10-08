@@ -234,3 +234,18 @@ CREATE TABLE IF NOT EXISTS memory_root (
     memory_count INTEGER NOT NULL,
     updated_ns   INTEGER NOT NULL
 );
+
+-- v18（M10-WP04-T04，NB5 债清偿）：CAS chunk hash 清单持久化——
+-- content→bytes 可重组的数据源（P22，M9-WP03-T06 登记：put_chunks 返回的
+-- hash 列表此前被丢弃，大文件 CAS 不可重组）。content_id 粒度：同 content
+-- 多 entry 共享行集（写入幂等 INSERT OR IGNORE）；seq = 分块序（升序重组）。
+-- ON DELETE CASCADE（对抗评审 2026-10-07）：清单是 content 派生数据，父行
+-- 被既有清理面删除（remove_entry 孤儿清理 store.rs:627 / add_entry 换内容
+-- store.rs:466）时随行级联清——无级联时 FK 787 炸掉删除路径（t04
+-- 回归探针 t04_chunked_content_cleanup_survives_manifest_fk 锁定）。
+CREATE TABLE IF NOT EXISTS content_chunk (
+    content_id TEXT NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+    seq        INTEGER NOT NULL,
+    chunk_hash TEXT NOT NULL,
+    PRIMARY KEY (content_id, seq)
+);

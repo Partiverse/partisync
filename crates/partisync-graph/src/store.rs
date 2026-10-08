@@ -77,6 +77,15 @@ pub struct OplogRow {
     pub at_ns: i64,
 }
 
+/// 记忆 GC 报告（M10-WP04 §2.1 T03，任务卡 `GcReport` 形态）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MemoryGcReport {
+    /// 物理清除的过保留期墓碑行数。
+    pub purged: u64,
+    /// GC 后残余墓碑数（保留期内墓碑 + 无法定年的 NULL `hlc` 墓碑）。
+    pub remaining_tombstones: u64,
+}
+
 /// 远端条目应用结果（M2-WP02）：`path` 为最终落位；
 /// `conflict = Some` 表示触发「保留两者」改挂（P11 血缘由 session 落档）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +181,9 @@ pub struct FileInsert {
     pub mtime_ns: u64,
     pub content: Option<(String, u64)>,
     pub chunk_root: Option<String>,
+    /// v18（M10-WP04-T04，P22-a）：chunk hash 清单（分块序），与 entry 同事务
+    /// 落 content_chunk（INSERT OR IGNORE，content_id 粒度幂等）；小文件为空。
+    pub chunk_hashes: Vec<String>,
 }
 
 impl Store {
@@ -654,6 +666,20 @@ impl Store {
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| db_err("批量登记内容", e))?;
+                // v18（M10-WP04-T04，P22-a）：chunk 清单与 entry 同事务落表
+                // （INSERT OR IGNORE——同 content 多 entry 共享行集，写入幂等）。
+                for (seq, h) in f.chunk_hashes.iter().enumerate() {
+                    sqlx::query(
+                        "INSERT OR IGNORE INTO content_chunk (content_id, seq, chunk_hash) \
+                         VALUES (?, ?, ?)",
+                    )
+                    .bind(hash)
+                    .bind(i64::try_from(seq).unwrap_or(i64::MAX))
+                    .bind(h)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| db_err("批量落 chunk 清单", e))?;
+                }
             }
             let id: String = sqlx::query_scalar(
                 "INSERT INTO entry (id, parent_id, kind, name, path, content_id, size, mtime_ns, chunk_root, owner_device)
@@ -2097,10 +2123,49 @@ impl Store {
         let tags_c = canonical_tags(tags);
         let meta_c = canonical_json(metadata);
         let id = memory_identity(content, &tags_c, &meta_c);
-        if self.memory_by_id(&id).await?.is_some() {
+        if let Some(row) = self.memory_by_id(&id).await? {
+            if row.deleted == 0 {
+                return Ok(MemoryWriteOutcome {
+                    memory_id: id,
+                    deduplicated: true,
+                });
+            }
+            // 复活语义（M10-WP04 §2.1）：同 id 命中墓碑 → deleted=0 + hlc
+            // 推进 + 根刷新，返回 deduplicated=false。簿记（created_ns/
+            // origin_device）保留原行 ⇒ 叶不变，复活前后根值不变；oplog 走
+            // 既有 ("memory","upsert") 臂，对端经 LWW 胜者清墓碑（见
+            // [`Store::apply_remote_memory`]）。
+            let origin = self.device_id().await?;
+            let payload = serde_json::json!({
+                "memory_id": row.memory_id,
+                "content": row.content,
+                "content_hash": row.content_hash,
+                "tags": row.tags,
+                "metadata": row.metadata,
+                "created_ns": row.created_ns,
+                "origin_device": row.origin_device,
+            });
+            let key = self
+                .record_oplog(
+                    "default",
+                    1,
+                    "memory",
+                    &id,
+                    "upsert",
+                    &origin,
+                    &payload.to_string(),
+                )
+                .await?;
+            sqlx::query("UPDATE memory SET deleted = 0, hlc = ? WHERE memory_id = ?")
+                .bind(&key)
+                .bind(&id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("复活 memory", e))?;
+            self.refresh_memory_root().await?;
             return Ok(MemoryWriteOutcome {
                 memory_id: id,
-                deduplicated: true,
+                deduplicated: false,
             });
         }
         let origin = self.device_id().await?;
@@ -2159,10 +2224,169 @@ impl Store {
             .map_err(|e| db_err("查 memory", e))
     }
 
+    /// 软删除一条记忆（M10-WP04 §2.1）：deleted=1 + 行 hlc 推进到本笔
+    /// ("memory","delete") oplog 键（同笔调用内完成——oplog 先行，沿
+    /// [`Store::memory_write`] 崩溃窗口判例：重放/远端应用幂等）+ 根快照
+    /// 刷新。**墓碑行留在承诺集——软删除不改根值**（叶编码不含 deleted/
+    /// hlc，ADR-0029 修订登记拍板：透明日志语义，被删记忆仍可出示
+    /// inclusion proof 防删史）。已墓碑再删 = 幂等 no-op（不产 oplog、
+    /// 不推水位）。
+    ///
+    /// # Errors
+    /// 目标不存在 → Fatal（不静默）；device 未登记 / DB 错误 → Fatal。
+    pub async fn memory_delete(&self, memory_id: &str) -> Result<(), PartisyError> {
+        let row = self
+            .memory_by_id(memory_id)
+            .await?
+            .ok_or_else(|| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("memory_delete 目标不存在: {memory_id}").into()),
+            })?;
+        if row.deleted != 0 {
+            return Ok(());
+        }
+        let origin = self.device_id().await?;
+        let payload = serde_json::json!({ "memory_id": memory_id });
+        let key = self
+            .record_oplog(
+                "default",
+                1,
+                "memory",
+                memory_id,
+                "delete",
+                &origin,
+                &payload.to_string(),
+            )
+            .await?;
+        sqlx::query("UPDATE memory SET deleted = 1, hlc = ? WHERE memory_id = ?")
+            .bind(&key)
+            .bind(memory_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("墓碑 memory", e))?;
+        self.refresh_memory_root().await?;
+        Ok(())
+    }
+
+    /// 更新一条记忆（M10-WP04 §2.1）：id 内容寻址 ⇒ 更新必换身份——同笔
+    /// 调用内墓碑旧 id（delete op，见 [`Store::memory_delete`]）+ 写入新行
+    /// （新 id 由新 canonical 内容派生，沿 [`Store::memory_write`] 落库），
+    /// 单次根刷新收尾（根为派生值，P20-c）。canonical 等价（新 id == 旧
+    /// id）→ no-op 返回原 id（deduplicated=true，行数/根/hlc 均不变）。
+    /// 目标不存在或已墓碑 → 显式错误（不静默建行；墓碑复活走
+    /// [`Store::memory_write`]）。新 id 已有活行时不重复建行——旧 id 仍
+    /// 墓碑，更新收束到既有行（deduplicated=false：状态已变更）。
+    ///
+    /// # Errors
+    /// metadata 非 JSON object / 目标不存在或已墓碑 / device 未登记 /
+    /// DB 错误 → Fatal。
+    pub async fn memory_update(
+        &self,
+        memory_id: &str,
+        content: &str,
+        tags: &[String],
+        metadata: &Value,
+    ) -> Result<MemoryWriteOutcome, PartisyError> {
+        if !metadata.is_object() {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some("memory metadata 必须为 JSON object".into()),
+            });
+        }
+        let row = self
+            .memory_by_id(memory_id)
+            .await?
+            .ok_or_else(|| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("memory_update 目标不存在: {memory_id}").into()),
+            })?;
+        if row.deleted != 0 {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("memory_update 目标已墓碑: {memory_id}").into()),
+            });
+        }
+        let tags_c = canonical_tags(tags);
+        let meta_c = canonical_json(metadata);
+        let new_id = memory_identity(content, &tags_c, &meta_c);
+        if new_id == memory_id {
+            return Ok(MemoryWriteOutcome {
+                memory_id: new_id,
+                deduplicated: true,
+            });
+        }
+        // ① 墓碑旧 id（oplog 先行，同 memory_delete 判例；根刷新收尾单次）
+        let origin = self.device_id().await?;
+        let del_payload = serde_json::json!({ "memory_id": memory_id });
+        let del_key = self
+            .record_oplog(
+                "default",
+                1,
+                "memory",
+                memory_id,
+                "delete",
+                &origin,
+                &del_payload.to_string(),
+            )
+            .await?;
+        sqlx::query("UPDATE memory SET deleted = 1, hlc = ? WHERE memory_id = ?")
+            .bind(&del_key)
+            .bind(memory_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("墓碑 memory", e))?;
+        // ② 写入新行（活行已存在则不重复建；oplog 先行同 memory_write 判例）
+        if self.memory_by_id(&new_id).await?.is_none() {
+            let payload = serde_json::json!({
+                "memory_id": new_id,
+                "content": content,
+                "content_hash": content_digest(content),
+                "tags": tags_c,
+                "metadata": meta_c,
+                "created_ns": self.now_ns(),
+                "origin_device": origin,
+            });
+            let key = self
+                .record_oplog(
+                    "default",
+                    1,
+                    "memory",
+                    &new_id,
+                    "upsert",
+                    &origin,
+                    &payload.to_string(),
+                )
+                .await?;
+            sqlx::query(
+                "INSERT INTO memory
+                    (memory_id, content, content_hash, tags, metadata, created_ns, origin_device, hlc, deleted)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            )
+            .bind(&new_id)
+            .bind(content)
+            .bind(content_digest(content))
+            .bind(&tags_c)
+            .bind(&meta_c)
+            .bind(payload["created_ns"].as_i64().unwrap_or(0))
+            .bind(&origin)
+            .bind(&key)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("写 memory", e))?;
+        }
+        self.refresh_memory_root().await?;
+        Ok(MemoryWriteOutcome {
+            memory_id: new_id,
+            deduplicated: false,
+        })
+    }
+
     /// 应用远端 memory upsert（SPEC M9-WP02 §2.5）：共享域 HLC LWW，
     /// 行 `hlc` ≥ 来键即落选（沿 [`Store::apply_remote_tag`] 判例）。
-    /// 应用成功即重算根快照——叶含 created_ns/origin_device，LWW 胜者行
-    /// 双端一致 ⇒ 根收敛（hlc 不进叶，应用侧簿记不影响承诺）。
+    /// 更新胜出即清墓碑（deleted=0，M10-WP04 §2.1 复活传播面）；晚到
+    /// upsert（键早于墓碑水位）由 LWW 前置拒绝。应用成功即重算根快照
+    /// ——叶含 created_ns/origin_device，LWW 胜者行双端一致 ⇒ 根收敛
+    /// （hlc/deleted 不进叶，应用侧簿记不影响承诺）。
     ///
     /// # Errors
     /// DB 错误 → Fatal。
@@ -2186,7 +2410,7 @@ impl Store {
             sqlx::query(
                 "UPDATE memory
                  SET content = ?, content_hash = ?, tags = ?, metadata = ?,
-                     created_ns = ?, origin_device = ?, hlc = ?
+                     created_ns = ?, origin_device = ?, hlc = ?, deleted = 0
                  WHERE memory_id = ?",
             )
             .bind(content)
@@ -2218,6 +2442,36 @@ impl Store {
             .await
             .map_err(|e| db_err("应用远端 memory", e))?;
         }
+        self.refresh_memory_root().await?;
+        Ok(true)
+    }
+
+    /// 应用远端 memory delete（M10-WP04 §2.1 同步臂）：delete hlc > 行
+    /// 水位 → 墓碑落位（deleted=1 + hlc 推进 + 根刷新——根值不变，叶不含
+    /// deleted）；行 `hlc` ≥ 来键即晚到拒绝（沿 [`Store::apply_remote_tag`]
+    /// LWW 水位拒晚到判例）。本地无此行（未见过该写/已 GC 重放）→ 无可
+    /// 墓碑化，按已见跳过（不建行——delete payload 恰含 memory_id，无内容
+    /// 可落）。返回是否实际生效（落选/已见 = false，session 据此不转发）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn apply_remote_memory_delete(
+        &self,
+        memory_id: &str,
+        hlc_key: &str,
+    ) -> Result<bool, PartisyError> {
+        let Some(row) = self.memory_by_id(memory_id).await? else {
+            return Ok(false);
+        };
+        if row.hlc.as_deref().is_some_and(|h| h >= hlc_key) {
+            return Ok(false);
+        }
+        sqlx::query("UPDATE memory SET deleted = 1, hlc = ? WHERE memory_id = ?")
+            .bind(hlc_key)
+            .bind(memory_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("应用远端 memory 墓碑", e))?;
         self.refresh_memory_root().await?;
         Ok(true)
     }
@@ -2411,6 +2665,8 @@ impl Store {
 
     /// 可验证性全检（SPEC §2.4 `memory_verify` 语义）：快照根 vs 全量重算根 +
     /// 逐行 content_hash 列级校验（P20-c：篡改/损坏报不一致，不静默通过）。
+    /// memory_count 口径 = 含墓碑承诺集规模（P20 措辞注记，M10-WP04 §2.1），
+    /// 墓碑计数经 `tombstones` 诚实透出。
     ///
     /// # Errors
     /// DB 错误 → Fatal。
@@ -2432,15 +2688,165 @@ impl Store {
             snapshot_root: snapshot.map(|s| s.root),
             recomputed_root,
             memory_count: rows.len(),
+            tombstones: rows.iter().filter(|r| r.deleted != 0).count(),
             ok: root_ok && content_mismatches.is_empty(),
             content_mismatches,
         })
+    }
+
+    /// 记忆 GC（M10-WP04 §2.1 T03 硬清除）：物理删除「墓碑行 hlc 早于截止
+    /// 水位」的行。判据 = 行 `hlc`（delete op 水位，定宽 hex 字典序=时间序，
+    /// [`Store::apply_remote_tag`] 同口径）；截止水位 = 本地时钟 now − 保留期
+    /// （默认 30 天，CLI `--retention-days N`），device 位取 0 ⇒ 同毫秒并列
+    /// 键排序在先，边界墓碑保守保留。清除即**动根**（与软删不动根对照）：
+    /// purged>0 时重算根快照（根为派生值 P20-c，崩溃后重算即恢复）+
+    /// memory_count 更新；purged=0 零状态变化（不产 oplog、不建/不动快照
+    /// 行）——GC 为本地维护动作，墓碑 op 已传播，不产 oplog（§2.1）。FTS
+    /// 随 AFTER DELETE 触发器自动清（v17 防御段 memory_fts_ad）。
+    /// `hlc` 为 NULL 的行正常写路径不产生（全部落笔臂均回填水位），若存在
+    /// 则无法定年，保守保留。§6-R2 复活边界（诚实登记）：GC 后离线旧端
+    /// 重放墓碑前 upsert 可致行复活（行已缺失无从比对 hlc）——运行口径
+    /// 保留期 ≥ 多端收敛窗口；彻底方案（墓碑 op 水位比对）挂 ADR-0029
+    /// 修订评估（条件触发）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn memory_gc(&self, retention_days: u32) -> Result<MemoryGcReport, PartisyError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let retention_ms = u64::from(retention_days).saturating_mul(86_400_000);
+        let cutoff =
+            partisync_core::Hlc::from_wall(0, now_ms.saturating_sub(retention_ms)).to_key();
+        let result =
+            sqlx::query("DELETE FROM memory WHERE deleted != 0 AND hlc IS NOT NULL AND hlc < ?")
+                .bind(&cutoff)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("memory gc", e))?;
+        let purged = result.rows_affected();
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM memory WHERE deleted != 0")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| db_err("memory gc 计数", e))?;
+        if purged > 0 {
+            self.refresh_memory_root().await?;
+        }
+        Ok(MemoryGcReport {
+            purged,
+            remaining_tombstones: u64::try_from(remaining).unwrap_or(u64::MAX),
+        })
+    }
+
+    /// v18（M10-WP04-T04，NB5）chunk 清单读出：`content_chunk` 按 seq 升序的
+    /// chunk_hash 列表（P22-a/b 的数据源面）。空清单 = 存量数据（v18 落表前
+    /// 入库，清单从未持久化，**不可回填**——reindex 侧诚实计 read_errors）。
+    ///
+    /// # Errors
+    /// DB 错误 → Fatal。
+    pub async fn content_chunk_hashes(
+        &self,
+        content_id: &str,
+    ) -> Result<Vec<String>, PartisyError> {
+        sqlx::query_scalar(
+            "SELECT chunk_hash FROM content_chunk WHERE content_id = ? ORDER BY seq ASC",
+        )
+        .bind(content_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("content_chunk 读出", e))
+    }
+
+    /// CAS 内容重组读出（M10-WP04 §2.2）：按 [`Store::content_chunk_hashes`]
+    /// 清单逐块取块拼接，随后双校验——`blake3(拼接) == content_id`（P22-b）
+    /// 且 `chunk_root(list) == expected_chunk_root`（P22-a 对账，caller 传
+    /// entry.chunk_root；None 跳过）。**任一块 CAS 缺失 / 清单缺失（存量数据
+    /// 不可回填）/ 任一校验不过 → 显式 Err，绝不返回部分字节**（P22-c）。
+    ///
+    /// # Errors
+    /// 清单缺失/块缺失/校验败 → Fatal（数据完整性，重试无意义）；DB/CAS
+    /// IO 错误透传原分类。
+    pub async fn reassemble_content(
+        &self,
+        cas: &partisync_cas::ChunkStore,
+        content_id: &str,
+        expected_chunk_root: Option<&str>,
+    ) -> Result<Vec<u8>, PartisyError> {
+        let hashes = self.content_chunk_hashes(content_id).await?;
+        if hashes.is_empty() {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!("内容 {content_id} 无 chunk 清单（存量数据，v18 前入库不可回填）")
+                        .into(),
+                ),
+            });
+        }
+        // 防御纵深（对抗评审 2026-10-07）：清单行只应含 put_chunks 的 hex
+        // 输出，但行可能被篡改——非法 hash 不得喂给 CAS object_path
+        // （<2 字节触发 `&hash[..2]` 切片 panic；含 `/`/`..` 可路径穿越读）。
+        if let Some(bad) = hashes.iter().position(|h| !is_blake3_hex(h)) {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!("内容 {content_id} 清单行 seq={bad} 非法 hash（非 64 位小写 hex）")
+                        .into(),
+                ),
+            });
+        }
+        let mut bytes = Vec::new();
+        for (seq, h) in hashes.iter().enumerate() {
+            match cas.get(h).await {
+                Ok(chunk) => bytes.extend_from_slice(&chunk),
+                Err(e) => {
+                    return Err(PartisyError {
+                        severity: Severity::Fatal,
+                        source: Some(
+                            format!("内容 {content_id} 重组缺块 seq={seq} hash={h}: {e}").into(),
+                        ),
+                    });
+                }
+            }
+        }
+        let digest = partisync_cas::content_hash(&bytes);
+        if digest != content_id {
+            return Err(PartisyError {
+                severity: Severity::Fatal,
+                source: Some(
+                    format!("内容 {content_id} 重组校验败：blake3(拼接)={digest} != content_id")
+                        .into(),
+                ),
+            });
+        }
+        if let Some(expected) = expected_chunk_root {
+            let refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+            let root = partisync_cas::chunk_root(&refs);
+            if root != expected {
+                return Err(PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(
+                        format!(
+                            "内容 {content_id} 清单对账败：chunk_root(list)={root} != entry.chunk_root={expected}"
+                        )
+                        .into(),
+                    ),
+                });
+            }
+        }
+        Ok(bytes)
     }
 }
 
 /// 32 字节 → hex（64 字符小写）。
 fn hex32(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// blake3 hex 输出形态校验：恒 64 字符小写十六进制（v18 content_chunk
+/// 清单行防御校验，对抗评审 2026-10-07——清单行直通 CAS object_path，
+/// 非法形态必须在重组入口拦下）。
+fn is_blake3_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 use std::str::FromStr as _;

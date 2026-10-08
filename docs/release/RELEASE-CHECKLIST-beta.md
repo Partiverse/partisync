@@ -33,6 +33,12 @@
       复测 `/by-hash` vs 目录透传（断言 cas ≤ max(3×dir, 50ms)）+
       顺序读基线对照（M8-WP01-bench §1 1567 MiB/s 口径）；报告落
       docs/reviews/
+      （**M10-WP06 窗口注记** 2026-10-08：本项改挂 M10-WP06 复测
+      窗口执行，触发条件 = Linux 台架可得，不随 rc 发布窗口强制；
+      非阻塞依据 = 读路径自 M8 未改 + 热缓存无算法性劣化
+      （M8-WP07-bench §2/§3）+ M8 冷基线 1567 MiB/s 维持
+      （M9-WP06-T03 报告 §3-2 原依据）——SPEC
+      docs/specs/M10-WP06.md §2.2）
 - [ ] B2 门禁全绿：`cargo fmt --all --check && cargo clippy --workspace
       --all-targets -- -D warnings && cargo test --workspace`
 - [ ] B3 tag（**确认后执行**）：`git tag -a v0.1.0-beta -m "v0.1.0-beta"

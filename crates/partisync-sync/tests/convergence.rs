@@ -261,6 +261,7 @@ async fn batch_indexed_entries_capture_local_origin() {
         mtime_ns: 1,
         content: Some(("HB".to_string(), 10)),
         chunk_root: None,
+        chunk_hashes: Vec::new(),
     }])
     .await
     .unwrap();

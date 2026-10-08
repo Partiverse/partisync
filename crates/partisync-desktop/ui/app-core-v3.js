@@ -96,9 +96,66 @@ function fpOf(contentId) {
   return `hsl(${h} 55% 55%)`;
 }
 
+// M10-WP03-T03（SPEC §2.3）：表头客户端排序——名称/大小/修改时间三列
+// 可排（内容身份列除外）；null = 服务端序（children() 返回序，ipc.rs:90-96）。
+// 点击循环 升序 → 降序 → 回服务端序；键相同时目录行（kind=1）恒在文件行前
+// （次级键 kind 降序，文件管理器惯例）；换目录（面包屑/目录行导航）重置
+// 排序态（沿 M10-WP02 T01「新检索重置」判例）。children() 无分页、全量
+// 返回该目录条目——排序作用于全集，无「窗口序」误读面。
+let sortKey = null;
+let sortDir = 1; // 1 = 升序，-1 = 降序
+let lastRows = []; // 最近一次 list 快照（服务端序）；排序点击重渲不重发 IPC
+
+function cycleSort(key) {
+  if (sortKey !== key) { sortKey = key; sortDir = 1; }
+  else if (sortDir === 1) sortDir = -1;
+  else { sortKey = null; sortDir = 1; } // 第三点回服务端序
+  renderSortArrows();
+  renderRows();
+}
+
+// 箭头指示：当前键 ▲/▼ 标方向 + th aria-sort 同步；先全清再设（键切换/
+// 回默认不残留旧指示）；无排序态 = 全空。
+function renderSortArrows() {
+  document.querySelectorAll("#view-browse th[data-sort]").forEach((th) => th.removeAttribute("aria-sort"));
+  document.querySelectorAll("#view-browse .sort-arrow").forEach((s) => { s.textContent = ""; });
+  if (!sortKey) return;
+  const th = document.querySelector(`#view-browse th[data-sort="${sortKey}"]`);
+  const arrow = document.querySelector(`#view-browse .sort-arrow[data-key="${sortKey}"]`);
+  if (th) th.setAttribute("aria-sort", sortDir === 1 ? "ascending" : "descending");
+  if (arrow) arrow.textContent = sortDir === 1 ? "▲" : "▼";
+}
+
+// 排序作用于 lastRows 全量副本（不 mutate 服务端序快照）；kind 比较
+// 不乘 dir——目录恒在文件前，升降序双向成立。
+function sortedRows() {
+  if (!sortKey) return lastRows;
+  const dir = sortDir;
+  return [...lastRows].sort((a, b) => {
+    if ((a.kind ?? 0) !== (b.kind ?? 0)) return (b.kind ?? 0) - (a.kind ?? 0);
+    let c;
+    if (sortKey === "name") c = String(a.name ?? "").localeCompare(String(b.name ?? ""), "zh-CN");
+    else if (sortKey === "size") c = (a.size ?? 0) - (b.size ?? 0);
+    else c = (a.mtime_ns ?? 0) - (b.mtime_ns ?? 0);
+    return c * dir;
+  });
+}
+
+// mtime 相对显示（SPEC §2.3）：≤30 天复用既有 relTime；>30 天回落绝对
+// 日期（本卡自含实现，不依赖 M10-WP02-T03 落地顺序）；缺失/0 → 既有
+// 「—」回落（timeFmt 判据）。title 悬浮 = timeFmt 完整本地时间（见行模板）。
+function mtimeDisp(ns) {
+  if (!ns) return "—";
+  const ageS = Math.max(0, (Date.now() - ns / 1e6) / 1000);
+  return ageS > 30 * 86400 ? new Date(ns / 1e6).toLocaleDateString("zh-CN") : relTime(ns);
+}
+
 async function browse(path) {
-  curPath = path || "/";
+  const next = path || "/";
+  if (next !== curPath) { sortKey = null; sortDir = 1; renderSortArrows(); } // 换目录重置排序态
+  curPath = next;
   const rows = await call("list", { prefix: curPath });
+  lastRows = rows;
   const crumbs = breadcrumbFor(curPath);
   $("crumbs").innerHTML = crumbs.map((e, i) =>
     i === crumbs.length - 1
@@ -108,12 +165,19 @@ async function browse(path) {
   $("crumbs").querySelectorAll("a[data-path]").forEach(a => {
     a.onclick = () => browse(a.dataset.path);
   });
+  renderRows();
+}
+
+// 行渲染（自 browse 拆出，供排序点击重渲与 5s 轮询刷新共用）；空态文案
+// 维持原文不动（SPEC §2.3「空态不回退」）。
+function renderRows() {
+  const rows = sortedRows();
   $("rows").innerHTML = rows.length ? rows.map(e => {
     const dir = e.kind === 1;
     return `<tr class="${dir ? "row-dir" : "row-file"}"${dir ? ` data-path="${esc(e.path)}" style="cursor:pointer"` : ` data-cid="${esc(e.content_id)}" data-name="${esc(e.name)}" style="cursor:pointer"`}${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>
       <td class="icon" aria-hidden="true">${dir ? "▸" : "·"}</td>
       <td>${esc(e.name)}</td><td class="size">${dir ? "—" : sizeFmt(e.size)}</td>
-      <td class="mtime">${timeFmt(e.mtime_ns)}</td>
+      <td class="mtime" title="${esc(timeFmt(e.mtime_ns))}">${mtimeDisp(e.mtime_ns)}</td>
       <td class="fp"${e.content_id ? ` style="--fp: ${fpOf(e.content_id)}"` : ""}>${e.content_id ? "<i></i>" + esc(e.content_id.slice(0, 8)) : "—"}</td></tr>`;
   }).join("") : `<tr><td colspan="5" class="empty">${curPath === "/" ? "本机还没有索引文件——运行 <b>partisync index &lt;路径&gt;</b> 开始建立索引" : "空目录"}</td></tr>`;
   $("rows").querySelectorAll("tr[data-path]").forEach(tr => {
@@ -125,35 +189,122 @@ async function browse(path) {
   });
 }
 
-// ── B2. 条目详情面板（M8-WP05-T02；SPEC §2.2） ──
-async function showDetail(contentId, name) {
+// ── B2. 条目详情面板（M8-WP05-T02；M10-WP03-T02 关闭/补全/复制，SPEC §2.2） ──
+// 关闭（硬约束）：display:none + 内容清空；不清空/重载浏览列表（#rows 零
+// 触碰）、零重发查询（函数体无查询站点）；再点行重开沿既有行 onclick →
+// showDetail。× 按钮为 index.html 静态头（innerHTML 重写不丢）；加载中途
+// 关闭 → 回包弃渲（可见性门控，不回填已关面板）。
+function closeDetail() {
   const panel = $("detail-panel");
+  panel.style.display = "none";
+  $("detail-body").innerHTML = "";
+}
+
+// Esc 关闭（§7-R4）：仅面板可见时生效；输入框聚焦时直接交还（INPUT/
+// TEXTAREA 不拦截，保输入框原生 Esc 语义），不抢焦点语义。
+function escClose(e) {
+  if (e.key !== "Escape") return;
+  const panel = $("detail-panel");
+  if (panel.style.display === "none") return;
+  const tag = e.target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+  closeDetail();
+}
+
+// 复制（沿 M10-WP02 §2.2 契约）：webview 内建 navigator.clipboard.writeText
+// （零新增依赖）；API 不可用/拒权 → 隐藏 textarea + execCommand 回落
+// （§7-R2 实现期拍板）。成功反馈 = 按钮文案瞬变「已复制」1.5s 回落；
+// 防重入：原始文案持久存 dataset（防把「已复制」捕获为回落文案）+ 旧
+// timer clearTimeout（防双 timer 竞争致永久停留「已复制」）。
+function detailCopy(btn, text) {
+  if (!btn.dataset.copyLabel) btn.dataset.copyLabel = btn.textContent;
+  const done = () => {
+    clearTimeout(Number(btn.dataset.copyTimer));
+    btn.textContent = "已复制";
+    btn.dataset.copyTimer = String(setTimeout(() => {
+      btn.textContent = btn.dataset.copyLabel;
+      btn.removeAttribute("data-copy-label");
+      btn.removeAttribute("data-copy-timer");
+    }, 1500));
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => detailCopyFallback(text, done));
+  } else {
+    detailCopyFallback(text, done);
+  }
+}
+
+function detailCopyFallback(text, done) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  if (ok) done();
+}
+
+// ── B2. 条目详情面板（M8-WP05-T02；SPEC §2.2） ──
+// M10-WP01-T03：渲染目标抽参 panelId——浏览侧栏（#detail-panel → 动态区
+// #detail-body，.detail-head × 静态头不被重写，沿 M10-WP03-T02）与检索
+// 内联面板（#sdetail-panel → 动态区 #sdetail-panel-body，常驻关闭按钮）
+// 共用同一渲染契约（大小/副本数/指纹色/副本路径）；标题回落语义（name
+// 缺失 → content_id 切片，沿 §2.1）收敛在此——命中卡接线保持
+// showDetail(h.content_id, h.filename) 字面（SPEC §2.3 探针锚点）。
+// body 推导按 panelId 显式映射（PR 161 对抗评审 high）：浏览侧面板无
+// "-body" 拼接容器，旧 `$(panelId+"-body")||panel` 回落把面板本体当渲染
+// 目标，innerHTML 重写炸掉 .detail-head × 静态头与面板内 #detail-body
+// （closeDetail 随后对 null 写 innerHTML 抛未捕获 TypeError）。已知面板
+// 逐一映射；|| panel 兜底仅防未知 panelId 直接空引用，不得作为路径依赖。
+const detailBodyOf = { "detail-panel": "detail-body", "sdetail-panel": "sdetail-panel-body" };
+// 并发守卫（PR 161 评审 low）：快速连点两张命中卡时多个 asset_detail
+// 并发在途，先发后返的旧响应不得覆盖面板——按 panelId 记请求序号，
+// 迟到响应（seq 已被更新的请求取代）静默丢弃。
+const detailSeq = {};
+async function showDetail(contentId, name, panelId = "detail-panel") {
+  const panel = $(panelId);
   panel.style.display = "";
-  panel.innerHTML = `<div class="section-tag">detail</div>
+  const body = $(detailBodyOf[panelId]) || panel;
+  const seq = (detailSeq[panelId] = (detailSeq[panelId] || 0) + 1);
+  body.innerHTML = `<div class="section-tag">detail</div>
     <div class="empty">加载中…</div>`;
   let d;
   try {
     d = await call("asset_detail", { prefix: contentId });
   } catch (e) {
-    panel.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
+    if (seq !== detailSeq[panelId]) return;
+    if (panel.style.display === "none") return; // 加载中途已关闭——弃渲（M10-WP03-T02 可见性门控）
+    body.innerHTML = `<div class="empty">详情加载失败（${esc(e?.kind ?? "?")}）</div>`;
     return;
   }
+  if (seq !== detailSeq[panelId]) return;
+  if (panel.style.display === "none") return; // 加载中途已关闭——弃渲
+  const title = name || contentId.slice(0, 8) + "…"; // T03 标题回落语义（沿 §2.1，收敛在此）
   const fp = fpOf(contentId);
   const copies = d.copies.map(c =>
-    `<li>${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></li>`).join("");
-  panel.innerHTML = `
-    <h2>${esc(name)}</h2>
+    `<li><span class="copy-path">${esc(c.path)} <span class="dim">· ${sizeFmt(c.size)}</span></span><button type="button" class="btn ghost copy-btn" data-copy-text="${esc(c.path)}" aria-label="复制副本路径">复制</button></li>`).join("");
+  body.innerHTML = `
+    <h2>${esc(title)}</h2>
     <dl>
       <dt>大小</dt><dd>${sizeFmt(d.size)}</dd>
+      <dt>修改时间</dt><dd>${timeFmt(d.copies[0]?.mtime_ns)}</dd>
       <dt>副本</dt><dd>${d.copies.length} 处</dd>
     </dl>
     <div class="fingerprint" style="--fp: ${fp}">
       <div class="label">内容身份（blake3）——指纹色由此派生</div>
       <div class="strip">${Array.from({length: 8}, (_, i) =>
         `<i style="background: hsl(${(i * 47 + parseInt(contentId.slice(0, 2), 16) * 137.508) % 360} 55% 55%)"></i>`).join("")}</div>
-      <div class="hash">${contentId.slice(0, 16)}…</div>
+      <div class="hash">${esc(contentId.slice(0, 16))}…</div>
+      <button type="button" class="btn ghost copy-btn" data-copy-text="${esc(contentId)}" aria-label="复制完整 content_id（64 hex）">复制</button>
     </div>
     <div class="copies"><div class="label">副本路径</div><ul>${copies || "<li>—</li>"}</ul></div>`;
+  body.querySelectorAll("button.copy-btn").forEach((b) => {
+    b.onclick = () => detailCopy(b, b.dataset.copyText);
+  });
 }
 
 // ── C. 检索（旗舰；三态全覆盖——设计审计硬约束） ──
@@ -168,6 +319,16 @@ function searchArgs(q) {
   const args = { q, limit: 50 };
   if (searchMode === "transcript") args.include_transcript = true;
   return args;
+}
+
+// M10-WP01-T02（SPEC §2.2）：命中摘要渲染 = esc() 全串**之后**再做
+// sentinel→<mark> 替换。后端（partisync-index bm25.rs）载荷是纯文本 +
+// [[/]] 包裹命中词；不变量：highlight 字段不得以模板插值形态直接进
+// innerHTML（唯一入口本函数），sentinel 之外零 HTML 引入（次序反了 =
+// 文档内容逃逸面）。
+function snippetHtml(h) {
+  if (!h.highlight) return "—";
+  return esc(h.highlight).replaceAll("[[", "<mark>").replaceAll("]]", "</mark>");
 }
 
 function searchSkeleton(n) {
@@ -262,11 +423,11 @@ function renderSearchResults() {
   // 资产分区：过滤仅影响展示；过滤致空 ≠ 无结果（给恢复引导，不清 chips）。
   const assetRows = rows.length ? rows.map(h => {
     const fp = fpOf(h.content_id);
-    return `<article class="hit" style="--fp: ${fp}">
+    return `<article class="hit" role="button" tabindex="0" data-cid="${esc(h.content_id)}" style="--fp: ${fp}">
       <span class="fp-badge">${esc(h.content_id.slice(0, 8))}</span>
       <div class="body">
         <div class="name">${h.filename ? esc(h.filename) : esc(h.content_id.slice(0, 8)) + "…"}</div>
-        <div class="snippet">${h.highlight ? esc(h.highlight) : "—"}</div>
+        <div class="snippet">${snippetHtml(h)}</div>
       </div>
       <div class="score"><div class="bar" style="width: ${Math.min(100, Math.round(h.score * 100))}%"></div>
       <div class="num">${h.score.toFixed(2)}</div></div>
@@ -297,11 +458,29 @@ function renderSearchResults() {
   }
   $("srows").innerHTML = (lastMem ? `<div class="section-tag">资产通道 · ${lastModeLabel}检索</div>` : "")
     + assetRows + memSection;
+  // M10-WP01-T03（SPEC §2.3）：命中卡整卡可点击 → 既有 asset_detail IPC
+  //（零新增 command），详情渲进检索内联面板 #sdetail-panel；本路径零 #srows
+  // 重写（硬约束：点击不清空结果列表，关闭后原样可继续点）。卡顺序 =
+  // filteredHits() 顺序（assetRows 恰为 rows.map 产物且位于 memSection
+  // 之前），按下标配对安全；chips 过滤重渲后重绑，行集与快照一致。
+  $("srows").querySelectorAll("article.hit[data-cid]").forEach((card, i) => {
+    const h = rows[i];
+    card.onclick = () => showDetail(h.content_id, h.filename, "sdetail-panel");
+    card.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        showDetail(h.content_id, h.filename, "sdetail-panel");
+      }
+    };
+  });
 }
 
 async function doSearch() {
   const q = $("q").value.trim();
   const meta = $("ssearch-meta");
+  // M10-WP01-T03：新一次查询收起上一轮的详情面板（面板独立于结果列表，
+  // 结果列表仍由下方正常重渲——不违反「点击不清空结果」硬约束）。
+  $("sdetail-panel").style.display = "none";
   await loadIndexStats(); // T05：0/>0 空态分支与徽标依赖（一次拉取缓存，不轮询）
   if (!q) {
     lastQ = ""; lastHits = []; lastMem = null; selectedExts.clear();
@@ -589,6 +768,10 @@ function memTags(s) {
   } catch { return String(s ?? ""); }
 }
 
+// 最近一次 memory_search 命中快照（memory_id → 原始行）：详情展开与复制
+// 的数据源（M10-WP02-T02）——不抄 DOM 展示文本（列表 content 是截断态）。
+let memIndex = new Map();
+
 // 验证状态区：memory_verify（无 id）→ 根 hex 截断 + memory_count + ok 徽章。
 async function loadMemVerify() {
   try {
@@ -670,7 +853,12 @@ function renderMemRows(emptyText) {
       </tr>`).join("")
     : `<tr><td colspan="6" class="empty">${esc(emptyText ?? memEmptyText ?? "")}</td></tr>`;
   $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
-    b.onclick = () => memVerifyRow(b.dataset.mid, b);
+    b.onclick = (ev) => { ev.stopPropagation(); memVerifyRow(b.dataset.mid, b); };
+  });
+  // 行点击展开/收起详情（M10-WP02-T02；验证按钮 stopPropagation 已隔离，
+  // 点验证不触发行展开）——接线随 renderMemRows 重渲重建，排序后仍生效。
+  $("mem-rows").querySelectorAll("tr.mem-row").forEach((tr) => {
+    tr.onclick = () => memToggleDetail(tr.dataset.mid);
   });
   if (openProof) {
     const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(openProof.dataset.proof)}"]`);
@@ -688,7 +876,9 @@ async function loadMemories() {
   $("mem-meta").innerHTML = "检索中…";
   try {
     const r = await memCall("memory_search", args);
-    memRows = r.results ?? [];
+    const rows = r.results ?? [];
+    memRows = rows;
+    memIndex = new Map(rows.map((x) => [x.memory_id, x])); // 详情/复制数据源（M10-WP02-T02）与排序快照同源
     memSort = { key: null, dir: 1 }; // 新检索/换 query/换 tag：排序态重置默认（服务端序）
     $("mem-meta").innerHTML = memRows.length ? `<b>${memRows.length}</b> / ${r.total ?? memRows.length} 条记忆` : "";
     memEmptyText = q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条";
@@ -736,6 +926,94 @@ async function memVerifyRow(memoryId, btn) {
   }
 }
 
+// ── 记忆详情联动展开 + 复制（M10-WP02-T02；SPEC §2.2）——行点击展开
+// tr.mem-detail（沿证明行展开判例）：完整 content / tags 全列 / metadata
+// pretty JSON / 完整 memory_id / created_ns 完整本地时间 / score 口径
+// 注记（FTS 全文路径 = 匹配秩（-bm25）；LIKE 兜底 / tag·id 精确路径恒
+// 1.0——store.rs memory_search docstring 语义诚实透出）。展开/收起只动
+// 本行详情：不重写列表、不重发检索；多行详情并存，证明行语义不受影响。
+
+// 详情行模板（动态段全部 esc / 数字格式化——无未转义插值；content 不截断）。
+function memDetailHtml(m) {
+  let metaPretty;
+  try { metaPretty = JSON.stringify(JSON.parse(m.metadata), null, 2); }
+  catch { metaPretty = String(m.metadata ?? ""); }
+  return `<td colspan="6">
+    <div class="mem-detail-grid">
+      <span class="lbl">content</span><div class="val">${esc(m.content)}</div>
+      <span class="lbl">tags</span><div class="val">${esc(memTags(m.tags)) || "—"}</div>
+      <span class="lbl">metadata</span><div class="val"><pre class="mem-detail-meta">${esc(metaPretty) || "—"}</pre></div>
+      <span class="lbl">memory_id</span><div class="val hash">${esc(m.memory_id)}</div>
+      <span class="lbl">created_ns</span><div class="val">${timeFmt(m.created_ns)}</div>
+      <span class="lbl">score</span><div class="val">${(m.score ?? 0).toFixed(2)}<span class="score-note">口径：FTS 全文路径 = 匹配秩（-bm25）；LIKE 兜底 / tag·id 精确路径恒 1.0</span></div>
+    </div>
+    <div class="mem-detail-actions">
+      <button type="button" class="btn ghost mem-copy-btn" data-copy="content" data-mid="${esc(m.memory_id)}">复制内容</button>
+      <button type="button" class="btn ghost mem-copy-btn" data-copy="id" data-mid="${esc(m.memory_id)}">复制 ID</button>
+    </div></td>`;
+}
+
+// 展开/收起切换：已开 → 只删该行详情行；未开 → 在本行后插入。既有证明
+// 行与列表本体一概不触碰。
+function memToggleDetail(memoryId) {
+  const open = $("mem-rows").querySelector(`tr.mem-detail[data-detail="${CSS.escape(memoryId)}"]`);
+  if (open) { open.remove(); return; }
+  const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(memoryId)}"]`);
+  const m = memIndex.get(memoryId);
+  if (!row || !m) return;
+  const tr = document.createElement("tr");
+  tr.className = "mem-detail";
+  tr.dataset.detail = memoryId;
+  tr.innerHTML = memDetailHtml(m);
+  row.after(tr);
+  tr.querySelectorAll("button.mem-copy-btn").forEach((b) => {
+    b.onclick = (ev) => { ev.stopPropagation(); memCopyDetail(b, b.dataset.mid, b.dataset.copy); };
+  });
+}
+
+// 复制：webview 内建 navigator.clipboard.writeText（零新增依赖）；API 不
+// 可用/拒权 → 隐藏 textarea + execCommand 回落（SPEC §6-R1 实现期拍板）。
+// 成功反馈 = 按钮文案瞬变「已复制」1.5s 回落。
+function memCopyDetail(btn, memoryId, what) {
+  const m = memIndex.get(memoryId);
+  if (!m) return;
+  const text = what === "content" ? String(m.content ?? "") : String(m.memory_id ?? "");
+  const done = () => {
+    // 防重入（PR #166 对抗评审 F3）：1.5s 窗口内二次点击——原始 label 只
+    // 捕获一次（dataset 持久保存，避免把「已复制」存成回落文案），旧 timer
+    // 先清再设，杜绝双 setTimeout 竞争致按钮永久停留「已复制」。
+    if (!btn.dataset.copyLabel) btn.dataset.copyLabel = btn.textContent;
+    clearTimeout(Number(btn.dataset.copyTimer));
+    btn.textContent = "已复制";
+    btn.classList.add("copied");
+    btn.dataset.copyTimer = String(setTimeout(() => {
+      btn.textContent = btn.dataset.copyLabel;
+      btn.removeAttribute("data-copy-label");
+      btn.removeAttribute("data-copy-timer");
+      btn.classList.remove("copied");
+    }, 1500));
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => execCopyFallback(text, done));
+  } else {
+    execCopyFallback(text, done);
+  }
+}
+
+function execCopyFallback(text, done) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  if (ok) done();
+}
+
 // 写入入口：content + tags（逗号分隔）+ metadata JSON → memory_write；
 // deduplicated=true → 幂等命中提示（琥珀）。metadata 预校验沿工具契约
 // （非空 object），超限/非法形态由服务端工具级错误经 error-region 透传。
@@ -776,6 +1054,13 @@ async function memWrite() {
 }
 
 // ── 绑定（CSP 禁 inline onclick） ──
+// M10-WP01-T02 GUI 验收实测：CSP `script-src 'self'` 拦截 index.html 的
+// inline `onsubmit="return false"`（M9-WP03-T01 硬化收敛漏网）→ 检索
+// form（资产 + 记忆两处 query-row）默认提交 → 页面 reload（回浏览
+// tab、查询清空），检索 UI 完全不可用。JS 侧 preventDefault 兜底
+// （探针 ui_hardening 锁接线）。
+document.querySelectorAll("form.query-row").forEach(f =>
+  f.addEventListener("submit", (e) => e.preventDefault()));
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.removeAttribute("aria-current"));
   b.setAttribute("aria-current", "page");
@@ -799,6 +1084,9 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doSearch(); } });
 document.querySelector("form.query-row").addEventListener("submit", (e) => e.preventDefault());
 $("btn-search").onclick = doSearch;
+// M10-WP01-T03：检索详情面板关闭——只隐藏面板，结果列表不动（SPEC §2.3
+// 硬约束：关闭后检索结果原样可继续点击）。
+$("sdetail-close").onclick = () => { $("sdetail-panel").style.display = "none"; };
 $("mode-bm25").addEventListener("change", () => { searchMode = "bm25"; if ($("q").value.trim()) doSearch(); });
 $("mode-hybrid").addEventListener("change", () => { searchMode = "hybrid"; if ($("q").value.trim()) doSearch(); });
 $("mode-transcript").addEventListener("change", () => { searchMode = "transcript"; if ($("q").value.trim()) doSearch(); });
@@ -820,6 +1108,15 @@ document.querySelectorAll("th[data-mem-sort]").forEach((th) => {
   th.onclick = () => memSortClick(th.dataset.memSort);
 });
 $("btn-mem-write").onclick = memWrite;
+// 详情面板关闭（M10-WP03-T02）：× 静态头 + Esc 双通道（CSP 禁 inline
+// onclick；可见性/焦点门控在 escClose 内，SPEC §2.2 + §7-R4）。
+$("detail-close").onclick = closeDetail;
+document.addEventListener("keydown", escClose);
+// 浏览表头排序（M10-WP03-T03）：三列点击循环 升序→降序→服务端序
+// （CSP 禁 inline onclick；表头为 index.html 静态结构，重渲不丢）。
+document.querySelectorAll("button.th-sort").forEach((b) => {
+  b.onclick = () => cycleSort(b.dataset.key);
+});
 
 setInterval(async () => {
   await loadStats();
