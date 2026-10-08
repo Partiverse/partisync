@@ -1,11 +1,13 @@
-//! M10-WP05-T03/T04 远程 MCP 传输面 + 授权面全栈探针（SPEC
-//! docs/specs/M10-WP05.md §3.1 T03/T04 行；hub 骨架探针判例 M9-WP05）。
+//! M10-WP05-T03/T04/T05 远程 MCP 传输面 + 授权面 + 工具透传全栈探针（SPEC
+//! docs/specs/M10-WP05.md §3.1 T03/T04/T05 行；hub 骨架探针判例 M9-WP05）。
 //! 行为契约：PRM 公开面四字段、fail-closed 默认态（任意 Bearer 必 401）、
 //! Origin/host 白名单先于授权面、非回环启动守卫矩阵、TLS 线位 roundtrip
 //! （自签证书到 PRM/墙）；T04（P23）：token 校验矩阵（合法/坏签/错 iss/
 //! aud 错配含他 resource/过期/未知 kid/allowlist 外算法/缺 claim）401 +
 //! 挑战指 PRM、scope step-up 403 insufficient_scope、协议头/方法语义
-//! （G-3/G-6）。
+//! （G-3/G-6）；T05：tools/list 远程=stdio 逐字段一致、mock AS 全链
+//! e2e（PRM→401→token→initialize→list→call 真实执行）、handle 绑身份
+//! （T-R5：键控含 subject，无 handle 替代鉴权通道）。
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,9 +17,12 @@ use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use partisync_gateway::mcp::McpServerState;
 use partisync_gateway::mcp_remote::{
-    bind_server, build_router, check_startup, required_scope_for_tool, AuthConfig, McpRemoteConfig,
-    PrmConfig, TlsFiles, TokenValidator, TrustedIssuer, PRM_WELLKNOWN_PATH,
+    bind_server, build_router, check_startup, required_scope_for_tool, AuthConfig,
+    IdentityBoundHandles, McpRemoteConfig, PrmConfig, TlsFiles, TokenValidator, TrustedIssuer,
+    PRM_WELLKNOWN_PATH,
 };
+use rmcp::service::{RoleClient, RunningService};
+use rmcp::transport::child_process::TokioChildProcess;
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -31,6 +36,24 @@ async fn test_state() -> Arc<McpServerState> {
         .connect("sqlite::memory:")
         .await
         .expect("in-memory sqlite");
+    Arc::new(McpServerState::from_pool(pool))
+}
+
+/// T05 e2e 用：device 播种过的状态（`memory_write` 的 oplog origin 依赖
+/// device 表非空——`Store::device_id` 空表即 Fatal）。同池二次迁移幂等。
+async fn test_state_seeded() -> Arc<McpServerState> {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    let store = partisync_graph::Store::from_pool(pool.clone())
+        .await
+        .expect("graph migrations");
+    store
+        .seed_device_volume("dev-wp05-e2e", "Device WP05 E2E", "fp-wp05-e2e")
+        .await
+        .expect("seed device");
     Arc::new(McpServerState::from_pool(pool))
 }
 
@@ -470,13 +493,23 @@ async fn spawn_mock_as() -> MockAs {
     let mut jwk = Jwk::from_encoding_key(&key, Algorithm::ES256).expect("jwk from key");
     jwk.common.key_id = Some(PROBE_KID.to_string());
     let jwks_doc = serde_json::to_value(JwkSet { keys: vec![jwk] }).expect("jwks json");
-    let app = axum::Router::new().route(
-        "/jwks.json",
-        axum::routing::get(move || {
-            let doc = jwks_doc.clone();
-            async move { axum::Json(doc) }
-        }),
-    );
+    // T05 e2e「取 token」步：RFC 6749 token 端点（dev-only，ADR-0031 决策 1）。
+    let token_route = {
+        let key = key.clone();
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let key = key.clone();
+            async move { axum::Json(token_endpoint(&key, &body)) }
+        })
+    };
+    let app = axum::Router::new()
+        .route(
+            "/jwks.json",
+            axum::routing::get(move || {
+                let doc = jwks_doc.clone();
+                async move { axum::Json(doc) }
+            }),
+        )
+        .route("/token", token_route);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -499,6 +532,73 @@ impl MockAs {
     }
 }
 
+/// `application/x-www-form-urlencoded` 最小解码（dev-only mock AS；表单
+/// 入参转义仅 `+`→空格与 %XX 两种形态，RFC 6749 token 端点够用）。
+fn form_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// mock AS token 端点（dev-only，RFC 6749 §5.1 响应形状；ADR-0031 决策 1
+/// 「mock AS = 仓内线程内 axum + dev 依赖签发标准 JWT，仅供 T05 e2e，不入
+/// 产品依赖图」）。表单入参 `grant_type`（仅 client_credentials）/`scope`/
+/// `sub`——mock 凭证协商，非真实 client 认证（真实 IdP = NB-WP05-1 债）。
+fn token_endpoint(key: &EncodingKey, body: &[u8]) -> serde_json::Value {
+    let body = std::str::from_utf8(body).unwrap_or("");
+    let (mut grant_type, mut scope, mut sub) =
+        (None, "mcp:read".to_string(), "wp05-t05-probe".to_string());
+    for pair in body.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        match form_decode(k).as_str() {
+            "grant_type" => grant_type = Some(form_decode(v)),
+            "scope" => scope = form_decode(v),
+            "sub" => sub = form_decode(v),
+            _ => {}
+        }
+    }
+    if grant_type.as_deref() != Some("client_credentials") {
+        return serde_json::json!({ "error": "unsupported_grant_type" });
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    let claims = serde_json::json!({
+        "iss": "https://as.example.test",
+        "aud": PROBE_RESOURCE,
+        "sub": sub,
+        "scope": scope,
+        "iat": now,
+        "exp": now + 600,
+    });
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(PROBE_KID.to_string());
+    let access_token = encode(&header, &claims, key).expect("sign token");
+    serde_json::json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": 600,
+    })
+}
+
 /// 标准 claims（iss/aud/sub/scope/iat/exp）。
 fn base_claims(iss: &str, aud: &str, scope: &str, exp_offset_secs: i64) -> serde_json::Value {
     let now = SystemTime::now()
@@ -515,9 +615,31 @@ fn base_claims(iss: &str, aud: &str, scope: &str, exp_offset_secs: i64) -> serde
     })
 }
 
+/// 与 [`base_claims`] 同形，`sub` 可调（T05 subject 键控探针：alice/bob
+/// 双身份场景）。
+fn claims_for(sub: &str, scope: &str) -> serde_json::Value {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    serde_json::json!({
+        "iss": "https://as.example.test",
+        "aud": PROBE_RESOURCE,
+        "sub": sub,
+        "scope": scope,
+        "iat": now,
+        "exp": now + 600,
+    })
+}
+
 /// 起带授权面的 gateway 实例（bind_server 内含 JWKS 预拉 fail-fast 路径；
 /// bind 127.0.0.1:0 临时端口——缺省 8424 在全量并行下会互相冲突）。
 async fn spawn_authed(as_: &MockAs) -> SocketAddr {
+    spawn_authed_state(as_, test_state().await).await
+}
+
+/// 指定 MCP 状态的变体（T05 e2e：memory_write 真实执行需 device 播种库）。
+async fn spawn_authed_state(as_: &MockAs, state: Arc<McpServerState>) -> SocketAddr {
     let config = McpRemoteConfig {
         bind_addr: "127.0.0.1:0".parse().expect("addr"),
         prm: test_prm(),
@@ -530,7 +652,7 @@ async fn spawn_authed(as_: &MockAs) -> SocketAddr {
         }),
         ..Default::default()
     };
-    let server = bind_server(&config, test_state().await)
+    let server = bind_server(&config, state)
         .await
         .expect("bind authed server");
     let addr = server.local_addr().expect("addr");
@@ -1014,4 +1136,417 @@ async fn token_validator_rejects_degenerate_auth_config() {
     let err = TokenValidator::new(&cfg, PROBE_RESOURCE.to_string())
         .expect_err("empty algorithm allowlist must reject");
     assert!(err.contains("allowlist 为空"), "{err}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T05 工具透传（SPEC §2.4/§3.1）：list 一致性 / mock AS 全链 e2e / handle 绑身份
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 11 内建工具名（M10-WP04-T02 判例的 `list_tools_returns_eleven` 清单）。
+const BUILTIN_TOOLS: [&str; 11] = [
+    "asset_search",
+    "asset_read",
+    "asset_organize",
+    "dataset_export",
+    "job_status",
+    "memory_write",
+    "memory_search",
+    "memory_verify",
+    "memory_update",
+    "memory_delete",
+    "ext_list",
+];
+
+/// tools/list 一致性（SPEC §3.1 T05 行①）：远程面（Streamable HTTP）与
+/// stdio 面（真实 spawn `partisync-mcp` 子进程，M10-WP04-T02 判例 harness）
+/// 同 11 内建工具，name/description/inputSchema 逐字段深比对。`ext_*` 是
+/// 内建 11 之外的并集面（双面同构追加，本探针 state 无注册表 → 远程恰 11）。
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_remote_matches_stdio_schema_field_by_field() {
+    let as_ = spawn_mock_as().await;
+    let addr = spawn_authed(&as_).await;
+    let token = as_.issue(
+        PROBE_KID,
+        &as_.key,
+        base_claims(&as_.issuer, PROBE_RESOURCE, "mcp:read", 600),
+    );
+    let c = client();
+
+    // 远程面 tools/list（scope 校验只挂 tools/call，read token 足够）。
+    let resp = rpc(
+        &c,
+        &format!("http://{addr}/mcp"),
+        Some(&token),
+        Some(PROTOCOL_VERSION),
+        TOOLS_LIST_BODY,
+        &[("Mcp-Method", "tools/list")],
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "remote tools/list must pass");
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    let remote_tools = body["result"]["tools"].as_array().expect("tools array");
+
+    // stdio 面 tools/list：真实 spawn partisync-mcp（wp02_memory 判例）。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("graph.db");
+    let store = partisync_graph::Store::open(&db_path)
+        .await
+        .expect("open graph db");
+    store
+        .seed_device_volume("dev-wp05-stdio", "Device WP05 Stdio", "fp-wp05-stdio")
+        .await
+        .expect("seed device");
+    drop(store);
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_partisync-mcp"));
+    cmd.args(["--db", &db_path.to_string_lossy()]);
+    let (transport, _stderr) = TokioChildProcess::builder(cmd)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn partisync-mcp");
+    let stdio: RunningService<RoleClient, ()> = rmcp::service::serve_client((), transport)
+        .await
+        .expect("handshake");
+
+    let stdio_tools = stdio
+        .peer()
+        .list_all_tools()
+        .await
+        .expect("stdio tools/list");
+    let mut remote_names: Vec<&str> = remote_tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name"))
+        .collect();
+    remote_names.sort_unstable();
+    let mut expected: Vec<&str> = BUILTIN_TOOLS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        remote_names, expected,
+        "remote face must serve exactly the 11 builtin tools"
+    );
+
+    // 逐字段深比对：同工具 name/description/inputSchema 三字段逐一相等。
+    let mut compared = 0;
+    for tool in &stdio_tools {
+        let name = tool.name.as_ref();
+        if !BUILTIN_TOOLS.contains(&name) {
+            continue; // 本机扩展目录非空时 stdio 可能多出 ext_*（并集面，不在此钉）
+        }
+        let remote = remote_tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("builtin tool {name} missing on remote face"));
+        let stdio_json = serde_json::to_value(tool).expect("serialize stdio tool");
+        assert_eq!(stdio_json["name"], remote["name"], "{name}");
+        assert_eq!(
+            stdio_json["description"], remote["description"],
+            "{name} description must match field-by-field"
+        );
+        assert_eq!(
+            stdio_json["inputSchema"], remote["inputSchema"],
+            "{name} inputSchema must match field-by-field"
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 11, "all 11 builtin tools must be compared");
+    for name in BUILTIN_TOOLS {
+        assert!(
+            stdio_tools.iter().any(|t| t.name.as_ref() == name),
+            "stdio face missing builtin tool {name}"
+        );
+    }
+    stdio.cancel().await.ok();
+}
+
+/// mock AS 全链 e2e（SPEC §3.1 T05 行②）：PRM 发现 → 无 token 401 挑战 →
+/// mock AS `POST /token` 取 token（RFC 6749 表单协商）→ initialize →
+/// tools/list → tools/call 真实执行——memory_write 幂等语义抽查（同
+/// content 重写同 id + deduplicated 翻转）+ memory_search 读回 +
+/// memory_verify 全库 ok。
+#[tokio::test(flavor = "multi_thread")]
+async fn mock_as_full_chain_e2e_prm_challenge_token_init_list_call() {
+    let as_ = spawn_mock_as().await;
+    let addr = spawn_authed_state(&as_, test_state_seeded().await).await;
+    let c = client();
+    let mcp = format!("http://{addr}/mcp");
+
+    // ① PRM 发现：四字段，authorization_servers[0] = mock issuer。
+    let prm_resp = c
+        .get(format!("http://{addr}{PRM_WELLKNOWN_PATH}"))
+        .send()
+        .await
+        .expect("prm reachable");
+    assert_eq!(prm_resp.status(), 200);
+    let prm: serde_json::Value =
+        serde_json::from_slice(&prm_resp.bytes().await.expect("prm body")).expect("prm json");
+    assert_eq!(prm["resource"], PROBE_RESOURCE);
+    assert_eq!(prm["authorization_servers"][0], as_.issuer);
+
+    // ② 无 token initialize → 401 挑战（fail-closed，全链起点）。
+    let resp = rpc(&c, &mcp, None, Some(PROTOCOL_VERSION), INIT_BODY, &[]).await;
+    assert_eq!(resp.status(), 401, "chain must start at the 401 challenge");
+    assert_bearer_challenge(
+        resp.headers()
+            .get("www-authenticate")
+            .expect("challenge")
+            .to_str()
+            .expect("utf-8"),
+        "no token",
+        false,
+    );
+
+    // ③ 取 token：client_credentials + scope 协商（表单，%XX 编码冒号/空格）。
+    let token_resp = c
+        .post(format!("http://{}/token", as_.addr))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("grant_type=client_credentials&scope=mcp%3Aread%20mcp%3Awrite")
+        .send()
+        .await
+        .expect("token endpoint reachable");
+    assert_eq!(token_resp.status(), 200);
+    let grant: serde_json::Value =
+        serde_json::from_slice(&token_resp.bytes().await.expect("token body")).expect("token json");
+    assert_eq!(grant["token_type"], "Bearer");
+    assert!(grant["access_token"].as_str().is_some(), "{grant}");
+    let token = grant["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // ④ initialize → 200 result。
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some(&token),
+        Some(PROTOCOL_VERSION),
+        INIT_BODY,
+        &[],
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    assert!(
+        body.get("result").is_some(),
+        "initialize must result: {body}"
+    );
+
+    // ⑤ tools/list → 恰 11 内建工具。
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some(&token),
+        Some(PROTOCOL_VERSION),
+        TOOLS_LIST_BODY,
+        &[("Mcp-Method", "tools/list")],
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    let tools = body["result"]["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 11, "remote tools/list: {body}");
+
+    // ⑥ tools/call memory_write → 真实执行（structuredContent 逐字段）。
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some(&token),
+        Some(PROTOCOL_VERSION),
+        &tools_call_body(
+            "memory_write",
+            r#"{"content":"wp05-t05 e2e remote passthrough fact","tags":["wp05-t05"]}"#,
+        ),
+        &[("Mcp-Method", "tools/call"), ("Mcp-Name", "memory_write")],
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "memory_write must execute: {resp:?}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    let written = &body["result"]["structuredContent"];
+    let memory_id = written["memory_id"]
+        .as_str()
+        .expect("memory_id")
+        .to_string();
+    assert_eq!(
+        written["deduplicated"],
+        serde_json::json!(false),
+        "{written}"
+    );
+    assert!(
+        written["root"].as_str().is_some_and(|r| r.len() == 64),
+        "root must be 64-hex: {written}"
+    );
+
+    // ⑦ 幂等抽查：同 content 重写 → 同 memory_id + deduplicated=true。
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some(&token),
+        Some(PROTOCOL_VERSION),
+        &tools_call_body(
+            "memory_write",
+            r#"{"content":"wp05-t05 e2e remote passthrough fact","tags":["wp05-t05"]}"#,
+        ),
+        &[("Mcp-Method", "tools/call"), ("Mcp-Name", "memory_write")],
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    let rewritten = &body["result"]["structuredContent"];
+    assert_eq!(rewritten["memory_id"], memory_id, "content-addressed id");
+    assert_eq!(
+        rewritten["deduplicated"],
+        serde_json::json!(true),
+        "{rewritten}"
+    );
+
+    // ⑧ memory_search 精确读回（真查询非 echo）。
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some(&token),
+        Some(PROTOCOL_VERSION),
+        &tools_call_body(
+            "memory_search",
+            &format!(r#"{{"memory_id":"{memory_id}"}}"#),
+        ),
+        &[("Mcp-Method", "tools/call"), ("Mcp-Name", "memory_search")],
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    let found = &body["result"]["structuredContent"];
+    assert_eq!(found["total"], serde_json::json!(1), "{found}");
+    assert_eq!(found["results"][0]["memory_id"], memory_id);
+
+    // ⑨ memory_verify 全库 → ok=true（承诺树可验证）。
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some(&token),
+        Some(PROTOCOL_VERSION),
+        &tools_call_body("memory_verify", "{}"),
+        &[("Mcp-Method", "tools/call"), ("Mcp-Name", "memory_verify")],
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    assert_eq!(
+        body["result"]["structuredContent"]["ok"],
+        serde_json::json!(true),
+        "{body}"
+    );
+}
+
+/// handle 绑身份（T-R5，SPEC §3.1 T05 行③）：①登记簿键控含 subject——
+/// 复合键 `<subject>:<handle>`，跨 subject 不可校验，API 形态上不存在
+/// handle-only 查询通道；②HTTP 面无 handle 替代鉴权通道——无/坏 token
+/// 携带 session handle 仍 401，合法 token 下 handle 不被铸造、不改变
+/// stateless 语义（2026-07-28：`Mcp-Session-Id` 忽略不铸造，评估件 G-2）。
+#[tokio::test(flavor = "multi_thread")]
+async fn handle_binding_subject_scoped_and_never_a_credential() {
+    // ① 登记簿机制面（T-R5 键控口径，IdentityBoundHandles）。
+    let handles = IdentityBoundHandles::default();
+    assert_eq!(
+        IdentityBoundHandles::composite_key("alice", "job-1"),
+        "alice:job-1",
+        "composite key is exactly <subject>:<handle>"
+    );
+    assert!(handles.bind("alice", "job-1"), "first bind registers");
+    assert!(!handles.bind("alice", "job-1"), "rebind is idempotent");
+    assert!(handles.verify("alice", "job-1"), "owner subject verifies");
+    assert!(
+        !handles.verify("bob", "job-1"),
+        "same handle under another subject must not verify"
+    );
+    assert!(
+        !handles.verify("alice", "job-2"),
+        "unbound handle must not verify"
+    );
+
+    // ② HTTP 面：handle 不是凭证（墙先于任何 handle 语义）。
+    let as_ = spawn_mock_as().await;
+    let addr = spawn_authed(&as_).await;
+    let c = client();
+    let mcp = format!("http://{addr}/mcp");
+
+    // 无 token + session handle → 401 挑战（handle 未产生任何放行）。
+    let resp = rpc(
+        &c,
+        &mcp,
+        None,
+        Some(PROTOCOL_VERSION),
+        INIT_BODY,
+        &[("mcp-session-id", "stolen-handle")],
+    )
+    .await;
+    assert_eq!(resp.status(), 401, "handle without token must stay 401");
+    assert_bearer_challenge(
+        resp.headers()
+            .get("www-authenticate")
+            .expect("challenge")
+            .to_str()
+            .expect("utf-8"),
+        "handle without token",
+        false,
+    );
+
+    // 坏 token + 偷来的 handle → 401（handle 持有不替代鉴权）。
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some("not.a.jwt"),
+        Some(PROTOCOL_VERSION),
+        INIT_BODY,
+        &[("mcp-session-id", "stolen-handle")],
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        401,
+        "handle with invalid token must stay 401"
+    );
+
+    // 合法 token（subject alice）+ 自选 handle → initialize 200，且响应
+    // 不铸造 session（stateless：忽略入站 handle，不回 Mcp-Session-Id）。
+    let alice = as_.issue(PROBE_KID, &as_.key, claims_for("alice-wp05", "mcp:read"));
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some(&alice),
+        Some(PROTOCOL_VERSION),
+        INIT_BODY,
+        &[("mcp-session-id", "shared-handle")],
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "valid token initializes with a handle");
+    let no_session_minted = resp.headers().get("mcp-session-id").is_none();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    assert!(body.get("result").is_some(), "{body}");
+    assert!(
+        no_session_minted,
+        "stateless face must never mint a session handle"
+    );
+
+    // 另一 subject bob 复用同一 handle → 独立 200（无跨 subject 共享状态
+    // 的可观察通道；handle 未给 bob 任何 alice 的能力，反之亦然）。
+    let bob = as_.issue(PROBE_KID, &as_.key, claims_for("bob-wp05", "mcp:read"));
+    let resp = rpc(
+        &c,
+        &mcp,
+        Some(&bob),
+        Some(PROTOCOL_VERSION),
+        INIT_BODY,
+        &[("mcp-session-id", "shared-handle")],
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "bob is not blocked, nor privileged");
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.bytes().await.expect("body")).expect("json");
+    assert!(body.get("result").is_some(), "{body}");
 }
