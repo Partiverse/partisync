@@ -126,5 +126,7 @@ SPEC §2.2）；⑤deny 白名单不改（红线，deny 拦截即回本 ADR 修�
       本地 `cargo deny check` + `cargo audit` 输出贴入本 ADR 后果节
       （沿 ADR-0030 待批准项判例；deny 拦截即回本 ADR 修订，不改
       deny.toml 白名单）——✅ 2026-10-08 回填（后果节）
-- [ ] rcgen/tokio-rustls 启面 deny 核对随 T03 载体 PR 门禁实证（评估件
-      §1.6 已证两者在 lock，预期零新 crate，实证回填同上）
+- [x] rcgen/tokio-rustls 启面 deny 核对随 T03 载体 PR 门禁实证（评估件
+      §1.6 已证两者在 lock，预期零新 crate，实证回填同上）——✅ 2026-10-08
+      随 T04 载体 PR 全仓 `cargo deny check` 四项全绿一并覆盖（rustls
+      0.23/tokio-rustls/rcgen 0.14 批次零 deny 拦截）
