@@ -118,14 +118,14 @@ squash-merged；35/35 head commit 的 CI run conclusion=success 现场
 | escapeHtml F2/D2 + 详情面板空库 D3 + N4 转写开关 D4 | M8-report §5 | ✅ **已清偿**（WP03-T01，PR #135；D2/D3/D4 债表注记随 PR #141） |
 | CAS 读 IO 错误伪装 ENOENT（微债） | M8-report §5 | ✅ **已清偿**（WP02-T05，PR #132：仅 NotFound 伪装，其余上浮 + unwrap_or(false) 移除） |
 | 扩展供应链签名/registry G6 | M7-WP01 §4-1 | ✅ **最小闭环清偿**（WP04，PR #142–#146：强制验签 + 签名流程文档；registry/更新通道维持「不自建」硬约束） |
-| MCP 仅本地 stdio G8 | M8 前瞻 | ◐ WP05 骨架交付（PR #147–#149）；正式远程化 = 条件触发（真实 OAuth/TLS/工具透传随立项 ADR） |
+| MCP 仅本地 stdio G8 | M8 前瞻 | ✅ **清账**（M10-WP05-T06 注记，2026-10-08）：M9 半偿骨架（PR #147–#149）+ 正式远程化全交付（M10-WP05-T01–T05，PR #182–#185/#188–#195：真实 OAuth 2.1 RS + TLS + 11 工具透传 + mock AS 全链 e2e）；真实外接 AS 端到端 = NB-WP05-1 条件触发维持（M10-WP05 §4，诚实登记不伪造端到端） |
 | **T04 GUI 三态截图 + 全 tab 巡检 + 篡改红徽章演示** | WP03 SPEC §3 | ⏳ **待人工**（AGENTS.md 桌面端硬性规则例外面；实施面已就绪；docs/screenshots/ 现存 T05 data-align 与 WP01-T04 f1-sync-tab 两张，T04 三态截图缺位） |
 | **CAS 内容重组缺口** | WP03-T06 新债 | ⏳ 大文件 chunk hash 列表未持久化、CAS 不可重组——reindex CAS 回退仅覆盖单块；命中计 read_errors，挂后续任务 |
 | **外部审计双义务（M2-D1/OSCP）+ Mimosa 完整扫描结论** | M7/M8 延续 | ⏳ 资金回笼触发（条件行，RFP-OSCP 沿用）；M9 期间无新扫描 |
 | **scanner_enobufs 覆盖边界** | M7-report D-S2 | ⏳ 披露性挂账维持：hook advisory 失同步已 2026-10-02 deep 复扫消解（M8-WP00 台账行），工具侧动态派发不可达的能力边界非项目可修；本报告提交时（2026-10-05，M9-WP99-T01 commit）hook 再次提示 enobufs 无完整扫描结论（advisory，兼容策略放行）——边界复现，结论仍随外部审计窗口 |
 | **示例扩展断签窗口** | WP04 SPEC §6-R5 | ⏳ 持有人生产钥签名待人工；本机实证影响：装有旧版未签名 demo 扩展的机器上 desktop e2e `mcp_call_real_sidecar_ext_list` 失败（ext_list 验签拒绝 count=0），CI 无预置文件自跳过不受影响（§3） |
 | drop-caches 冷缓存复测窗口 | M8-WP07-bench §2 | ⏳ WP06-T03 发布窗口执行（release profile + 容器口径） |
-| WP05-T02 收尾回填 / WP06-T02+T03 发布执行 | M9 未开工项 | ⏳ WP05 状态行+G8 行回填待做；WP06 发布待用户确认口径（tag/draft/publish 红线前置） |
+| WP05-T02 收尾回填 / WP06-T02+T03 发布执行 | M9 未开工项 | ◐ WP05 状态行回填已做（M10-WP00-T02）+ G8 行回填已做（✅ M10-WP05-T06，2026-10-08）；WP06 发布待用户确认口径（tag/draft/publish 红线前置） |
 | O_DIRECT/direct_io / SSO-OIDC F4 / 移动端 / reranker-SMB | 既有登记 | 维持（不承诺 / 条件触发 / M10+ / 永久否决） |
 
 ## 6. AI 使用披露（自动统计）
