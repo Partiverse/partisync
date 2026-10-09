@@ -1,0 +1,22 @@
+== 复现环境 ==
+date: 2026-10-09 22:57:20
+db: /tmp/m10-t03-gui/partisync.db  index: /tmp/m10-t03-gui/index(GUI 补验语料)
+sidecar: target/debug/partisync-mcp --db ... --index-root ...(stdin 保活管道)
+
+sidecar pid=183665
+== ① lsof:sidecar 持有的 bm25 index 句柄(writer lock 实证)==
+== ② 盘上写锁 ==
+-rw-rw-r-- 1 acme acme 0 Oct  9 22:54 /tmp/m10-t03-gui/index/bm25/.tantivy-writer.lock
+== fuser 按文件反查 ==
+                     USER        PID ACCESS COMMAND
+/tmp/m10-t03-gui/index/bm25/.tantivy-writer.lock:
+                     acme      183669 F.... partisync-mcp
+== lsof 按文件 ==
+COMMAND      PID USER FD   TYPE DEVICE SIZE/OFF   NODE NAME
+partisync 183669 acme 10wW  REG   0,43        0 172098 /tmp/m10-t03-gui/index/bm25/.tantivy-writer.lock
+== 进程树 ==
+acme      183668    1890  0 22:54 ?        00:00:00 sleep 600
+acme      183669    1890  0 22:54 ?        00:00:00 /home/acme/Codebase/partisync/target/debug/partisync-mcp --db /tmp/m10-t03-gui/partisync.db --index-root /tmp/m10-t03-gui/index
+== ③ 冲突复现:sidecar 持锁期间 CLI search(eager 开写者)==
+error: 打开索引: fatal: open bm25: fatal: open tantivy writer: Failed to acquire Lockfile: LockBusy. Some("Failed to acquire index lock. If you are using a regular directory, this means there is already an `IndexWriter` working on this `Directory`, in this process or in a different process.")
+EXIT=0
