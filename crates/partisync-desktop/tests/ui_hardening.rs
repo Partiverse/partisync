@@ -907,7 +907,14 @@ fn t01_verify_proof_insert_readdresses_after_await() {
         .find("async function memVerifyRow(memoryId, btn) {")
         .expect("memVerifyRow 必须存在");
     let seg = &UI_JS[at..];
-    let end = seg.find("\nasync function ").unwrap_or(seg.len());
+    // 函数体边界双模式（沿 t02_copy 探针句式）：T02 合入后 memVerifyRow
+    // 与下一个 async fn 之间夹有普通函数（memDetailHtml/memToggleDetail），
+    // 单一 async 边界会把其合法同款锚点字面量误卷进断言面。
+    let end = ["\nfunction ", "\nasync function "]
+        .iter()
+        .filter_map(|m| seg.find(m))
+        .min()
+        .unwrap_or(seg.len());
     let body = &seg[..end];
     let await_at = body
         .find("await memCall(\"memory_verify\"")
@@ -926,6 +933,37 @@ fn t01_verify_proof_insert_readdresses_after_await() {
     assert!(
         body.contains("if (anchor) anchor.after(tr); else $(\"mem-rows\").append(tr);"),
         "证明行必须插在当前 DOM 锚点之后；行不在窗口时落 append 兜底（保持可见，不游离）"
+    );
+}
+
+/// §6-R6 T01×T02 合入链必办微任务（PR #166 对抗评审 F2 登记债；裁定落
+/// 合入流程）：renderMemRows 排序重渲必须 ① 重绑 `tr.mem-row` 行点击
+/// （否则新行集 onclick 全部缺失，行展开失效直至下次检索）；② 重锚已
+/// 展开 `tr.mem-detail`（多行详情并存语义，沿 mem-proof 重锚判例）；
+/// ③ 验证按钮 stopPropagation 隔离在重绑后仍成立。
+#[test]
+fn t01x02_sort_rerender_rebinds_row_click_and_reanchors_detail() {
+    let at = UI_JS
+        .find("function renderMemRows(emptyText) {")
+        .expect("renderMemRows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("tr.onclick = () => memToggleDetail(tr.dataset.mid);"),
+        "排序重渲必须重绑 tr.mem-row 行点击（R6：不重绑则行展开失效）"
+    );
+    assert!(
+        body.contains("querySelectorAll(\"tr.mem-detail\")"),
+        "排序重渲必须先摘下已展开详情行（重锚数据源，R6 沿 mem-proof 判例）"
+    );
+    assert!(
+        body.contains("d.dataset.detail"),
+        "详情行重锚必须按 data-detail 寻址插回其所属行之后（R6）"
+    );
+    assert!(
+        body.contains("ev.stopPropagation(); memVerifyRow(b.dataset.mid, b)"),
+        "验证按钮必须 stopPropagation 隔离行点击（重渲重绑后仍成立，R4×R6 组合面）"
     );
 }
 /// 裸插值禁列增补（M10-WP03-T02 详情面板动态字段）：content_id / mtime

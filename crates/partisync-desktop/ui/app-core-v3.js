@@ -842,6 +842,9 @@ function renderMemRows(emptyText) {
   // 重写 tbody 后按 data-proof 原样插回其所属行之后，memVerifyRow 的
   // toggle 寻址不受影响。
   const openProof = $("mem-rows").querySelector("tr.mem-proof");
+  // §6-R6 合入链必办微任务：排序重渲重锚已展开详情行（多行并存语义，
+  // 沿 mem-proof 重锚判例；行不在新窗口时随锚点缺失自然收起）。
+  const openDetails = [...$("mem-rows").querySelectorAll("tr.mem-detail")];
   $("mem-rows").innerHTML = rows.length ? rows.map((m) => `
       <tr class="mem-row" data-mid="${esc(m.memory_id)}">
         <td>${esc(trunc(m.content, 90))}</td>
@@ -863,6 +866,10 @@ function renderMemRows(emptyText) {
   if (openProof) {
     const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(openProof.dataset.proof)}"]`);
     if (anchor) anchor.after(openProof);
+  }
+  for (const d of openDetails) {
+    const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(d.dataset.detail)}"]`);
+    if (anchor) anchor.after(d);
   }
   renderMemSortHeads();
 }
