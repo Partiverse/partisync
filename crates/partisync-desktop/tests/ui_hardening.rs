@@ -65,6 +65,11 @@ fn no_raw_interpolation_of_dynamic_fields() {
         // M10-WP03-T03 浏览行 mtime 列：相对/绝对时间一律经 mtimeDisp()，
         // title 经 esc(timeFmt(...))——裸 `${e.mtime_ns` 插值禁入模板。
         "${e.mtime_ns",
+        // M10-WP02-T03：记忆 meta 计数与 chips 循环变量——「显示 n / 共 m」
+        // 的 m 走 esc(lastMemTotal)，chip 文案走 esc(t)，裸插值禁入。
+        "${m.created_ns",
+        "${lastMemTotal",
+        "${t}",
     ];
     let mut leaked = Vec::new();
     for pat in BARE {
@@ -870,8 +875,10 @@ fn t01_memory_table_header_sort_wired() {
 /// memEmptyText 透传（点表头不得把空态/错误态清成空白 empty 行）。
 #[test]
 fn t01_sort_rerender_preserves_proof_row_and_empty_text() {
+    // 签名锚点 T01×T03 合入迁移：形参 emptyText ≡ noRowsHint（T03 chips
+    // 管线统一命名，同义透传；断言集与强度不变，仅锚随名迁）。
     let at = UI_JS
-        .find("function renderMemRows(emptyText) {")
+        .find("function renderMemRows(noRowsHint) {")
         .expect("renderMemRows 必须存在");
     let seg = &UI_JS[at..];
     let end = seg.find("\nfunction ").unwrap_or(seg.len());
@@ -943,8 +950,13 @@ fn t01_verify_proof_insert_readdresses_after_await() {
 /// ③ 验证按钮 stopPropagation 隔离在重绑后仍成立。
 #[test]
 fn t01x02_sort_rerender_rebinds_row_click_and_reanchors_detail() {
+    // 签名锚点 T01×T03 合入迁移（emptyText ≡ noRowsHint，同上）；详情保
+    // 有断言由「DOM 重锚实现」改锁「openMemDetails 重放语义」——T03 chips
+    // 管线以展开集重放达成同一 R6 语义（排序/过滤重渲详情不丢），且被
+    // t03_mem_detail_state_restored_after_filter_rerender 同面锁死；语义
+    // 强度不变，实现锚随合入融合迁移。
     let at = UI_JS
-        .find("function renderMemRows(emptyText) {")
+        .find("function renderMemRows(noRowsHint) {")
         .expect("renderMemRows 必须存在");
     let seg = &UI_JS[at..];
     let end = seg.find("\nfunction ").unwrap_or(seg.len());
@@ -954,12 +966,13 @@ fn t01x02_sort_rerender_rebinds_row_click_and_reanchors_detail() {
         "排序重渲必须重绑 tr.mem-row 行点击（R6：不重绑则行展开失效）"
     );
     assert!(
-        body.contains("querySelectorAll(\"tr.mem-detail\")"),
-        "排序重渲必须先摘下已展开详情行（重锚数据源，R6 沿 mem-proof 判例）"
+        body.contains("for (const mid of [...openMemDetails])")
+            && body.contains("memToggleDetail(mid);"),
+        "排序/过滤重渲必须经 openMemDetails 重放已展开详情行（R6 语义：重渲详情不丢）"
     );
     assert!(
-        body.contains("d.dataset.detail"),
-        "详情行重锚必须按 data-detail 寻址插回其所属行之后（R6）"
+        body.contains("openMemDetails.delete(mid);"),
+        "被换出行集的展开 mid 必须移出集合（防死条目残留）"
     );
     assert!(
         body.contains("ev.stopPropagation(); memVerifyRow(b.dataset.mid, b)"),
@@ -1501,5 +1514,263 @@ fn t02_copy_via_clipboard_write_text_with_fallback_and_feedback() {
     assert!(
         body.contains("memIndex.get(memoryId)"),
         "复制数据源必须是 memIndex 命中快照（不抄 DOM 展示文本）"
+    );
+}
+
+// ── M10-WP02-T03：时间展示深化 + tag 过滤 chips 静态契约（SPEC §2.3）
+// ——创建时间列相对显示（四档 + >30 天回落绝对 + title 完整本地时间）；
+// tag chips 从渲染行集派生 + 纯客户端过滤 + meta「显示 n / 共 m」+ 全不
+// 选不过滤 + 换查询重置重派生 + 样式 parity（沿 T04 五探针句式）。
+
+/// 时间探针：memTime 相对四档（刚刚/分钟/小时/天）+ >30 天回落 timeFmt
+/// 绝对日期 + created_ns 缺失/0「—」回落不回退（timeFmt 原样）+ 行模板
+/// title 悬浮完整本地时间（SPEC §2.3 字面）。
+#[test]
+fn t03_memtime_relative_tiers_and_absolute_fallback() {
+    let body = js_fn_body(UI_JS, "function memTime(ns) {");
+    for tier in ["刚刚", "分钟前", "小时前", "天前"] {
+        assert!(
+            body.contains(tier),
+            "相对时间缺「{tier}」档（SPEC §2.3 四档）"
+        );
+    }
+    assert!(
+        body.contains("30 * 86400") && body.contains("return timeFmt(ns);"),
+        ">30 天必须回落 timeFmt 绝对日期（SPEC §2.3）"
+    );
+    assert!(
+        body.contains("if (!ns) return timeFmt(ns);"),
+        "created_ns 缺失/0 必须回落 timeFmt（既有「—」）"
+    );
+    // 分档阈值字面量逐字锁死（评审 finding：静态字符串探针对数值边界无
+    // 行为覆盖，单位写错如 s<600 探针照样绿——档界拼写、档序、同行 return
+    // 一并锁死，误写即红）。Math.max(0,…) 钳制未来时间戳/时钟回拨（负差
+    // 值 → 「刚刚」）。
+    assert!(
+        body.contains("Math.max(0,"),
+        "时间差必须钳制非负（未来时间戳/时钟回拨 → 「刚刚」）"
+    );
+    let tiers = [
+        ("if (s < 60)", "刚刚"),
+        ("if (s < 3600)", "分钟前"),
+        ("if (s < 86400)", "小时前"),
+        ("if (s <= 30 * 86400)", "天前"),
+    ];
+    let mut prev = 0usize;
+    for (threshold, tier) in tiers {
+        let at = body
+            .find(threshold)
+            .unwrap_or_else(|| panic!("memTime 缺档界 {threshold}（单位写错/档序漂移）"));
+        assert!(at >= prev, "memTime 档序漂移：{threshold} 档序错乱");
+        prev = at;
+        let line_end = body[at..].find('\n').unwrap_or(body[at..].len());
+        assert!(
+            body[at..at + line_end].contains(tier),
+            "{threshold} 与「{tier}」必须同一 return 行"
+        );
+    }
+    // timeFmt 既有输出不回退：缺失「—」回落仍在。
+    let tf = js_fn_body(UI_JS, "function timeFmt(ns) {");
+    assert!(
+        tf.contains("if (!ns) return \"—\";"),
+        "timeFmt 既有「—」回落不得回退"
+    );
+    // 行模板：title 悬浮 = 完整本地时间（timeFmt 经 esc）；创建时间列改
+    // 相对显示（memTime 经 esc）。
+    assert!(
+        UI_JS.contains("title=\"${esc(timeFmt(m.created_ns))}\""),
+        "创建时间单元格必须带 title 悬浮完整本地时间（SPEC §2.3）"
+    );
+    assert!(
+        UI_JS.contains("esc(memTime(m.created_ns))"),
+        "创建时间列必须改相对显示（经 esc）"
+    );
+}
+
+/// tag chips 派生：集合来源必须是已渲染行集快照 lastMemRows 的 tags
+/// （memTagArr 解析，与行内 tags 列同源——memTags 委托同一解析防漂移）。
+#[test]
+fn t03_mem_tag_chips_derive_from_rendered_rows() {
+    assert!(
+        UI_JS.contains("function memTagArr(s) {"),
+        "tags 解析函数 memTagArr 必须存在（chips 与行内显示同源）"
+    );
+    assert!(
+        UI_JS.contains("return memTagArr(s).join(\", \");"),
+        "memTags 必须委托 memTagArr（单一解析语义）"
+    );
+    let body = js_fn_body(UI_JS, "function renderMemChips() {");
+    assert!(
+        body.contains("for (const m of lastMemRows)") && body.contains("memTagArr(m.tags)"),
+        "chips 集合必须从已渲染行集 lastMemRows 经 memTagArr 派生（SPEC §2.3）"
+    );
+    assert!(
+        UI_JS.contains("lastMemRows = r.results ?? [];"),
+        "行集快照必须来自 memory_search 结果（r.results）"
+    );
+}
+
+/// chip 点击仅客户端过滤：toggleMemTag = 切选中态 + 重渲（chips + 行区），
+/// 函数体内禁止任何 IPC / 重查询站点（SPEC §2.3「不重发查询、不触后端」）。
+#[test]
+fn t03_mem_tag_chip_toggle_filters_client_side_only() {
+    let body = js_fn_body(UI_JS, "function toggleMemTag(tag) {");
+    assert!(
+        body.contains("selectedMemTags")
+            && body.contains("renderMemChips();")
+            && body.contains("renderMemRows("),
+        "chip 点击 = 切换选中态 + 重渲 chips 与行区"
+    );
+    for banned in ["invoke(", "call(", "loadMemories(", "doSearch(", "fetch("] {
+        assert!(
+            !body.contains(banned),
+            "过滤不得触后端/重发查询（SPEC §2.3）：{banned}"
+        );
+    }
+}
+
+/// 过滤只作用于已渲染行集快照：filteredMemRows 空选中集原样返回
+/// lastMemRows（全不选 = 不过滤），非空时按 memTagArr 解析的 tag 命中过滤。
+#[test]
+fn t03_mem_filter_applies_to_rendered_rows_only() {
+    let body = js_fn_body(UI_JS, "function filteredMemRows() {");
+    assert!(
+        body.contains("if (!selectedMemTags.size) return lastMemRows;"),
+        "全不选 = 不过滤（SPEC §2.3）"
+    );
+    assert!(
+        body.contains(
+            "lastMemRows.filter((m) => memTagArr(m.tags).some((t) => selectedMemTags.has(t)))"
+        ),
+        "过滤只能作用于已渲染行集快照 lastMemRows（客户端）"
+    );
+}
+
+/// 行渲染管线行源单点（SPEC §2.3「与 T01 排序正交可叠加——验收只锁组合
+/// 结果正确」的结构锁）：renderMemRows 的行源必须唯一经 filteredMemRows()
+/// ——chips 过滤是行渲染的必经单点，T01 排序（合入后）无论落在 renderMem
+/// Rows 管线内还是等价组合，「先过滤后排序」语义不因绕过过滤直取原始快
+/// 照而失效；行模板不得出现 lastMemRows 直接 map/filter（绕过滤即组合失
+/// 效）。T02 已合入（bfded23）：「过滤×详情展开」组合已由
+/// t03_mem_row_click_binding_inside_rerender_pipeline /
+/// t03_mem_detail_state_restored_after_filter_rerender 落锁；「过滤×排
+/// 序」待 T01 合入时补显式验证。
+#[test]
+fn t03_mem_rows_source_through_filtered_single_point() {
+    let body = js_fn_body(UI_JS, "function renderMemRows(noRowsHint) {");
+    assert!(
+        body.contains("const rows = filteredMemRows();"),
+        "行渲染行源必须唯一经 filteredMemRows()（chips 过滤单点，组合锚点）"
+    );
+    for banned in ["lastMemRows.map", "lastMemRows.filter", "r.results.map"] {
+        assert!(
+            !body.contains(banned),
+            "行渲染不得绕过 filteredMemRows 直取原始快照（组合失效面）：{banned}"
+        );
+    }
+}
+
+/// 过滤×详情展开组合锁（T02 已合入 bfded23，任务卡遗留②义务到期）：
+/// T02 行点击绑定必须位于 renderMemRows 重渲管线内——chips 过滤整表重建
+/// innerHTML 后行点击不丢；T02 memIndex 数据源在 loadMemories 随行集单点
+/// 同步（全量快照不随过滤裁剪，过滤后行点击仍可展开详情）。
+#[test]
+fn t03_mem_row_click_binding_inside_rerender_pipeline() {
+    let body = js_fn_body(UI_JS, "function renderMemRows(noRowsHint) {");
+    assert!(
+        body.contains("tr.onclick = () => memToggleDetail(tr.dataset.mid);"),
+        "行点击绑定必须在 renderMemRows 管线内（chips 过滤重渲后行点击不丢）"
+    );
+    let load = js_fn_body(UI_JS, "async function loadMemories() {");
+    assert!(
+        load.contains("memIndex = new Map(lastMemRows.map((x) => [x.memory_id, x]));"),
+        "memIndex 必须在 loadMemories 随行集快照单点同步（T02 详情数据源接入 T03 管线）"
+    );
+    assert!(
+        load.contains("memIndex = new Map();"),
+        "失败路径必须同步清空 memIndex（行集清空 → 详情索引清空）"
+    );
+}
+
+/// 过滤×详情展开组合锁（展开态语义）：memToggleDetail 维护 openMemDetails
+/// 展开集（开 +add / 收 −delete）；renderMemRows 重渲后重放——仍命中过滤
+/// 行集者恢复展开。语义拍板（二轮评审 F3 注记）：被过滤移出的展开行视为
+/// 收起（「过滤即收起」，点掉 chip 恢复后不自动展开）；集合移出为该语义
+/// 的落地动作，兼避免死条目残留（行缺失检查本身已淘汰死条目，非必要理
+/// 由）。
+#[test]
+fn t03_mem_detail_state_restored_after_filter_rerender() {
+    let toggle = js_fn_body(UI_JS, "function memToggleDetail(memoryId) {");
+    assert!(
+        toggle.contains("openMemDetails.add(memoryId);")
+            && toggle.contains("openMemDetails.delete(memoryId);"),
+        "memToggleDetail 必须维护展开集（开 +add / 收 −delete）"
+    );
+    let body = js_fn_body(UI_JS, "function renderMemRows(noRowsHint) {");
+    assert!(
+        body.contains("for (const mid of [...openMemDetails])")
+            && body.contains("memToggleDetail(mid);"),
+        "重渲后必须重放展开态（过滤×详情展开组合语义）"
+    );
+    assert!(
+        body.contains("openMemDetails.delete(mid);"),
+        "被过滤移出的展开 mid 必须移出集合（「过滤即收起」语义落地，兼防死条目残留）"
+    );
+    assert!(
+        UI_JS.contains("let openMemDetails = new Set();"),
+        "展开集声明必须存在（renderMemRows/memToggleDetail 共享态）"
+    );
+}
+
+/// meta「显示 n / 共 m」同步 + 新检索重置选中态并重派生 chips（沿 T04
+/// 判例：chips 必须反映当轮行集，不得残留上一轮选中）。
+#[test]
+fn t03_mem_meta_shown_over_total_and_state_reset() {
+    assert!(
+        UI_JS.contains("显示 <b>${rows.length}</b> / 共 ${esc(lastMemTotal)} 条记忆"),
+        "meta 必须同步「显示 n / 共 m」（SPEC §2.3）"
+    );
+    // 重置单点收口在 loadMemories（fetch 前——覆盖成功/空查询/失败全路径；
+    // toggle 切换不重置）；成功与失败路径都重派生 chips。
+    let body = js_fn_body(UI_JS, "async function loadMemories() {");
+    assert!(
+        body.contains("selectedMemTags.clear();"),
+        "新检索必须重置 tag 选中态（T04 判例）"
+    );
+    assert!(
+        body.matches("renderMemChips();").count() >= 2,
+        "成功与失败路径都必须重派生 chips（防残留上一轮 chips）"
+    );
+    assert_eq!(
+        UI_JS.matches("selectedMemTags.clear();").count(),
+        1,
+        "重置单点收口在 loadMemories（toggle 切换不重置）"
+    );
+}
+
+/// chips 容器 DOM + 样式 parity：JS 引用的 #mem-filter-chips 必须在
+/// index.html 存在且复用 .chips 容器样式（role=group + aria 标注）；
+/// chip 按钮复用 .chip 选中态样式 + aria-pressed；点击接线 toggleMemTag。
+#[test]
+fn t03_mem_tag_chips_dom_and_style_parity() {
+    assert!(
+        UI_JS.contains("$(\"mem-filter-chips\")"),
+        "renderMemChips 必须渲染到 #mem-filter-chips 容器"
+    );
+    assert!(
+        UI_HTML.contains("id=\"mem-filter-chips\""),
+        "index.html 缺 #mem-filter-chips 容器"
+    );
+    assert!(
+        UI_HTML.contains("class=\"chips\" role=\"group\" aria-label=\"按 tag 过滤\""),
+        "chips 容器必须复用 .chips 样式 + group 语义 + 过滤用途 aria 标注"
+    );
+    assert!(
+        UI_JS.contains("b.onclick = () => toggleMemTag(b.dataset.tag);"),
+        "chip 点击必须接线 toggleMemTag（漏绑 = chips 静态摆设）"
+    );
+    assert!(
+        UI_JS.contains("class=\"chip${selectedMemTags.has(t) ? \" on\" : \"\"}\""),
+        "chip 必须复用 .chip 选中态样式（styles-v3.css .chip.on）"
     );
 }

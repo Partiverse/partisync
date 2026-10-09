@@ -46,6 +46,19 @@ function timeFmt(ns) {
   return d.toLocaleString("zh-CN", { hour12: false });
 }
 
+// 记忆创建时间相对显示（M10-WP02-T03 SPEC §2.3）：四档「刚刚 / n 分钟前 /
+// n 小时前 / n 天前」，>30 天回落 timeFmt 绝对日期；缺失/0 → timeFmt 既有
+// 「—」。sync 面板 relTime 语义独立不共用（无 >30 天回落，本卡不触碰）。
+function memTime(ns) {
+  if (!ns) return timeFmt(ns);
+  const s = Math.max(0, (Date.now() - ns / 1e6) / 1000);
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  if (s <= 30 * 86400) return `${Math.floor(s / 86400)} 天前`;
+  return timeFmt(ns);
+}
+
 async function call(cmd, args) {
   try {
     return await invoke(cmd, args === undefined ? {} : { args });
@@ -760,17 +773,27 @@ async function memCall(tool, args) {
   return mcPayload(await call("mcp_call", { tool, args }));
 }
 
-// tags canonical JSON 串（memory.rs canonical_tags）→ 逗号列表；解析失败原样透出。
-function memTags(s) {
+// tags canonical JSON 串（memory.rs canonical_tags）→ 字符串数组；解析失败
+// 原样单元素透出。行内显示（memTags 逗号列表）与 T03 chips 派生共用同一
+// 解析，防两处语义漂移。null 元素经 ?? "" 归空——与旧 memTags 的
+// Array.join 对 null 的语义逐字等价（评审 finding：map(String) 会产 "null"）。
+function memTagArr(s) {
   try {
     const arr = JSON.parse(s);
-    return Array.isArray(arr) ? arr.join(", ") : String(s ?? "");
-  } catch { return String(s ?? ""); }
+    return Array.isArray(arr) ? arr.map((t) => t ?? "") : [String(s ?? "")];
+  } catch { return [String(s ?? "")]; }
+}
+
+function memTags(s) {
+  return memTagArr(s).join(", ");
 }
 
 // 最近一次 memory_search 命中快照（memory_id → 原始行）：详情展开与复制
 // 的数据源（M10-WP02-T02）——不抄 DOM 展示文本（列表 content 是截断态）。
 let memIndex = new Map();
+// 已展开详情的 memory_id 集（M10-WP02-T02 × T03 组合接线）：chips 过滤
+// 重渲后由 renderMemRows 重放展开态；行被过滤掉/数据源清空时同步移出。
+let openMemDetails = new Set();
 
 // 验证状态区：memory_verify（无 id）→ 根 hex 截断 + memory_count + ok 徽章。
 async function loadMemVerify() {
@@ -792,12 +815,18 @@ async function loadMemVerify() {
 }
 
 // 列表/检索：query/tag 空则不带键（全量列表），limit/offset 恒传（§2.2 契约）。
-// 命中落 memRows 快照：表头排序只重渲快照、不重发查询（M10-WP02-T01；
-// SPEC §2.1 诚实边界——只排序当前渲染窗口 ≤50 条，服务端 limit:50
-// offset:0 契约不变，meta「N / total」明示窗口语义）。
-let memRows = []; // 最近一次 memory_search 命中快照（服务端原始序）
+// T01（SPEC §2.1）：命中落 memRows 快照——表头排序只重渲快照、不重发查询
+// （诚实边界：只排序当前渲染窗口 ≤50 条，服务端 limit:50 offset:0 契约不变）。
+// T03（SPEC §2.3）：同一行集快照以 lastMemRows 名暴露（与 memRows 同一数组
+// 引用，loadMemories 单点同步双名，零漂移）——tag chips 从快照派生，过滤仅
+// 重渲已渲染行（renderMemRows），不重发查询；每次检索在 fetch 前单点重置
+// 选中态并重派生（T04 判例，覆盖成功/空/失败全路径）。
+let lastMemRows = []; // 最近一次记忆检索行集（原始序、未过滤快照；chips 派生源）
+let lastMemTotal = 0; // 服务端 total（r.total ?? 行数；「显示 n / 共 m」窗口语义见 SPEC §2.3）
+let memRows = []; // 排序快照——与 lastMemRows 同一数组引用（T01×T03 合入融合）
 let memSort = { key: null, dir: 1 }; // 表头排序态：key ∈ created|score|tags|device；null = 服务端默认序
 let memEmptyText = null; // 最近一次空态文案（loadMemories 设定；点表头重渲透传，防空态被清成空白 empty 行）
+let selectedMemTags = new Set();
 
 function memSortValue(m, key) {
   // tags 键 = memTags() 解析后的逗号列表字典序（非 canonical JSON 原串）；
@@ -808,13 +837,24 @@ function memSortValue(m, key) {
   return String(m.origin_device ?? "");
 }
 
+function memSortCompare(a, b) {
+  const va = memSortValue(a, memSort.key), vb = memSortValue(b, memSort.key);
+  return (va < vb ? -1 : va > vb ? 1 : 0) * memSort.dir; // 同键稳定保序（ES2019 stable sort）
+}
+
+// 过滤后行集施排序（T01×T03「过滤×排序」合入到期组合入口；slice 副本，
+// 不改输入数组序——服务端原始序快照不可变契约保持）。
+function applyMemSort(rows) {
+  if (!memSort.key) return rows;
+  return rows.slice().sort(memSortCompare);
+}
+
+// memRows 全量快照排序（T01 语义面：默认态原样返回服务端序快照；排序作用
+// 于 slice 副本；函数体零 IPC。渲染管线经 applyMemSort(filteredMemRows())
+// 组合，本函数为快照级 API/探针锚点）。
 function sortedMemRows() {
   if (!memSort.key) return memRows; // 默认 = 服务端序（FTS score DESC → created_ns DESC / LIKE created_ns DESC）
-  const k = memSort.key, d = memSort.dir;
-  return memRows.slice().sort((a, b) => {
-    const va = memSortValue(a, k), vb = memSortValue(b, k);
-    return (va < vb ? -1 : va > vb ? 1 : 0) * d; // 同键稳定保序（ES2019 stable sort）
-  });
+  return memRows.slice().sort(memSortCompare);
 }
 
 function memSortClick(key) {
@@ -834,46 +874,6 @@ function renderMemSortHeads() {
   });
 }
 
-function renderMemRows(emptyText) {
-  const rows = sortedMemRows();
-  // 排序/重渲不打断行级证明展开态（沿面板「不进 5s 轮询防打断」契约；
-  // 对抗评审 finding：innerHTML 全量重写会静默清掉 memVerifyRow 直接
-  // DOM 插入的 tr.mem-proof）——先摘下已展开证明行（单开语义至多一个），
-  // 重写 tbody 后按 data-proof 原样插回其所属行之后，memVerifyRow 的
-  // toggle 寻址不受影响。
-  const openProof = $("mem-rows").querySelector("tr.mem-proof");
-  // §6-R6 合入链必办微任务：排序重渲重锚已展开详情行（多行并存语义，
-  // 沿 mem-proof 重锚判例；行不在新窗口时随锚点缺失自然收起）。
-  const openDetails = [...$("mem-rows").querySelectorAll("tr.mem-detail")];
-  $("mem-rows").innerHTML = rows.length ? rows.map((m) => `
-      <tr class="mem-row" data-mid="${esc(m.memory_id)}">
-        <td>${esc(trunc(m.content, 90))}</td>
-        <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
-        <td class="mtime">${timeFmt(m.created_ns)}</td>
-        <td class="size">${esc(m.origin_device)}</td>
-        <td class="size">${(m.score ?? 0).toFixed(2)}</td>
-        <td><button class="btn ghost mem-verify-btn" data-mid="${esc(m.memory_id)}">验证</button></td>
-      </tr>`).join("")
-    : `<tr><td colspan="6" class="empty">${esc(emptyText ?? memEmptyText ?? "")}</td></tr>`;
-  $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
-    b.onclick = (ev) => { ev.stopPropagation(); memVerifyRow(b.dataset.mid, b); };
-  });
-  // 行点击展开/收起详情（M10-WP02-T02；验证按钮 stopPropagation 已隔离，
-  // 点验证不触发行展开）——接线随 renderMemRows 重渲重建，排序后仍生效。
-  $("mem-rows").querySelectorAll("tr.mem-row").forEach((tr) => {
-    tr.onclick = () => memToggleDetail(tr.dataset.mid);
-  });
-  if (openProof) {
-    const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(openProof.dataset.proof)}"]`);
-    if (anchor) anchor.after(openProof);
-  }
-  for (const d of openDetails) {
-    const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(d.dataset.detail)}"]`);
-    if (anchor) anchor.after(d);
-  }
-  renderMemSortHeads();
-}
-
 async function loadMemories() {
   const q = $("mem-q").value.trim();
   const tag = $("mem-tag").value.trim();
@@ -881,22 +881,116 @@ async function loadMemories() {
   if (q) args.query = q;
   if (tag) args.tag = tag;
   $("mem-meta").innerHTML = "检索中…";
+  selectedMemTags.clear(); // 新检索/换查询后 chips 选中态重置（fetch 前单点收口，覆盖成功/空/失败全路径）
   try {
     const r = await memCall("memory_search", args);
-    const rows = r.results ?? [];
-    memRows = rows;
-    memIndex = new Map(rows.map((x) => [x.memory_id, x])); // 详情/复制数据源（M10-WP02-T02）与排序快照同源
+    lastMemRows = r.results ?? [];
+    lastMemTotal = r.total ?? lastMemRows.length;
+    memRows = lastMemRows; // 排序快照与 chips 派生源同数组引用（单点同步双名，零漂移）
+    // T02 memIndex 数据源随行集单点同步（全量快照、不随 chips 过滤裁剪——
+    // 详情展开从索引取原始行，过滤后行点击仍可展开）。
+    memIndex = new Map(lastMemRows.map((x) => [x.memory_id, x]));
     memSort = { key: null, dir: 1 }; // 新检索/换 query/换 tag：排序态重置默认（服务端序）
-    $("mem-meta").innerHTML = memRows.length ? `<b>${memRows.length}</b> / ${r.total ?? memRows.length} 条记忆` : "";
     memEmptyText = q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条";
+    renderMemChips();
     renderMemRows(memEmptyText);
   } catch (e) {
+    lastMemRows = [];
     memRows = [];
+    lastMemTotal = 0;
+    memIndex = new Map(); // 行集清空 → 详情索引同步清空（T02 数据源单点语义）
     memSort = { key: null, dir: 1 };
     memEmptyText = "记忆列表加载失败——见顶部错误提示。";
-    $("mem-meta").innerHTML = "";
+    renderMemChips();
     renderMemRows(memEmptyText);
   }
+}
+
+// tag chips：从当前已渲染行集派生（memTagArr 与行内 tags 列同源）；点击仅
+// 客户端过滤已渲染行；全不选 = 不过滤；无 tag 时容器空收纳（.chips:empty）。
+function renderMemChips() {
+  const tags = [];
+  for (const m of lastMemRows) {
+    for (const t of memTagArr(m.tags)) {
+      if (t && !tags.includes(t)) tags.push(t);
+    }
+  }
+  const box = $("mem-filter-chips");
+  box.innerHTML = tags.length
+    ? `<span class="chips-cap">按 tag 过滤</span>` + tags.map((t) =>
+        `<button type="button" class="chip${selectedMemTags.has(t) ? " on" : ""}" data-tag="${esc(t)}" aria-pressed="${selectedMemTags.has(t) ? "true" : "false"}">${esc(t)}</button>`
+      ).join("")
+    : "";
+  box.querySelectorAll("button.chip").forEach((b) => {
+    b.onclick = () => toggleMemTag(b.dataset.tag);
+  });
+}
+
+function toggleMemTag(tag) {
+  if (selectedMemTags.has(tag)) selectedMemTags.delete(tag);
+  else selectedMemTags.add(tag);
+  renderMemChips();
+  renderMemRows(""); // 过滤路径行集非空（chips 存在的前提），空态提示不会出现
+}
+
+function filteredMemRows() {
+  if (!selectedMemTags.size) return lastMemRows;
+  return lastMemRows.filter((m) => memTagArr(m.tags).some((t) => selectedMemTags.has(t)));
+}
+
+// 行渲染（过滤×排序组合管线）：行源唯一经 filteredMemRows()（chips 过滤
+// 单点，T03 组合锚点），过滤后再按 memSort 施加客户端排序（applyMemSort，
+// 「先过滤后排序」= T01×T03 合入到期组合）；meta「显示 n / 共 m」窗口语义
+// 诚实透出；创建时间相对显示 + title 悬浮完整本地时间（§2.3）；排序/重渲
+// 不打断行级证明展开态（openProof 摘下重插，T01 契约）；详情展开态经
+// openMemDetails 重放（仍命中行集者保持展开，被过滤掉者移出集合，「过滤即
+// 收起」）。形参 noRowsHint ≡ T01 期 emptyText（空态/过滤空提示同义透传）。
+function renderMemRows(noRowsHint) {
+  const emptyText = noRowsHint; // T01 探针 esc 字面量形参名兼容（同义别名）
+  const rows = filteredMemRows();
+  const visible = applyMemSort(rows); // 先过滤后排序（T01×T03 组合）
+  $("mem-meta").innerHTML = lastMemRows.length
+    ? `显示 <b>${rows.length}</b> / 共 ${esc(lastMemTotal)} 条记忆`
+    : "";
+  // 排序/重渲不打断行级证明展开态（沿面板「不进 5s 轮询防打断」契约；
+  // 对抗评审 finding：innerHTML 全量重写会静默清掉 memVerifyRow 直接
+  // DOM 插入的 tr.mem-proof）——先摘下已展开证明行（单开语义至多一个），
+  // 重写 tbody 后按 data-proof 原样插回其所属行之后，memVerifyRow 的
+  // toggle 寻址不受影响。
+  const openProof = $("mem-rows").querySelector("tr.mem-proof");
+  $("mem-rows").innerHTML = visible.length ? visible.map((m) => `
+      <tr class="mem-row" data-mid="${esc(m.memory_id)}">
+        <td>${esc(trunc(m.content, 90))}</td>
+        <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
+        <td class="mtime" title="${esc(timeFmt(m.created_ns))}">${esc(memTime(m.created_ns))}</td>
+        <td class="size">${esc(m.origin_device)}</td>
+        <td class="size">${(m.score ?? 0).toFixed(2)}</td>
+        <td><button class="btn ghost mem-verify-btn" data-mid="${esc(m.memory_id)}">验证</button></td>
+      </tr>`).join("")
+    : lastMemRows.length
+      ? `<tr><td colspan="6" class="empty">tag 过滤后无显示行——点掉上方 chips 恢复全部 ${lastMemRows.length} 条。</td></tr>`
+      : `<tr><td colspan="6" class="empty">${esc(emptyText ?? memEmptyText ?? "")}</td></tr>`;
+  $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
+    b.onclick = (ev) => { ev.stopPropagation(); memVerifyRow(b.dataset.mid, b); };
+  });
+  // 行点击展开/收起详情（M10-WP02-T02；验证按钮 stopPropagation 已隔离，
+  // 点验证不触发行展开）——绑定位于重渲管线内，排序/chips 过滤重渲后不丢。
+  $("mem-rows").querySelectorAll("tr.mem-row").forEach((tr) => {
+    tr.onclick = () => memToggleDetail(tr.dataset.mid);
+  });
+  if (openProof) {
+    const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(openProof.dataset.proof)}"]`);
+    if (anchor) anchor.after(openProof);
+  }
+  // 过滤×详情展开组合语义（§2.3 正交叠加）：重渲后重放展开态——仍命中
+  // 行集者恢复展开行；被过滤掉/已不存在者移出展开集（「过滤即收起」语义
+  // 落地，兼防死条目残留）。排序重渲同管线受益（T01×T02×T03 三方组合）。
+  for (const mid of [...openMemDetails]) {
+    const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(mid)}"]`);
+    if (!row || !memIndex.get(mid)) { openMemDetails.delete(mid); continue; }
+    memToggleDetail(mid);
+  }
+  renderMemSortHeads();
 }
 
 // 行级「验证」：memory_verify(memory_id) → 包含证明展开行（单开语义，
@@ -961,10 +1055,12 @@ function memDetailHtml(m) {
 }
 
 // 展开/收起切换：已开 → 只删该行详情行；未开 → 在本行后插入。既有证明
-// 行与列表本体一概不触碰。
+// 行与列表本体一概不触碰。展开 mid 集 openMemDetails（T03 组合接线）：
+// chips 过滤重渲后由 renderMemRows 重放展开态；语义为「过滤即收起」——
+// 被过滤移出的展开行视为收起，点掉 chip 恢复后不自动展开。
 function memToggleDetail(memoryId) {
   const open = $("mem-rows").querySelector(`tr.mem-detail[data-detail="${CSS.escape(memoryId)}"]`);
-  if (open) { open.remove(); return; }
+  if (open) { open.remove(); openMemDetails.delete(memoryId); return; }
   const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(memoryId)}"]`);
   const m = memIndex.get(memoryId);
   if (!row || !m) return;
@@ -973,6 +1069,7 @@ function memToggleDetail(memoryId) {
   tr.dataset.detail = memoryId;
   tr.innerHTML = memDetailHtml(m);
   row.after(tr);
+  openMemDetails.add(memoryId);
   tr.querySelectorAll("button.mem-copy-btn").forEach((b) => {
     b.onclick = (ev) => { ev.stopPropagation(); memCopyDetail(b, b.dataset.mid, b.dataset.copy); };
   });
