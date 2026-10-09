@@ -1718,7 +1718,11 @@ pub async fn build_server_state(
             .join(".partisync")
             .join("index")
     });
-    match partisync_index::search::engine::IndexEngine::open_or_create(
+    // M11-WP02-T03（D5 修复）：open_or_create → open_read_only——sidecar
+    // 不再无条件建 tantivy IndexWriter（`.tantivy-writer.lock` 独占是 D5
+    // 根因）；只读打开对 P24 语义（与任何写者并存）且扩展注册表注入面
+    // （下方 load_registry）不破坏。索引不存在 → 降级为空（口径不变）。
+    match partisync_index::search::engine::IndexEngine::open_read_only(
         partisync_index::IndexEngineConfig {
             index_root: root,
             enable_reranker: false,
@@ -1726,7 +1730,9 @@ pub async fn build_server_state(
         },
     ) {
         Ok(engine) => state.install_index_engine(engine).await,
-        Err(e) => eprintln!("partisync-mcp: index engine unavailable, asset_search disabled: {e}"),
+        Err(e) => eprintln!(
+            "partisync-mcp: index engine unavailable (read-only), asset_search disabled: {e}"
+        ),
     }
 
     // M7-WP01-T04 第 3 步：装载扩展注册表（SPEC §2.2 发现约定目录）。
