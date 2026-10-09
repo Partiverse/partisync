@@ -3,7 +3,17 @@ name = "partisd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PartiSync 守护进程：组装 core/graph/cas/sync 等子系统并暴露 RPC"
+description = "PartiSync 底座常驻守护进程（loopback MCP 服务面；ADR-0032，M11-WP02-T04）"
+
+[dependencies]
+partisync-gateway = { path = "../partisync-gateway", version = "0.1.0" }
+rmcp = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+partisync-index = { path = "../partisync-index", version = "0.1.0" }
 
 [lints]
 workspace = true
