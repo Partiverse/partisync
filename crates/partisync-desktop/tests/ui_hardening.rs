@@ -714,6 +714,271 @@ fn t05_index_stats_badge_cached_and_no_polling() {
     );
 }
 
+// ── M10-WP02-T01：记忆 form 防重载 + 表头客户端排序（SPEC §2.1）——
+// 清偿上方 t04 注释登记的「记忆面板同名 form 遗留」债（PR #162 披露源）。 ──
+
+/// 记忆 form 防整页重载锁（`t04_search_form_never_reloads_page` 同款扩面）：
+/// CSP `script-src 'self'` 必拦 inline `onsubmit`（原 index.html 死代码，
+/// 形同虚设），submit 按钮默认提交 / mem-q Enter 隐式提交 = 整页刷回
+/// browse tab、列表全丢。锁：记忆 form 区间零 `onsubmit=` / 零
+/// `type="submit"`；JS 侧 mem-q Enter preventDefault + 记忆 form submit
+/// 兜底 preventDefault 双保险。
+#[test]
+fn t01_memory_form_never_reloads_page() {
+    let at = UI_HTML
+        .find("id=\"view-memory\"")
+        .expect("记忆 section 存在");
+    let seg = &UI_HTML[at..];
+    let form_at = seg
+        .find("<form class=\"query-row\"")
+        .expect("记忆 form 存在（view-memory section 内首个 query-row）");
+    let seg = &seg[form_at..];
+    let end = seg.find("</form>").expect("记忆 form 闭合");
+    let form = &seg[..end];
+    assert!(
+        !form.contains("onsubmit="),
+        "记忆 form 禁 inline onsubmit（CSP script-src 'self' 必拦，形同虚设——登记债清偿）"
+    );
+    assert!(
+        !form.contains("type=\"submit\""),
+        "记忆 form 禁 submit 按钮（点击 = form 默认提交 = 整页刷回 browse tab）"
+    );
+    assert!(
+        UI_JS.contains(
+            "$(\"mem-q\").addEventListener(\"keydown\", (e) => { if (e.key === \"Enter\") { e.preventDefault(); loadMemories(); } });"
+        ),
+        "mem-q Enter 必须 preventDefault 后再检索（防隐式提交整页重载）"
+    );
+    assert!(
+        UI_JS.contains(
+            "document.querySelector(\"#view-memory form.query-row\").addEventListener(\"submit\", (e) => e.preventDefault());"
+        ),
+        "记忆 form 必须 submit 兜底 preventDefault（CSP 下 inline onsubmit 不生效；覆盖 mem-tag Enter 隐式提交）"
+    );
+}
+
+/// 表头客户端排序接线（SPEC §2.1）：四可排序列（创建时间/score/tags/
+/// 来源设备；内容列除外——截断展示排序意义弱）+ 点击排序当前快照
+/// （slice 副本，不重发查询、不触后端）+ 三态循环（首点升序/再点反序/
+/// 第三点回默认服务端序）+ tags 键经 memTags() 解析（非 canonical JSON
+/// 原串）+ 箭头指示当前排序键与方向 + 新检索/失败路径重置排序态。
+#[test]
+fn t01_memory_table_header_sort_wired() {
+    // 四可排序列接线：th data-mem-sort 恰四列 + memSortValue 四键覆盖。
+    for key in ["created", "score", "tags", "device"] {
+        assert!(
+            UI_HTML.contains(&format!("data-mem-sort=\"{key}\"")),
+            "记忆表头缺可排序列 {key}"
+        );
+    }
+    assert_eq!(
+        UI_HTML.matches("data-mem-sort=").count(),
+        4,
+        "可排序列必须恰四列（内容列除外，SPEC §2.1）"
+    );
+    assert!(
+        UI_JS.contains("if (key === \"created\") return m.created_ns ?? 0;")
+            && UI_JS.contains("if (key === \"score\") return m.score ?? 0;")
+            && UI_JS.contains("if (key === \"tags\") return memTags(m.tags);")
+            && UI_JS.contains("return String(m.origin_device ?? \"\");"),
+        "memSortValue 必须覆盖四键；tags 键 = memTags() 解析后逗号列表字典序（非 JSON 原串）"
+    );
+    // 排序只作用于已渲染窗口快照：slice() 副本 + 客户端比较器，函数体内
+    // 零 IPC 站点（沿 T04 chips「不重发查询、不触后端」判例）。
+    let at = UI_JS
+        .find("function sortedMemRows() {")
+        .expect("sortedMemRows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("if (!memSort.key) return memRows;"),
+        "默认态必须原样返回服务端序快照（第三点回默认语义）"
+    );
+    assert!(
+        body.contains("memRows.slice().sort("),
+        "排序必须作用于快照副本（不重排服务端原始序数组）"
+    );
+    for banned in ["invoke(", "call(", "fetch("] {
+        assert!(
+            !body.contains(banned),
+            "排序不得触后端/重发查询（客户端窗口序，SPEC §2.1）：{banned}"
+        );
+    }
+    // 三态循环：首点升序 → 再点反序 → 第三点回默认（服务端序）。
+    let at = UI_JS
+        .find("function memSortClick(key) {")
+        .expect("memSortClick 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("memSort = memSort.key !== key ? { key, dir: 1 }"),
+        "首点必须升序（dir=1）"
+    );
+    assert!(
+        body.contains("memSort.dir === 1 ? { key, dir: -1 }"),
+        "再点必须反序（dir=-1）"
+    );
+    assert!(
+        body.contains("{ key: null, dir: 1 };"),
+        "第三点必须回默认（服务端序，key=null）"
+    );
+    // 箭头指示 + aria-sort（当前排序键与方向透出）+ CSS 指示样式落地。
+    assert!(
+        UI_JS.contains("function renderMemSortHeads() {")
+            && UI_JS.contains(
+                "th.querySelector(\".mem-sort-arrow\").textContent = on ? (memSort.dir === 1 ? \"↑\" : \"↓\") : \"\";"
+            )
+            && UI_JS.contains("aria-sort"),
+        "表头必须箭头指示当前排序键与方向 + aria-sort 同步"
+    );
+    assert!(
+        UI_CSS.contains(".mem-sort-arrow") && UI_CSS.contains("th[data-mem-sort]"),
+        "styles-v3.css 缺排序指示样式（可点击 + 激活态 + 箭头）"
+    );
+    // 表头点击接线 + 新检索/换 query/换 tag 重置。突变锁死（对抗评审
+    // finding：声明行 `let memSort = ...` 亦命中同一子串，`matches >= 2`
+    // 实际只保证「至少一处」——单删失败路径重置行仍绿）——两处重置分别
+    // 按上下文锚定。
+    assert!(
+        UI_JS.contains("th.onclick = () => memSortClick(th.dataset.memSort);"),
+        "表头点击必须接线 memSortClick（GUI 实操判例：漏绑 = 静态摆设）"
+    );
+    assert!(
+        UI_JS.contains(
+            "memSort = { key: null, dir: 1 }; // 新检索/换 query/换 tag：排序态重置默认（服务端序）"
+        ),
+        "loadMemories 成功路径必须重置排序态（新检索/换 query/tag → 服务端默认序）"
+    );
+    let load_at = UI_JS
+        .find("async function loadMemories() {")
+        .expect("loadMemories 必须存在");
+    let load_seg = &UI_JS[load_at..];
+    let catch_at = load_seg
+        .find("} catch (e) {")
+        .expect("loadMemories 必须有 catch 分支");
+    let catch_seg = &load_seg[catch_at..];
+    let catch_end = catch_seg.find("\n  }\n}").unwrap_or(catch_seg.len());
+    let catch_body = &catch_seg[..catch_end];
+    assert!(
+        catch_body.contains("memRows = [];")
+            && catch_body.contains("memSort = { key: null, dir: 1 };"),
+        "loadMemories 失败路径必须同时重置命中快照与排序态（失败不得残留旧窗口/旧排序）"
+    );
+}
+
+/// 排序重渲状态契约（对抗评审 findings）：①renderMemRows 的 innerHTML
+/// 全量重写不得静默清掉 memVerifyRow 直接 DOM 插入的 `tr.mem-proof`
+/// （面板既有契约「不进 5s 轮询防行级展开态被打断」的排序面延伸）——
+/// 必须先摘下、重写后按 data-proof 插回所属行之后；②空态文案经
+/// memEmptyText 透传（点表头不得把空态/错误态清成空白 empty 行）。
+#[test]
+fn t01_sort_rerender_preserves_proof_row_and_empty_text() {
+    // 签名锚点 T01×T03 合入迁移：形参 emptyText ≡ noRowsHint（T03 chips
+    // 管线统一命名，同义透传；断言集与强度不变，仅锚随名迁）。
+    let at = UI_JS
+        .find("function renderMemRows(noRowsHint) {")
+        .expect("renderMemRows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("const openProof = $(\"mem-rows\").querySelector(\"tr.mem-proof\");"),
+        "排序重写 tbody 前必须先摘下已展开证明行（防静默清掉，无恢复无提示）"
+    );
+    assert!(
+        body.contains("tr.mem-row[data-mid=\"${CSS.escape(openProof.dataset.proof)}\"]")
+            && body.contains("if (anchor) anchor.after(openProof);"),
+        "重写后必须按 data-proof 把证明行原样插回所属行之后（memVerifyRow toggle 寻址不受影响）"
+    );
+    assert!(
+        UI_JS.contains("let memEmptyText = null;")
+            && UI_JS.contains("esc(emptyText ?? memEmptyText ?? \"\")")
+            && UI_JS.contains("memEmptyText = q || tag ?")
+            && UI_JS.contains("memEmptyText = \"记忆列表加载失败——见顶部错误提示。\";")
+            && UI_JS.contains("renderMemRows(memEmptyText);"),
+        "空态/错误态文案必须落 memEmptyText 且排序重渲透传（防空态被点表头清成空白 empty 行）"
+    );
+}
+
+// 对抗评审二轮 finding（low）：排序 × in-flight 验证竞态——memVerifyRow
+// 在 await memCall 之前抓取行引用，await 期间点表头触发 renderMemRows
+// 全量重写 tbody 后行变 detached 节点，row.after(tr) 把证明行插进游离
+// DOM（静默不可见）。锁死修复：证明行插入必须按 memory_id 延迟寻址——
+// await 返回后现查当前 tbody 锚点；行不在当前窗口时落 append 兜底
+// （保持可见，不游离）。
+#[test]
+fn t01_verify_proof_insert_readdresses_after_await() {
+    let at = UI_JS
+        .find("async function memVerifyRow(memoryId, btn) {")
+        .expect("memVerifyRow 必须存在");
+    let seg = &UI_JS[at..];
+    // 函数体边界双模式（沿 t02_copy 探针句式）：T02 合入后 memVerifyRow
+    // 与下一个 async fn 之间夹有普通函数（memDetailHtml/memToggleDetail），
+    // 单一 async 边界会把其合法同款锚点字面量误卷进断言面。
+    let end = ["\nfunction ", "\nasync function "]
+        .iter()
+        .filter_map(|m| seg.find(m))
+        .min()
+        .unwrap_or(seg.len());
+    let body = &seg[..end];
+    let await_at = body
+        .find("await memCall(\"memory_verify\"")
+        .expect("memory_verify 调用必须存在");
+    assert!(
+        !body.contains("const row = $(\"mem-rows\").querySelector(`tr.mem-row"),
+        "await 前禁止抓取行引用（重写 tbody 后即 detached，row.after(tr) 游离插入证明行静默不可见）"
+    );
+    let anchor_at = body
+        .find("const anchor = $(\"mem-rows\").querySelector(`tr.mem-row[data-mid=\"${CSS.escape(memoryId)}\"]`)")
+        .expect("插入锚点必须按 memory_id 现查");
+    assert!(
+        anchor_at > await_at,
+        "锚点现查必须位于 await memCall 之后（延迟寻址，规避重渲竞态窗口）"
+    );
+    assert!(
+        body.contains("if (anchor) anchor.after(tr); else $(\"mem-rows\").append(tr);"),
+        "证明行必须插在当前 DOM 锚点之后；行不在窗口时落 append 兜底（保持可见，不游离）"
+    );
+}
+
+/// §6-R6 T01×T02 合入链必办微任务（PR #166 对抗评审 F2 登记债；裁定落
+/// 合入流程）：renderMemRows 排序重渲必须 ① 重绑 `tr.mem-row` 行点击
+/// （否则新行集 onclick 全部缺失，行展开失效直至下次检索）；② 重锚已
+/// 展开 `tr.mem-detail`（多行详情并存语义，沿 mem-proof 重锚判例）；
+/// ③ 验证按钮 stopPropagation 隔离在重绑后仍成立。
+#[test]
+fn t01x02_sort_rerender_rebinds_row_click_and_reanchors_detail() {
+    // 签名锚点 T01×T03 合入迁移（emptyText ≡ noRowsHint，同上）；详情保
+    // 有断言由「DOM 重锚实现」改锁「openMemDetails 重放语义」——T03 chips
+    // 管线以展开集重放达成同一 R6 语义（排序/过滤重渲详情不丢），且被
+    // t03_mem_detail_state_restored_after_filter_rerender 同面锁死；语义
+    // 强度不变，实现锚随合入融合迁移。
+    let at = UI_JS
+        .find("function renderMemRows(noRowsHint) {")
+        .expect("renderMemRows 必须存在");
+    let seg = &UI_JS[at..];
+    let end = seg.find("\nfunction ").unwrap_or(seg.len());
+    let body = &seg[..end];
+    assert!(
+        body.contains("tr.onclick = () => memToggleDetail(tr.dataset.mid);"),
+        "排序重渲必须重绑 tr.mem-row 行点击（R6：不重绑则行展开失效）"
+    );
+    assert!(
+        body.contains("for (const mid of [...openMemDetails])")
+            && body.contains("memToggleDetail(mid);"),
+        "排序/过滤重渲必须经 openMemDetails 重放已展开详情行（R6 语义：重渲详情不丢）"
+    );
+    assert!(
+        body.contains("openMemDetails.delete(mid);"),
+        "被换出行集的展开 mid 必须移出集合（防死条目残留）"
+    );
+    assert!(
+        body.contains("ev.stopPropagation(); memVerifyRow(b.dataset.mid, b)"),
+        "验证按钮必须 stopPropagation 隔离行点击（重渲重绑后仍成立，R4×R6 组合面）"
+    );
+}
 /// 裸插值禁列增补（M10-WP03-T02 详情面板动态字段）：content_id / mtime
 /// 载荷插值一律经 esc()/timeFmt()/sizeFmt() 包裹，不得以 `${contentId`、
 /// `${d.copies` 裸形态进 innerHTML 模板。

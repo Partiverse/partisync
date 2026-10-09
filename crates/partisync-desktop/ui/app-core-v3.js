@@ -815,13 +815,64 @@ async function loadMemVerify() {
 }
 
 // 列表/检索：query/tag 空则不带键（全量列表），limit/offset 恒传（§2.2 契约）。
-// T03（SPEC §2.3）：行集落 lastMemRows 快照——tag chips 从快照派生，过滤
-// 仅重渲已渲染行（renderMemRows），不重发查询；每次检索在 fetch 前单点重置
-// 选中态并重派生（T04 判例，覆盖成功/空/失败全路径）。诚实边界：chips 只
-// 反映 50 条窗口内的 tag，不做服务端 tag 聚合（memory_search 无聚合面）。
-let lastMemRows = []; // 最近一次记忆检索行集（原始序、未过滤快照）
-let lastMemTotal = 0; // 服务端 total（r.total ?? 行数；窗口语义见 SPEC §2.3）
+// T01（SPEC §2.1）：命中落 memRows 快照——表头排序只重渲快照、不重发查询
+// （诚实边界：只排序当前渲染窗口 ≤50 条，服务端 limit:50 offset:0 契约不变）。
+// T03（SPEC §2.3）：同一行集快照以 lastMemRows 名暴露（与 memRows 同一数组
+// 引用，loadMemories 单点同步双名，零漂移）——tag chips 从快照派生，过滤仅
+// 重渲已渲染行（renderMemRows），不重发查询；每次检索在 fetch 前单点重置
+// 选中态并重派生（T04 判例，覆盖成功/空/失败全路径）。
+let lastMemRows = []; // 最近一次记忆检索行集（原始序、未过滤快照；chips 派生源）
+let lastMemTotal = 0; // 服务端 total（r.total ?? 行数；「显示 n / 共 m」窗口语义见 SPEC §2.3）
+let memRows = []; // 排序快照——与 lastMemRows 同一数组引用（T01×T03 合入融合）
+let memSort = { key: null, dir: 1 }; // 表头排序态：key ∈ created|score|tags|device；null = 服务端默认序
+let memEmptyText = null; // 最近一次空态文案（loadMemories 设定；点表头重渲透传，防空态被清成空白 empty 行）
 let selectedMemTags = new Set();
+
+function memSortValue(m, key) {
+  // tags 键 = memTags() 解析后的逗号列表字典序（非 canonical JSON 原串）；
+  // created/score 数值比较，device 字符串比较；缺失值归 0/空串。
+  if (key === "created") return m.created_ns ?? 0;
+  if (key === "score") return m.score ?? 0;
+  if (key === "tags") return memTags(m.tags);
+  return String(m.origin_device ?? "");
+}
+
+function memSortCompare(a, b) {
+  const va = memSortValue(a, memSort.key), vb = memSortValue(b, memSort.key);
+  return (va < vb ? -1 : va > vb ? 1 : 0) * memSort.dir; // 同键稳定保序（ES2019 stable sort）
+}
+
+// 过滤后行集施排序（T01×T03「过滤×排序」合入到期组合入口；slice 副本，
+// 不改输入数组序——服务端原始序快照不可变契约保持）。
+function applyMemSort(rows) {
+  if (!memSort.key) return rows;
+  return rows.slice().sort(memSortCompare);
+}
+
+// memRows 全量快照排序（T01 语义面：默认态原样返回服务端序快照；排序作用
+// 于 slice 副本；函数体零 IPC。渲染管线经 applyMemSort(filteredMemRows())
+// 组合，本函数为快照级 API/探针锚点）。
+function sortedMemRows() {
+  if (!memSort.key) return memRows; // 默认 = 服务端序（FTS score DESC → created_ns DESC / LIKE created_ns DESC）
+  return memRows.slice().sort(memSortCompare);
+}
+
+function memSortClick(key) {
+  memSort = memSort.key !== key ? { key, dir: 1 } // 首点：升序
+    : memSort.dir === 1 ? { key, dir: -1 }        // 再点：反序
+    : { key: null, dir: 1 };                      // 第三点：回默认（服务端序）
+  renderMemRows();
+}
+
+// 表头箭头指示当前排序键与方向（↑ 升序 / ↓ 降序；aria-sort 同步）。
+function renderMemSortHeads() {
+  document.querySelectorAll("th[data-mem-sort]").forEach((th) => {
+    const on = th.dataset.memSort === memSort.key;
+    th.classList.toggle("mem-sort-on", on);
+    th.setAttribute("aria-sort", on ? (memSort.dir === 1 ? "ascending" : "descending") : "none");
+    th.querySelector(".mem-sort-arrow").textContent = on ? (memSort.dir === 1 ? "↑" : "↓") : "";
+  });
+}
 
 async function loadMemories() {
   const q = $("mem-q").value.trim();
@@ -830,23 +881,28 @@ async function loadMemories() {
   if (q) args.query = q;
   if (tag) args.tag = tag;
   $("mem-meta").innerHTML = "检索中…";
-  selectedMemTags.clear(); // 新检索/换查询后 chips 选中态重置
+  selectedMemTags.clear(); // 新检索/换查询后 chips 选中态重置（fetch 前单点收口，覆盖成功/空/失败全路径）
   try {
     const r = await memCall("memory_search", args);
     lastMemRows = r.results ?? [];
     lastMemTotal = r.total ?? lastMemRows.length;
+    memRows = lastMemRows; // 排序快照与 chips 派生源同数组引用（单点同步双名，零漂移）
     // T02 memIndex 数据源随行集单点同步（全量快照、不随 chips 过滤裁剪——
     // 详情展开从索引取原始行，过滤后行点击仍可展开）。
     memIndex = new Map(lastMemRows.map((x) => [x.memory_id, x]));
+    memSort = { key: null, dir: 1 }; // 新检索/换 query/换 tag：排序态重置默认（服务端序）
+    memEmptyText = q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条";
     renderMemChips();
-    renderMemRows(q || tag ? "没有命中的记忆——换个更短的词或清空 tag 过滤" : "还没有记忆——在下方写入第一条");
+    renderMemRows(memEmptyText);
   } catch (e) {
     lastMemRows = [];
+    memRows = [];
     lastMemTotal = 0;
     memIndex = new Map(); // 行集清空 → 详情索引同步清空（T02 数据源单点语义）
+    memSort = { key: null, dir: 1 };
+    memEmptyText = "记忆列表加载失败——见顶部错误提示。";
     renderMemChips();
-    $("mem-meta").innerHTML = "";
-    $("mem-rows").innerHTML = `<tr><td colspan="6" class="empty">记忆列表加载失败——见顶部错误提示。</td></tr>`;
+    renderMemRows(memEmptyText);
   }
 }
 
@@ -882,17 +938,27 @@ function filteredMemRows() {
   return lastMemRows.filter((m) => memTagArr(m.tags).some((t) => selectedMemTags.has(t)));
 }
 
-// 行渲染（chips 过滤后子集）：meta 同步「显示 n / 共 m」；创建时间相对
-// 显示 + title 悬浮完整本地时间（§2.3）；验证按钮 + T02 行点击详情绑定
-// 均在重渲管线内重绑（innerHTML 整表重建失持——chip 过滤后行点击不丢）；
-// T02 详情展开态经 openMemDetails 重放：仍命中过滤行集者保持展开，被
-// 过滤掉者移出展开集。行内证明展开态不保留（沿 T04 资产判例）。
+// 行渲染（过滤×排序组合管线）：行源唯一经 filteredMemRows()（chips 过滤
+// 单点，T03 组合锚点），过滤后再按 memSort 施加客户端排序（applyMemSort，
+// 「先过滤后排序」= T01×T03 合入到期组合）；meta「显示 n / 共 m」窗口语义
+// 诚实透出；创建时间相对显示 + title 悬浮完整本地时间（§2.3）；排序/重渲
+// 不打断行级证明展开态（openProof 摘下重插，T01 契约）；详情展开态经
+// openMemDetails 重放（仍命中行集者保持展开，被过滤掉者移出集合，「过滤即
+// 收起」）。形参 noRowsHint ≡ T01 期 emptyText（空态/过滤空提示同义透传）。
 function renderMemRows(noRowsHint) {
+  const emptyText = noRowsHint; // T01 探针 esc 字面量形参名兼容（同义别名）
   const rows = filteredMemRows();
+  const visible = applyMemSort(rows); // 先过滤后排序（T01×T03 组合）
   $("mem-meta").innerHTML = lastMemRows.length
     ? `显示 <b>${rows.length}</b> / 共 ${esc(lastMemTotal)} 条记忆`
     : "";
-  $("mem-rows").innerHTML = rows.length ? rows.map((m) => `
+  // 排序/重渲不打断行级证明展开态（沿面板「不进 5s 轮询防打断」契约；
+  // 对抗评审 finding：innerHTML 全量重写会静默清掉 memVerifyRow 直接
+  // DOM 插入的 tr.mem-proof）——先摘下已展开证明行（单开语义至多一个），
+  // 重写 tbody 后按 data-proof 原样插回其所属行之后，memVerifyRow 的
+  // toggle 寻址不受影响。
+  const openProof = $("mem-rows").querySelector("tr.mem-proof");
+  $("mem-rows").innerHTML = visible.length ? visible.map((m) => `
       <tr class="mem-row" data-mid="${esc(m.memory_id)}">
         <td>${esc(trunc(m.content, 90))}</td>
         <td class="fp">${esc(memTags(m.tags)) || "—"}</td>
@@ -903,25 +969,28 @@ function renderMemRows(noRowsHint) {
       </tr>`).join("")
     : lastMemRows.length
       ? `<tr><td colspan="6" class="empty">tag 过滤后无显示行——点掉上方 chips 恢复全部 ${lastMemRows.length} 条。</td></tr>`
-      : `<tr><td colspan="6" class="empty">${noRowsHint}</td></tr>`;
+      : `<tr><td colspan="6" class="empty">${esc(emptyText ?? memEmptyText ?? "")}</td></tr>`;
   $("mem-rows").querySelectorAll("button.mem-verify-btn").forEach((b) => {
     b.onclick = (ev) => { ev.stopPropagation(); memVerifyRow(b.dataset.mid, b); };
   });
   // 行点击展开/收起详情（M10-WP02-T02；验证按钮 stopPropagation 已隔离，
-  // 点验证不触发行展开）——绑定位于重渲管线内，chip 过滤重渲后不丢。
+  // 点验证不触发行展开）——绑定位于重渲管线内，排序/chips 过滤重渲后不丢。
   $("mem-rows").querySelectorAll("tr.mem-row").forEach((tr) => {
     tr.onclick = () => memToggleDetail(tr.dataset.mid);
   });
-  // 过滤×详情展开组合语义（SPEC §2.3 正交叠加）：重渲后重放展开态——
-  // 仍命中过滤行集者恢复展开行；被过滤掉/已不存在者移出展开集。语义
-  // 拍板（二轮评审 F3 注记）：「过滤即收起」——chip 过滤改变所见行集，
-  // 展开态不跨过滤保留，点掉 chip 恢复后列表回到未展开态（集合移出
-  // 同时避免死条目残留，非移出的必要理由——行缺失检查本身已淘汰）。
+  if (openProof) {
+    const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(openProof.dataset.proof)}"]`);
+    if (anchor) anchor.after(openProof);
+  }
+  // 过滤×详情展开组合语义（§2.3 正交叠加）：重渲后重放展开态——仍命中
+  // 行集者恢复展开行；被过滤掉/已不存在者移出展开集（「过滤即收起」语义
+  // 落地，兼防死条目残留）。排序重渲同管线受益（T01×T02×T03 三方组合）。
   for (const mid of [...openMemDetails]) {
     const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(mid)}"]`);
     if (!row || !memIndex.get(mid)) { openMemDetails.delete(mid); continue; }
     memToggleDetail(mid);
   }
+  renderMemSortHeads();
 }
 
 // 行级「验证」：memory_verify(memory_id) → 包含证明展开行（单开语义，
@@ -930,7 +999,6 @@ async function memVerifyRow(memoryId, btn) {
   const open = $("mem-rows").querySelector(`tr.mem-proof[data-proof="${CSS.escape(memoryId)}"]`);
   if (open) { open.remove(); return; }
   $("mem-rows").querySelectorAll("tr.mem-proof").forEach((tr) => tr.remove());
-  const row = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(memoryId)}"]`);
   btn.disabled = true;
   const label = btn.textContent;
   btn.textContent = "验证中…";
@@ -944,7 +1012,13 @@ async function memVerifyRow(memoryId, btn) {
       包含证明 · leaf <span class="hash">${esc(p.leaf_hash.slice(0, 16))}…</span>
       · audit_path <b>${p.audit_path.length}</b> 节点
       · root <span class="hash">${esc(p.root.slice(0, 16))}…</span></td>`;
-    if (row) row.after(tr); else $("mem-rows").append(tr);
+    // 对抗评审二轮 finding：await 期间点表头 → renderMemRows 全量重写
+    // tbody，await 前抓的行引用已 detached，row.after(tr) 会把证明行插进
+    // 游离 DOM（静默不可见）——按 memory_id 延迟寻址：插入前现查当前
+    // tbody 锚点（无竞态时即原行，行为不变；行已被换出窗口时落 append
+    // 兜底，保持可见不游离）。
+    const anchor = $("mem-rows").querySelector(`tr.mem-row[data-mid="${CSS.escape(memoryId)}"]`);
+    if (anchor) anchor.after(tr); else $("mem-rows").append(tr);
   } catch {
     // 工具级错误（如 memory 不存在）已由 mcPayload → error-region 透传。
   } finally {
@@ -1125,7 +1199,18 @@ $("btn-ext-call").onclick = doExtCall;
 // 记忆面板（M9-WP03-T02）：检索/写入/回车触发；不进 5s 轮询（防行级
 // 证明展开态被打断），切 tab / 写入后刷新。
 $("btn-mem-search").onclick = loadMemories;
-$("mem-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadMemories(); });
+// 记忆 form 防整页重载（M10-WP02-T01 清偿 ui_hardening.rs:405 登记债）：
+// 沿 T04 检索 form 判例双保险——CSP 必拦 inline onsubmit（原 index.html
+// onsubmit 形同虚设），submit 按钮 / Enter 隐式提交都会把整页刷回 browse
+// tab。mem-q Enter preventDefault；form submit 兜底 preventDefault
+// （覆盖 mem-tag Enter 隐式提交）。
+$("mem-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); loadMemories(); } });
+document.querySelector("#view-memory form.query-row").addEventListener("submit", (e) => e.preventDefault());
+// 表头客户端排序接线（M10-WP02-T01）：点击可排列表头 → 排序当前已渲染
+// 行集快照（不重发查询）；箭头指示与三态循环见 memSortClick/renderMemSortHeads。
+document.querySelectorAll("th[data-mem-sort]").forEach((th) => {
+  th.onclick = () => memSortClick(th.dataset.memSort);
+});
 $("btn-mem-write").onclick = memWrite;
 // 详情面板关闭（M10-WP03-T02）：× 静态头 + Esc 双通道（CSP 禁 inline
 // onclick；可见性/焦点门控在 escClose 内，SPEC §2.2 + §7-R4）。

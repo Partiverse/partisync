@@ -30,8 +30,28 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
+# M10-WP05-T03（远程 MCP 传输面）：axum 组装 Streamable HTTP router 与
+# gate 中间件——workspace 既有 pin（hub mcp_remote 骨架先例），零新增
+# 顶层（铁律 8）。
+axum.workspace = true
 sqlx = { workspace = true }
-rmcp = { workspace = true, features = ["server", "transport-io"] }
+# M10-WP05-T03：启用 transport-streamable-http-server（rmcp StreamableHttpService
+# + 协议头/Origin 校验 + stateless 单 JSON；ADR-0031 决策 2，feature 翻转
+# 零新 crate——评估件 §1.6 cargo tree 实证，全部已在 lock）。
+rmcp = { workspace = true, features = ["server", "transport-io", "transport-streamable-http-server"] }
+# M10-WP05-T03（ADR-0031 决策 4）：TLS 线位——tokio-rustls acceptor +
+# rustls ServerConfig（PEM 加载走 rustls::pki_types PemObject）。两件均为
+# workspace 既有 pin（0.23 线已在 lock 经 reqwest/iroh 同线，零新 crate，
+# 铁律 8 载体 = ADR-0031）。
+rustls.workspace = true
+tokio-rustls.workspace = true
+# M10-WP05-T04（ADR-0031 决策 3）：RS 侧 access token 验签（JWKS + iss/
+# aud(RFC 8707)/exp + algorithm allowlist，fail-closed；workspace pin 注释
+# 载查证结论）。JWKS 拉取/缓存用既有 reqwest 手写，不引第三件。
+jsonwebtoken.workspace = true
+# M10-WP05-T04：JWKS 拉取（ADR-0031 决策 3「reqwest 既有 pin 手写，不引
+# 第三件」）——由 dev-only 升主依赖（workspace 既有顶层，铁律 8 零新增）。
+reqwest.workspace = true
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 dirs = "5"
@@ -43,6 +63,9 @@ tempfile = "3"
 fuser = { workspace = true }
 # e2e 测试用 client 侧（serve_client/RoleClient + TokioChildProcess）
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+# M10-WP05-T03 TLS 探针：测试自签证书 fixture（ADR-0031 决策 4，SPEC
+# §6-R6 仓内可复现分支；0.14 已在 lock 零新 crate）。
+rcgen.workspace = true
 
 # windows: use server-side-http transport instead of stdio
 [target.'cfg(target_family = "windows")'.dependencies]

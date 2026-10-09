@@ -1692,19 +1692,22 @@ async fn apply_operation(
 // 运行入口
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 运行 MCP Server（RMCP stdio 传输）。
-///
-/// `McpServerState` 实现 `ServerHandler`，经 blanket impl
-/// `impl<H: ServerHandler> Service<RoleServer> for H`（handler/server.rs:50）
-/// 满足 `Service<RoleServer>`，故直接传 state 给 `serve_server`。
+/// 组装 MCP 服务状态（构造面，stdio 面与远程 HTTP 面共用——M10-WP05-T03
+/// `partisync-mcp-http` 入口接线）：graph.db 打开 + 索引引擎降级注入 +
+/// 扩展注册表降级注入。
 ///
 /// `index_root`：检索引擎索引目录（与 CLI `search --index-root` 同约定）；
 /// `None` 用默认 `~/.partisync/index`。索引打开失败不致命——`asset_search`
-/// 退化为空结果，其余四工具不受影响。
-pub async fn run_mcp_server(
+/// 退化为空结果，其余四工具不受影响。降级告警走 stderr（stdio 面上
+/// stdout 是 JSON-RPC 协议通道），tag 沿 `partisync-mcp` 家族名。
+///
+/// 可见性说明：`src/bin/*` 是独立 bin crate，看不到 `pub(crate)`，故本
+/// 构造面为 `pub`（SPEC §5 文件清单「构造面复用」行；既有公共 API 面
+/// 零变更）。
+pub async fn build_server_state(
     graph_db_path: Option<PathBuf>,
     index_root: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<McpServerState, Box<dyn std::error::Error + Send + Sync>> {
     let state = McpServerState::new(graph_db_path)
         .await
         .map_err(|e| format!("failed to open graph.db: {e}"))?;
@@ -1750,6 +1753,19 @@ pub async fn run_mcp_server(
             ext_dir.display()
         ),
     }
+    Ok(state)
+}
+
+/// 运行 MCP Server（RMCP stdio 传输）。
+///
+/// `McpServerState` 实现 `ServerHandler`，经 blanket impl
+/// `impl<H: ServerHandler> Service<RoleServer> for H`（handler/server.rs:50）
+/// 满足 `Service<RoleServer>`，故直接传 state 给 `serve_server`。
+pub async fn run_mcp_server(
+    graph_db_path: Option<PathBuf>,
+    index_root: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let state = build_server_state(graph_db_path, index_root).await?;
 
     // RunningService drop 即 shutdown——必须 waiting 到客户端断开（stdio EOF）
     let service = rmcp::service::serve_server(state, stdio()).await?;

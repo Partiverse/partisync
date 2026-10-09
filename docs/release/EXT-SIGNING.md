@@ -45,6 +45,20 @@ minisign -Vm my_tool.wasm -p partisync.pub
 `PartiSync extension signature (master key, offline)`——与发布产物签名
 口径一致（key-custody.md「CI 签名口径」）。
 
+## 示例扩展签名窗口（M10-WP06-T03 登记，2026-10-08）
+
+- **登记对象**：`examples/extensions/demo_ext.wasm` +
+  `demo_ext.json`（生产路径示例扩展，随 M7-WP01-T04 入仓；
+  2026-10-08 实测**无 `.minisig`**）；
+- **闭合动作**：生产钥按上方命令链签名（`-m demo_ext.wasm
+  -x demo_ext.minisig`）+ 自验，三文件齐备后投放；**窗口触发 =
+  密钥持有人动作可得**（key-custody.md 双人保管纪律，AI 不可
+  代办——沿 M9-WP04 SPEC §6-R5 人工项登记）；
+- **窗口未闭合行为维持**：强制验签下示例扩展不可装载
+  （`LoadError::Unsigned` 在编译器接触字节前拒绝，[P21] 不变）——
+  非缺陷回归，属待持有人闭合的登记窗口；本机装有旧版未签名 demo
+  扩展的机器上 desktop e2e 相应失败（M9-report §5 债表行如实登记）。
+
 ## 端到端自验（对应宿主行为）
 
 | 步骤 | 命令/动作 | 预期 |

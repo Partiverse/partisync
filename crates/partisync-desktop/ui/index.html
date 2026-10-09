@@ -110,10 +110,15 @@
       <time id="mem-root" title="承诺树根（截断展示）"></time>
     </div>
     <div class="section-tag">search / memory_search（FTS5 trigram · tag 精确 · limit 50）</div>
+    <!-- M10-WP02-T01：form 防重载（清偿 ui_hardening.rs:405 登记债）——
+         摘除死 inline onsubmit（CSP script-src 'self' 必拦，形同虚设），
+         按钮 type=submit → type=button（点击默认提交 = 整页刷回 browse）；
+         防重载接线在 app-core-v3.js 记忆绑定区（Enter preventDefault +
+         submit 兜底，沿 M10-WP01-T04 检索 form 判例） -->
     <form class="query-row">
       <input id="mem-q" type="search" placeholder="搜记忆内容…" aria-label="记忆检索">
       <input id="mem-tag" type="search" placeholder="tag 精确过滤" aria-label="tag 过滤" class="mem-tag-input">
-      <button id="btn-mem-search" type="submit">[检索]</button>
+      <button id="btn-mem-search" type="button">[检索]</button>
     </form>
     <div class="result-meta" id="mem-meta"></div>
     <!-- M10-WP02-T03（SPEC §2.3）：tag 过滤 chips 容器——从当前已渲染行集
@@ -121,7 +126,11 @@
          不重发查询。 -->
     <div id="mem-filter-chips" class="chips" role="group" aria-label="按 tag 过滤"></div>
     <table class="panel-table" aria-label="记忆条目">
-      <thead><tr><th>内容</th><th>tags</th><th>创建时间</th><th>来源设备</th><th>score</th><th></th></tr></thead>
+      <!-- M10-WP02-T01：表头客户端排序——data-mem-sort 四可排序列（内容
+           列除外：截断展示排序意义弱）；箭头由 renderMemSortHeads 置入
+           （↑/↓），点击只排序当前 ≤50 条渲染窗口快照、不重发查询
+           （SPEC §2.1 诚实边界：服务端排序参数 = MCP 公共面变更，非目标） -->
+      <thead><tr><th>内容</th><th data-mem-sort="tags">tags<span class="mem-sort-arrow" aria-hidden="true"></span></th><th data-mem-sort="created">创建时间<span class="mem-sort-arrow" aria-hidden="true"></span></th><th data-mem-sort="device">来源设备<span class="mem-sort-arrow" aria-hidden="true"></span></th><th data-mem-sort="score">score<span class="mem-sort-arrow" aria-hidden="true"></span></th><th></th></tr></thead>
       <tbody id="mem-rows"></tbody>
     </table>
     <div class="section-tag">write / memory_write（内容寻址幂等）</div>
