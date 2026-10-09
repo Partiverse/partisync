@@ -908,10 +908,12 @@ async fn search_cmd(args: &[String]) -> i32 {
         enable_reranker: false,
         reranker_model_dir: None,
     };
-    let engine = match partisync_index::IndexEngine::open_or_create(config) {
+    // M11-WP02-T03（D5 修复）：search 为纯读消费者，只读打开不抢写锁
+    let engine = match partisync_index::IndexEngine::open_read_only(config) {
         Ok(e) => e,
         Err(err) => {
-            eprintln!("error: 打开索引: {err}");
+            eprintln!("error: 打开索引(只读): {err}");
+            eprintln!("hint: 索引不存在时先运行 `partisync watch` 或 `partisync reindex` 建立索引");
             return 1;
         }
     };

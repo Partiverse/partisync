@@ -285,7 +285,12 @@ impl Bm25Index {
 
         let writer = index
             .writer(50_000_000) // 50 MB heap
-            .map_err(|e| err("open tantivy writer", e))?;
+            .map_err(|e| {
+                err(
+                    "open tantivy writer (write lock busy: another writer holds the index; read-only queries can use open_read_only; stop other writers before bulk rebuild)",
+                    e,
+                )
+            })?;
 
         let reader = index
             .reader_builder()

@@ -98,7 +98,12 @@ pub async fn list(state: State<'_, AppState>, args: ListArgs) -> DesktopResult<V
 #[tauri::command]
 pub async fn search(state: State<'_, AppState>, args: SearchArgs) -> DesktopResult<Vec<SearchHit>> {
     let limit = args.limit.unwrap_or(20).min(100) as usize;
-    let engine = state.index().await?;
+    // D3 清偿（M11-WP02-T03）：与 index_stats 同款拨回——打开失败落
+    // `Index`（SPEC §2.5 契约），不再经 From 落 `Internal`。
+    let engine = state.index().await.map_err(|e| match e {
+        DesktopError::Internal(msg) => DesktopError::Index(msg),
+        other => other,
+    })?;
     let result = engine
         .bm25_only(Bm25Query {
             query: args.q,
@@ -163,7 +168,11 @@ pub async fn search_hybrid(
     let query = args.q.clone();
     let embedder = state.embedder().await?;
     let query_vector = embedder.embed_query(&query)?;
-    let engine = state.index().await?;
+    // D3 清偿（M11-WP02-T03）：同 search——打开失败落 `Index`。
+    let engine = state.index().await.map_err(|e| match e {
+        DesktopError::Internal(msg) => DesktopError::Index(msg),
+        other => other,
+    })?;
     let result = engine
         .hybrid_search(
             &query,

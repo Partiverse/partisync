@@ -69,8 +69,13 @@ impl AppState {
 
     /// 索引句柄懒加载： 首次调用打开 `IndexEngine`， 后续调用复用。
     ///
+    /// M11-WP02-T03（D5 修复）：`open_or_create` → `open_read_only`——
+    /// 桌面对索引为纯读消费者，不再无条件建 tantivy `IndexWriter`（与
+    /// sidecar/CLI 的写者按 D19/ADR-0032 决策 2 并存）。索引不存在
+    /// （`meta.json` 缺失）→ 结构化错误，指引先建索引。
+    ///
     /// # Errors
-    /// `IndexEngine::open_or_create` 失败（无 tantivy / 索引目录不可写 /
+    /// `IndexEngine::open_read_only` 失败（索引不存在 / 无 tantivy /
     /// 索引损坏） → 返回 `DesktopError::Index`， 对应 SPEC §2.6
     /// `IndexUnavailable`。
     pub async fn index(&self) -> Result<Arc<IndexEngine>, DesktopError> {
@@ -81,7 +86,17 @@ impl AppState {
         };
         let engine: Arc<IndexEngine> = self
             .index
-            .get_or_try_init(|| async move { IndexEngine::open_or_create(cfg).map(Arc::new) })
+            .get_or_try_init(|| async move {
+                // 新装机首启（bm25/meta.json 缺失）：一次性引导空索引——
+                // 短暂写者即建即弃，随后纯只读打开（桌面不持久持写者，
+                // ADR-0032 决策 2）；既有索引则直接只读打开。
+                if !cfg.index_root.join("bm25").join("meta.json").exists() {
+                    // 建空索引后立即弃引擎（写者随之释放）——桌面不持久持写者
+                    let boot = IndexEngine::open_or_create(cfg.clone())?;
+                    drop(boot);
+                }
+                IndexEngine::open_read_only(cfg).map(Arc::new)
+            })
             .await?
             .clone();
         Ok(engine)

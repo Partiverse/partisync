@@ -612,11 +612,12 @@ async fn mcp_call_memory_tool_passthrough_stub() {
 async fn t01_search_include_transcript_toggle_wiring() {
     use partisync_index::search::bm25::IndexedDoc;
 
-    let (app, _tmp) = make_app().await;
+    let (app, tmp) = make_app().await;
     {
-        let engine = app.state::<AppState>().index().await.expect("engine");
+        let engine =
+            partisync_index::Bm25Index::open_or_create(tmp.path().join("index").join("bm25"))
+                .expect("seed writer (state.index() is read-only since M11-WP02-T03)");
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "aa110000".into(),
                 filename: "meeting-notes.pdf".into(),
@@ -628,7 +629,7 @@ async fn t01_search_include_transcript_toggle_wiring() {
             .expect("seed transcript doc");
         engine.commit().expect("commit");
         // OnCommitWithDelay 策略：测试同步语义须显式 reload（bm25.rs:319）
-        engine.bm25_index().reload().expect("reader reload");
+        engine.reload().expect("reader reload");
     }
     let st = app.state::<AppState>();
 
@@ -679,12 +680,13 @@ async fn t01_search_hit_carries_graph_filename() {
     use partisync_graph::store::EntryKind;
     use partisync_index::search::bm25::IndexedDoc;
 
-    let (app, _tmp) = make_app().await;
+    let (app, tmp) = make_app().await;
     let marker = "quarterly review marker zzzqq";
     {
-        let engine = app.state::<AppState>().index().await.expect("engine");
+        let engine =
+            partisync_index::Bm25Index::open_or_create(tmp.path().join("index").join("bm25"))
+                .expect("seed writer (state.index() is read-only since M11-WP02-T03)");
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "bb220000".into(),
                 filename: "orphan-row.md".into(), // 索引侧文件名不直接透出——以 graph 反查为准
@@ -695,7 +697,7 @@ async fn t01_search_hit_carries_graph_filename() {
             })
             .expect("seed doc");
         engine.commit().expect("commit");
-        engine.bm25_index().reload().expect("reload");
+        engine.reload().expect("reload");
     }
     // graph 侧建 entry（content 行 + entry 关联 content_id）
     let st = app.state::<AppState>();
@@ -717,6 +719,16 @@ async fn t01_search_hit_carries_graph_filename() {
         .await
         .expect("entry");
 
+    {
+        let dbg = partisync_index::Bm25Index::open_read_only(tmp.path().join("index").join("bm25"))
+            .unwrap();
+        dbg.force_reload().unwrap();
+        println!(
+            "DEBUG docs={} lock={}",
+            dbg.approx_count(),
+            std::path::Path::new(&tmp.path().join("index/bm25/.tantivy-writer.lock")).exists()
+        );
+    }
     let hits = search(
         st.clone(),
         SearchArgs {
@@ -736,9 +748,10 @@ async fn t01_search_hit_carries_graph_filename() {
 
     // 孤儿索引行（无 graph entry）→ filename None（前端回落哈希切片）
     {
-        let engine = st.index().await.expect("engine");
+        let engine =
+            partisync_index::Bm25Index::open_or_create(tmp.path().join("index").join("bm25"))
+                .expect("seed writer (state.index() is read-only since M11-WP02-T03)");
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "cc330000".into(),
                 filename: "ghost.md".into(),
@@ -749,8 +762,16 @@ async fn t01_search_hit_carries_graph_filename() {
             })
             .expect("seed orphan doc");
         engine.commit().expect("commit");
-        engine.bm25_index().reload().expect("reload");
+        engine.reload().expect("reload");
     }
+    // 独立写者 seed 后：state 只读引擎显式重载（OnCommitWithDelay 是
+    // 异步后台刷新，立查有竞态——沿旧种子判例的显式 reload 语义）
+    st.index()
+        .await
+        .expect("index")
+        .bm25_index()
+        .force_reload()
+        .expect("force reload state index");
     let hits = search(
         st,
         SearchArgs {
@@ -773,13 +794,14 @@ async fn t01_search_hit_carries_graph_filename() {
 async fn t02_highlight_centers_on_hit_terms() {
     use partisync_index::search::bm25::IndexedDoc;
 
-    let (app, _tmp) = make_app().await;
+    let (app, tmp) = make_app().await;
     let st = app.state::<AppState>();
     {
-        let engine = st.index().await.expect("engine");
+        let engine =
+            partisync_index::Bm25Index::open_or_create(tmp.path().join("index").join("bm25"))
+                .expect("seed writer (state.index() is read-only since M11-WP02-T03)");
         // 英文判别例：quokka 置于 >200 字符偏移
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "dd440000".into(),
                 filename: "wildlife-en.md".into(),
@@ -794,7 +816,6 @@ async fn t02_highlight_centers_on_hit_terms() {
             .expect("seed en doc");
         // 中文命中例：夸克 置于 >200 字符偏移
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "ee550000".into(),
                 filename: "物理笔记.md".into(),
@@ -810,7 +831,6 @@ async fn t02_highlight_centers_on_hit_terms() {
         // 无词面回落例：查询词仅命中 filename（ocr 有文本无词面 → 头部
         // 截断回落；ocr/tx 全空 → None）
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "ff660000".into(),
                 filename: "budget-falcon.md".into(),
@@ -821,7 +841,6 @@ async fn t02_highlight_centers_on_hit_terms() {
             })
             .expect("seed fallback doc");
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "00770000".into(),
                 filename: "empty-falcon.md".into(),
@@ -832,7 +851,7 @@ async fn t02_highlight_centers_on_hit_terms() {
             })
             .expect("seed empty doc");
         engine.commit().expect("commit");
-        engine.bm25_index().reload().expect("reader reload");
+        engine.reload().expect("reader reload");
     }
 
     // 1) 英文判别例：sentinel 包裹命中词 + 窗口有界
@@ -916,7 +935,7 @@ async fn t02_highlight_centers_on_hit_terms() {
 async fn t05_index_stats_empty_zero_then_seeded_positive() {
     use partisync_index::search::bm25::IndexedDoc;
 
-    let (app, _tmp) = make_app().await;
+    let (app, tmp) = make_app().await;
     let st = app.state::<AppState>();
 
     // 空索引：docs == 0（index_stats 懒加载打开 IndexEngine，空骨架合法）
@@ -925,9 +944,10 @@ async fn t05_index_stats_empty_zero_then_seeded_positive() {
 
     // 直种一条文档（沿 t01 判例：upsert + commit + 显式 reload）
     {
-        let engine = st.index().await.expect("engine");
+        let engine =
+            partisync_index::Bm25Index::open_or_create(tmp.path().join("index").join("bm25"))
+                .expect("seed writer (state.index() is read-only since M11-WP02-T03)");
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "dd440000".into(),
                 filename: "seeded.md".into(),
@@ -938,8 +958,15 @@ async fn t05_index_stats_empty_zero_then_seeded_positive() {
             })
             .expect("seed doc");
         engine.commit().expect("commit");
-        engine.bm25_index().reload().expect("reload");
+        engine.reload().expect("reload");
     }
+    // 独立写者 seed 后：state 只读引擎显式重载（同 t01 判例）
+    st.index()
+        .await
+        .expect("index")
+        .bm25_index()
+        .force_reload()
+        .expect("force reload state index");
     let stats = index_stats(st).await.expect("index_stats seeded");
     assert!(stats.docs > 0, "种子后 approx_count 必须 >0");
 }
@@ -1225,9 +1252,10 @@ done
     // 资产通道数据面：BM25 直种（与记忆通道无关的 IPC——分区互不污染的
     // 前提是资产检索路径零记忆感知）。
     {
-        let engine = st.index().await.expect("engine");
+        let engine =
+            partisync_index::Bm25Index::open_or_create(tmp.path().join("index").join("bm25"))
+                .expect("seed writer (state.index() is read-only since M11-WP02-T03)");
         engine
-            .bm25_index()
             .upsert(IndexedDoc {
                 content_id: "bb110000".into(),
                 filename: "flagship-asset.md".into(),
@@ -1238,7 +1266,7 @@ done
             })
             .expect("seed asset doc");
         engine.commit().expect("commit");
-        engine.bm25_index().reload().expect("reader reload");
+        engine.reload().expect("reader reload");
     }
 
     // 1) 资产通道：search 照常命中（资产区不受「含记忆」影响）。
