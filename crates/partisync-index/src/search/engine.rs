@@ -126,6 +126,45 @@ impl IndexEngine {
         })
     }
 
+    /// 只读打开索引引擎（P24，SPEC M11-WP02 §2.1）。
+    ///
+    /// bm25 走 [`Bm25Index::open_read_only`]（不获取 `.tantivy-writer.lock`，
+    /// 索引目录必须已存在）；vector 侧无跨进程锁资源，沿既有打开语义
+    /// （同构包装，不单独设契约）。写面调用（reindex/upsert）在只读
+    /// 引擎上返回结构化错误——写者归真写面（CLI reindex/watch）按需持有。
+    ///
+    /// # Errors
+    /// 索引不存在或打开错误 → Fatal。
+    pub fn open_read_only(config: IndexEngineConfig) -> Result<Self, PartisyError> {
+        let bm25_path = config.index_root.join("bm25");
+        let vector_path = config.index_root.join("vector");
+
+        let bm25 = Arc::new(
+            Bm25Index::open_read_only(&bm25_path).map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("open bm25 read-only: {e}").into()),
+            })?,
+        );
+        let vector =
+            Arc::new(
+                VectorStore::open_or_create(&vector_path).map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(format!("open vector: {e}").into()),
+                })?,
+            );
+
+        let hybrid = HybridSearch::new_without_reranker(
+            Arc::new(bm25.clone()) as Arc<dyn Bm25Source>,
+            Arc::new(vector.clone()) as Arc<dyn VectorSource>,
+        );
+
+        Ok(Self {
+            bm25,
+            vector,
+            hybrid,
+        })
+    }
+
     /// 混合检索（BM25 + 向量 RRF 融合，可选 reranker）。
     ///
     /// 需要预计算查询向量（通过 embedding 模型）。如无查询向量，
