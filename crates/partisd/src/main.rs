@@ -47,14 +47,15 @@ fn print_usage() {
     );
 }
 
-/// pidfile 独占创建防双实例；已存在时经 /proc 存活检查区分「在跑」与
-/// 「陈留」（崩溃残留可覆写接管）。
-fn acquire_pidfile(path: &Path) -> Result<(), String> {
+/// pidfile 独占创建防双实例：内容 = "pid port"。已存在时以 **TCP 探活
+/// 该端口**（跨平台，无 /proc 依赖——macOS 判例）区分「在跑」与「陈留」：
+/// 探活成功 = 在跑拒绝；失败 = 陈留覆写接管。
+fn acquire_pidfile(path: &Path, own_port: u16) -> Result<(), String> {
     use std::io::Write;
     let write_pid = |p: &Path| -> Result<(), String> {
         let mut f =
             std::fs::File::create(p).map_err(|e| format!("写 pidfile {}: {e}", p.display()))?;
-        writeln!(f, "{}", std::process::id())
+        writeln!(f, "{} {}", std::process::id(), own_port)
             .map_err(|e| format!("写 pidfile {}: {e}", p.display()))
     };
     match std::fs::OpenOptions::new()
@@ -62,20 +63,29 @@ fn acquire_pidfile(path: &Path) -> Result<(), String> {
         .write(true)
         .open(path)
     {
-        Ok(mut f) => writeln!(f, "{}", std::process::id())
+        Ok(mut f) => writeln!(f, "{} {}", std::process::id(), own_port)
             .map_err(|e| format!("写 pidfile {}: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let stale = std::fs::read_to_string(path)
+            let prev = std::fs::read_to_string(path)
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
-            let alive = !stale.is_empty() && Path::new(&format!("/proc/{stale}")).exists();
+            let prev_port: Option<u16> =
+                prev.split_whitespace().nth(1).and_then(|s| s.parse().ok());
+            let alive = match prev_port {
+                Some(port) => std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                    std::time::Duration::from_millis(500),
+                )
+                .is_ok(),
+                None => false,
+            };
             if alive {
                 return Err(format!(
-                    "另一 partisd 实例疑似在跑（pid {stale}，pidfile {}）。确认已停止后删除该文件重试",
+                    "另一 partisd 实例在跑（pid {prev}，端口 {prev_port:?}；pidfile {}）。确认已停止后删除该文件重试",
                     path.display()
                 ));
             }
-            eprintln!("partisd: 陈留 pidfile（pid={stale:?} 已不存在），覆写接管");
+            eprintln!("partisd: 陈留 pidfile（prev={prev:?} 探活失败），覆写接管");
             write_pid(path)
         }
         Err(e) => Err(format!("创建 pidfile {}: {e}", path.display())),
@@ -111,12 +121,6 @@ async fn main() {
     }
     let _ = cas; // 预留：MCP 装配面从 db 路径约定派生 CAS；写者/作业面落地时接线
 
-    let pid_path = pid_file.unwrap_or_else(|| PathBuf::from("partisd.pid"));
-    if let Err(e) = acquire_pidfile(&pid_path) {
-        eprintln!("partisd: {e}");
-        std::process::exit(2);
-    }
-
     let addr: SocketAddr = match listen.as_deref().unwrap_or(DEFAULT_LISTEN).parse() {
         Ok(a) => a,
         Err(e) => {
@@ -133,7 +137,23 @@ async fn main() {
             "partisd: 拒绝启动——bind {} 非环回（ADR-0032 决策 5：partisd 面无鉴权，仅限 127.0.0.1 信任域）",
             addr
         );
-        let _ = std::fs::remove_file(&pid_path);
+        std::process::exit(2);
+    }
+
+    // 先 bind（拿到实际端口，--listen :0 时由内核分配）再领 pidfile——
+    // pidfile 内容含端口，供跨平台 TCP 探活（macOS 无 /proc 判例）。
+    let tcp = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("partisd: bind {addr} 失败: {e}");
+            std::process::exit(1);
+        }
+    };
+    let bound_port = tcp.local_addr().map(|a| a.port()).unwrap_or(0);
+
+    let pid_path = pid_file.unwrap_or_else(|| PathBuf::from("partisd.pid"));
+    if let Err(e) = acquire_pidfile(&pid_path, bound_port) {
+        eprintln!("partisd: {e}");
         std::process::exit(2);
     }
 
@@ -146,6 +166,15 @@ async fn main() {
                 std::process::exit(1);
             }
         },
+    );
+
+    let bound = tcp
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| addr.to_string());
+    eprintln!(
+        "partisd: ready — pid={} http://{bound}{MCP_PATH} (loopback，无鉴权——ADR-0032 决策 5)",
+        std::process::id()
     );
 
     let service = StreamableHttpService::new(
@@ -164,23 +193,6 @@ async fn main() {
             .with_stateless_protocol_metadata_required(true),
     );
     let app: Router = Router::new().route_service(MCP_PATH, service);
-
-    let tcp = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("partisd: bind {addr} 失败: {e}");
-            let _ = std::fs::remove_file(&pid_path);
-            std::process::exit(1);
-        }
-    };
-    let bound = tcp
-        .local_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| addr.to_string());
-    eprintln!(
-        "partisd: ready — pid={} http://{bound}{MCP_PATH} (loopback，无鉴权——ADR-0032 决策 5)",
-        std::process::id()
-    );
 
     let shutdown = async {
         let ctrl_c = tokio::signal::ctrl_c();

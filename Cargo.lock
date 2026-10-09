@@ -7472,6 +7472,14 @@ dependencies = [
 [[package]]
 name = "partisd"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "partisync-gateway",
+ "partisync-index",
+ "rmcp",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "partisync-ai"
