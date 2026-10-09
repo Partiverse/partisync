@@ -52,11 +52,15 @@
       探针 `t01_verify_proof_insert_readdresses_after_await` 锁死
       （突变实验恢复旧代码即转红 0 passed/1 failed，2026-10-07 本地
       实测 ui_hardening 21/21 全绿）。
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T01-*.png`（排序前后 +
-      Enter 检索不重载、仍停记忆 tab）——**待 GUI 验证**：验证时段
-      （2026-10-06 00:4x）主机屏保→锁屏（HID 空闲 51 min+，Touch ID
-      无人在场），真实实例窗口退化（210×141 负坐标帧 / AX 零窗口），
-      实操不可得；PR 保持 OPEN 打「待 GUI 验证」，解锁后补验归档。
+- [x] GUI 实操截图 `docs/screenshots/M10-WP02-T01-*.png`（排序前后 +
+      Enter 检索不重载、仍停记忆 tab）——✅ **2026-10-09 解锁窗口补验通过**：
+      merged 分支真实实例 + demo 库 10 条种子（sidecar `memory_write` 真实
+      链路写入 + 4 行 created_ns 回拨后真实写入触发根刷新自洽，banner 承诺
+      验证 OK）；默认序 / 创建时间↑↓三态（箭头与行序同步）/ score↑ FTS 路径
+      排序 / mem-q `partisync` 回车 4 命中仍停记忆 tab（防整页重载）/ 排序态
+      点「验证」证明行锚在行正下不飘位（8a24485 延迟寻址）/ 重排后详情行+
+      证明行原样重锚（§6-R6 合入链微任务）全过，七帧归档。（前史：
+      2026-10-06/07 三轮锁屏不可得登记见 SPEC §3 与 PR 评论。）
 - [x] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖
       （2026-10-06 本地实测：fmt ✓ / clippy -D warnings ✓ /
       cargo test --workspace exit 0）。
