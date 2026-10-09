@@ -37,13 +37,16 @@
       行点击绑定在重渲管线内/展开态重渲重放，含裸插值禁列扩面），先
       红后绿 + memTime 探针与行点击绑定探针突变验证，T02（bfded23）
       合入 rebase 后 ui_hardening 合入基线 45/45 绿（2026-10-08 实测）；
-- [ ] GUI 实操截图 `docs/screenshots/M10-WP02-T03-*.png`（chips 过滤
+- [x] GUI 实操截图 `docs/screenshots/M10-WP02-T03-*.png`（chips 过滤
       前后 + meta「显示 n / 共 m」+ 相对时间 tooltip 入镜 + **四档边界
       全覆盖**：沿 T04 判例 `--data-dir` 隔离目录 CLI 播种 created_ns =
       now−30s（「刚刚」）/ −5min（「n 分钟前」）/ −2h（「n 小时前」）/
       −3d（「n 天前」）/ −40d（>30 天回落绝对日期）五条记忆，一帧截全
-      四档 + 回落；执行时勿省边界档）——**环境受阻待验**（见遗留①），
-      PR 保持 OPEN 挂「待 GUI 验证」label，不自行合入；
+      四档 + 回落；执行时勿省边界档）——**2026-10-09 Kubuntu 迁移后
+      补验通过**（11 条种子 sidecar 真实链路重建 + AT-SPI DoAction
+      操控：四档+回落一帧截全、chips 过滤「显示 3 / 共 11」→ 再点
+      恢复 11/11；tooltip 弹层环境受限，以可及名+静态探针双证替代，
+      见遗留①收尾段）；三帧归档 `docs/screenshots/M10-WP02-T03-*.png`；
 - [x] fmt/clippy/test 绿；改动仅限本卡范围；零新增顶层依赖。
 
 ## 遗留登记
@@ -82,6 +85,28 @@
    密码）在本会话不可得，如实登记不合入。**补验前置检查（经验沉淀）**：
    环境恢复后先查 `CGSSessionScreenIsLocked`，锁屏状态下窗口黑面/
    全屏壁纸/AX 失明均为衍生症状，勿再按幻影屏误诊。
+   **【2026-10-09 Kubuntu 迁移后补验通过（本遗留清账）】**：macOS→
+   Kubuntu 迁移（docs/reviews/2026-10-09-kubuntu-migration-handoff.md）
+   后本机关账。Kubuntu 侧环境判例沉淀：① KWin Wayland 合成器吞 XTest
+   合成按键/点击（xev 监听零 ButtonPress 实证），虚拟 uinput 设备不获
+   采用（kwin_core "Failed to open … ENODEV" 后不再重试）——操控改走
+   **AT-SPI DoAction**（开启 org.a11y.Status.IsEnabled + 重启实例带
+   GTK_MODULES=atk-bridge，WebKit 全 DOM 入无障碍树；等价 macOS
+   AXPress 判例的 Linux 面）；② 指针移动通道不受影响（xdotool 移动
+   可达，悬停高亮实证），截图取证用 `import -window`（窗口级）+
+   `spectacle -b`（全屏级）；③ WebKit title tooltip 弹层在该组合下
+   不渲染（时间单元格/横幅截断 root 双点位悬停均无弹层）——title
+   完整时间以 AT-SPI 单元格可及名（显示「2 分钟前」/可及名 =
+   「2026/10/9 14:33:12」完整时间，运行时 GUI 状态）+ ui_hardening
+   title 结构探针双证，验收意图达成；④ 种子沿 T01 判例升级 11 条：
+   sidecar `memory_write` 真实链路 ×10 → sqlite3 回拨 5 条 created_ns
+   （−30s/−5min/−2h/−3d/−40d）→ 收尾真实写触发 refresh_memory_root
+   （幂等去重路径不刷根，须新内容）→ memory_verify ok:true count=11，
+   banner「承诺验证 OK」同根（bb557d65…）；⑤ 三帧归档：
+   memory-four-tiers-unfiltered（四档+回落+「显示 11 / 共 11」一帧）、
+   chips-filter-time-fresh（过滤后「显示 3 / 共 11」恰三行）、
+   chips-unfiltered-reset（再点恢复 11/11）。验收第 2 项打勾，
+   GUI blocker 解除。
 2. **T01/T02 合入时的组合验证义务（评审 finding，medium）**：本 PR 基
    线无 T01（排序）/T02（详情展开），「过滤×排序」「过滤×详情展开」
    组合结果正确性当前不可验证。已落结构锁：探针
