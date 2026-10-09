@@ -43,3 +43,15 @@
 - [ ] M9-report 债表两行注记落位；
 - [ ] 窗口执行零发生（诚实登记：复测与签名均条件触发未执行）；
 - [ ] 零代码 diff；提交挂 Task-ID `M10-WP06-T03`；三门禁绿。
+
+## 收尾补充（2026-10-09，窗口实际执行）
+
+「窗口执行零发生」登记于当日被兑付突破：drop-caches 复测窗口在
+Kubuntu 台架（迁移后）触发执行——容器口径 release 重编 partifuse
+（宿主 rustup 1.94.0 bind-mount + 离线 registry 缓存）+ 特权容器
+drop_caches + tmpfs/overlayfs 双口径读测。结果：**透传侧无劣化实证
+成立**（tmpfs 对齐口径四指标 ≥ M8 基线量级）；**by-hash 侧 B1 断言
+按字面 FAIL**（open 整载语义，M8-WP07-T04 设计使然非回归），处置
+三选待拍板。证据:docs/reviews/M10-WP06-T03-fuse-cold-retest.md
+（含脚本归档）+ M9-report:127 行回填 + RELEASE-CHECKLIST-beta.md
+B1 执行记录。示例扩展生产钥签名窗口仍未闭合（持有人动作不变）。
