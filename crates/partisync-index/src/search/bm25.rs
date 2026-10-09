@@ -249,8 +249,12 @@ fn cjk_fan_out(s: &str) -> String {
 ///
 /// 实例持有 `Index`（不可变）和 `IndexWriter`（可变，共享写锁）。
 /// 查询走独立 `IndexReader`。
+///
+/// 只读打开（[`open_read_only`](Self::open_read_only)）时 `writer` 为
+/// `None`（P24-a：不获取 `.tantivy-writer.lock`）；写方法返回结构化
+/// 错误，读方法（search/approx_count/reload）全量可用。
 pub struct Bm25Index {
-    writer: RwLock<IndexWriter>,
+    writer: Option<RwLock<IndexWriter>>,
     reader: IndexReader,
     parser: QueryParser,
     /// 排除转写字段的解析器（`Bm25Query::include_transcript = false` 走
@@ -295,7 +299,7 @@ impl Bm25Index {
         let parser_no_tx = QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field]);
 
         Ok(Self {
-            writer: RwLock::new(writer),
+            writer: Some(RwLock::new(writer)),
             reader,
             parser,
             parser_no_tx,
@@ -303,15 +307,73 @@ impl Bm25Index {
         })
     }
 
+    /// 只读打开既存索引（P24-a：不创建/获取 `.tantivy-writer.lock`）。
+    ///
+    /// 与 [`open_or_create`](Self::open_or_create) 的差异：索引目录必须
+    /// 已存在（以 `meta.json` 为判据），且**不建 `IndexWriter`**——写方
+    /// 法返回结构化错误，search/approx_count/reload 全量可用（P24-b/c：
+    /// 与活跃写者并存、多实例并发均无互斥，tantivy reader 跨进程安全）。
+    ///
+    /// # Errors
+    /// 索引目录不存在（meta.json 缺失）或 tantivy 打开错误 → Fatal。
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, PartisyError> {
+        let path = path.as_ref();
+        if !path.join("meta.json").exists() {
+            return Err(err(
+                "open tantivy index read-only: index not found (meta.json missing)",
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no tantivy index at {}", path.display()),
+                ),
+            ));
+        }
+        let index = Index::open_in_dir(path).map_err(|e| err("open tantivy index", e))?;
+
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+            .map_err(|e| err("open tantivy reader", e))?;
+
+        let schema = index.schema();
+        let (_id_field, fn_field, tags_field, ocr_field, tx_field, _upd_field) = field_ids(&schema);
+        let parser =
+            QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field, tx_field]);
+        let parser_no_tx = QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field]);
+
+        Ok(Self {
+            writer: None,
+            reader,
+            parser,
+            parser_no_tx,
+            schema,
+        })
+    }
+
+    /// 是否只读打开（P24 探针/装配层判定用）。
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.writer.is_none()
+    }
+
+    /// 写守卫：只读实例返回结构化错误（P24：写方法在只读实例不可用）。
+    fn writer_lock(&self) -> Result<std::sync::RwLockWriteGuard<'_, IndexWriter>, PartisyError> {
+        let w = self.writer.as_ref().ok_or_else(|| {
+            err(
+                "index opened read-only: writer unavailable",
+                std::io::Error::other("read-only index (open_read_only); writes belong to the writer owner (reindex/watch)"),
+            )
+        })?;
+        w.write()
+            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))
+    }
+
     /// 写入/更新一条文档（幂等，content_id 相同则覆盖）。
     ///
     /// # Errors
     /// 写入错误 → Fatal。
     pub fn upsert(&self, doc: IndexedDoc) -> Result<(), PartisyError> {
-        let writer = self
-            .writer
-            .write()
-            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))?;
+        let writer = self.writer_lock()?;
         let (id_field, fn_field, tags_field, ocr_field, tx_field, upd_field) =
             field_ids(&self.schema);
 
@@ -346,10 +408,7 @@ impl Bm25Index {
         &self,
         docs: impl IntoIterator<Item = IndexedDoc>,
     ) -> Result<(), PartisyError> {
-        let writer = self
-            .writer
-            .write()
-            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))?;
+        let writer = self.writer_lock()?;
         let (id_field, fn_field, tags_field, ocr_field, tx_field, upd_field) =
             field_ids(&self.schema);
 
@@ -380,10 +439,7 @@ impl Bm25Index {
     /// # Errors
     /// commit 错误 → Fatal。
     pub fn commit(&self) -> Result<(), PartisyError> {
-        let mut writer = self
-            .writer
-            .write()
-            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))?;
+        let mut writer = self.writer_lock()?;
         // tantivy 0.26 commit 返回 Opstamp（u64），丢弃
         writer
             .commit()
@@ -477,10 +533,7 @@ impl Bm25Index {
     /// # Errors
     /// commit 错误 → Fatal。
     pub fn clear(&self) -> Result<(), PartisyError> {
-        let mut writer = self
-            .writer
-            .write()
-            .map_err(|_| err("writer lock poison", std::io::Error::other("RwLock poison")))?;
+        let mut writer = self.writer_lock()?;
         writer
             .delete_all_documents()
             .map_err(|e| err("tantivy delete_all", e))?;
