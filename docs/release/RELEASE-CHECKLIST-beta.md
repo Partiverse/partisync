@@ -39,6 +39,15 @@
       （M8-WP07-bench §2/§3）+ M8 冷基线 1567 MiB/s 维持
       （M9-WP06-T03 报告 §3-2 原依据）——SPEC
       docs/specs/M10-WP06.md §2.2）
+      **（执行记录 2026-10-09，Kubuntu 台架）**：复测已完成——tmpfs
+      对齐口径透传四指标 ≥ M8 基线量级（冷读中位 3.20ms / 顺序
+      2932 MiB/s / 随机 p50 17µs），**读路径无劣化实证成立**；
+      **by-hash 侧断言按字面 FAIL**（open 时整载全对象语义——
+      M8-WP07-T04 设计使然，非回归；64MiB 对象热开 ~32ms 恒定成本），
+      处置三选（A 重划断言口径【推荐】/ B 登记流式读改进债 /
+      C 维持挂账）**待拍板后本框闭合**；报告 =
+      docs/reviews/M10-WP06-T03-fuse-cold-retest.md（含两轮口径 +
+      脚本归档）
 - [ ] B2 门禁全绿：`cargo fmt --all --check && cargo clippy --workspace
       --all-targets -- -D warnings && cargo test --workspace`
 - [ ] B3 tag（**确认后执行**）：`git tag -a v0.1.0-beta -m "v0.1.0-beta"
