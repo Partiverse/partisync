@@ -7,9 +7,9 @@
 
 | # | 待办 | 执行主体 | 状态 | 备注 |
 |---|---|---|---|---|
-| A1 | GitHub Sponsors 开通（org/个人面） | @lead | 待办 | 需 GitHub 收款/税务设置，仅账户持有人可操作；开通后 README 加 Sponsors badge |
-| A2 | NLnet 类资助申请材料起草（local-first + E2EE + Rust + 自托管信任工程画像） | @lead + AI | 待办 | AI 可代拟申请书；提交需 @lead 身份；候选: NLnet/NGI、Prototype Fund 等 |
-| A3 | 开放信任资产顺带积累（Ente 式：发布清单、复现构建指引对外化） | AI | 待办 | 与 M9-WP06 信任工件（ADR-0027/0030）复用，不新做 |
+| A1 | GitHub Sponsors 开通（org/个人面） | @lead | **暂缓** | 2026-10-10 @lead 指示暂缓；需 GitHub 收款/税务设置，仅账户持有人可操作；开通后 README 加 Sponsors badge |
+| A2 | NLnet 类资助申请材料起草（local-first + E2EE + Rust + 自托管信任工程画像） | @lead + AI | **暂缓** | 2026-10-10 @lead 指示暂缓；AI 可代拟申请书，提交需 @lead 身份；候选: NLnet/NGI、Prototype Fund 等 |
+| A3 | 开放信任资产顺带积累（Ente 式：发布清单、复现构建指引对外化） | AI | **已完成** | 2026-10-10 落地（M11-WP01-T05）：README 新增「验证发布工件」节（ADR-0027 早已承诺的 README 收录位），复用 docs/release/ 既有件（RELEASE-PUB-KEY / EXT-SIGNING / CHANGELOG），未新做重复文档；同时修正 T04 README 中「可复现构建」过度声明——仓库登记为 REPRODUCIBLE=no（路径相关性），不假绿 |
 
 ## 阶段二（条件触发）——只登记不启动
 
@@ -23,4 +23,4 @@
 
 ## 完成登记
 
-- （无——首版登记）
+- 2026-10-10 A3 完成（M11-WP01-T05）：README「验证发布工件」节 + 「可复现构建」过度声明修正；A1/A2 经 @lead 指示转暂缓。
