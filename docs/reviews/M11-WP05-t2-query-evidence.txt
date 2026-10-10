@@ -1,0 +1,14 @@
+== G10 评估件 T2 联动实证(语义近似但字面不同,BM25 词面检索)==
+语料: quarterly-review.md(中文·营收/利润) / sync-minutes.md(英文·例会纪要) / baking.md(干扰项)
+date: 2026-10-10 09:58:54  环境: Kubuntu 本机,main=02201f5,CLI 只读检索(模式 bm25)
+
+--- Q1 "revenue report"(语义词=quarterly-review 的营收主题,零字面重叠)---
+模式: BM25（20 条，耗时 1ms）
+（0 条结果）
+--- Q2 "会议纪要"(语义词=sync-minutes 的会议记录主题,零字面重叠)---
+模式: BM25（20 条，耗时 1ms）
+（0 条结果）
+--- 对照 Q3 "zenith"(不相关词,应 0)——略;对照 Q4 字面命中 Sanity:查 "fermentation" ---
+模式: BM25（20 条，耗时 1ms）
+  [1.2754] aa5059c5bda9af8efc4e37b515ae1979f11b5d57638d3b17d4a2f0689254b3f7  Sourdough baking guide: [[fermentation]] temperature and proofing time control
+（1 条结果）
