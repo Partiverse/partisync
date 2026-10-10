@@ -45,6 +45,9 @@ Keep a Changelog 约定；semver pre-release 口径见各版本节。
 - **workspace 版本 0.1.0 → 0.2.0**（整数版；51 处/15 文件 + tauri +
   2 处 clientInfo；wit 扩展接口版本域不变）；产物名 `-beta` →
   `-rc.1`；linux/macOS 包新增 `partisync-mcp-http`；打包前 strip。
+- **许可终局（ADR-0033）**：Apache-2.0 转正 + hub 治理平面商业扩展区
+  登记商业化行动清单（commercial-actions-backlog）；仓库远端门面收口
+  （github.com/Partiverse/partisync）。
 - **桌面 GUI 进入维护冻结**（D19 定位裁决：partisync = 底座
   （CLI+库+MCP），Partiverse = 唯一消费者 GUI；本 release 为冻结前
   最后功能面，后续由 Partiverse 接替）。
