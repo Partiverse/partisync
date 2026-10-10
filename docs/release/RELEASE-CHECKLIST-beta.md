@@ -28,9 +28,10 @@
 
 ## B. 发布窗口（T03，容器/CI 步）
 
-- [ ] B1 drop-caches 冷缓存复测（M8-WP07-bench §2 债）：Linux 容器
+- [x] B1 drop-caches 冷缓存复测（M8-WP07-bench §2 债）：Linux 容器
       `--device /dev/fuse`，release profile 构建 `partisync-fuse`，
-      复测 `/by-hash` vs 目录透传（断言 cas ≤ max(3×dir, 50ms)）+
+      复测 `/by-hash` vs 目录透传（断言口径 v2 见下方「拍板记录
+      2026-10-10」——原 `cas ≤ max(3×dir, 50ms)` 对大文件场景废止）+
       顺序读基线对照（M8-WP01-bench §1 1567 MiB/s 口径）；报告落
       docs/reviews/
       （**M10-WP06 窗口注记** 2026-10-08：本项改挂 M10-WP06 复测
@@ -48,6 +49,19 @@
       C 维持挂账）**待拍板后本框闭合**；报告 =
       docs/reviews/M10-WP06-T03-fuse-cold-retest.md（含两轮口径 +
       脚本归档）
+      **（拍板记录 2026-10-10，用户裁决 A：重划断言口径，
+      Task-ID M11-WP01-T06）**：by-hash open 全载语义接受为
+      M8-WP07-T04 既定设计，断言口径 v2 落锤——①顺序读：
+      by-hash ≥ 1/5 × 同轮透传（护栏线，本轮 tmpfs 实测
+      770/2932 = 0.26 达线；数值为本次落锤起草，评审可调）；
+      ②≤4 MiB 对象场景保留原断言 cas ≤ max(3×dir, 50ms)（本轮
+      断言对象为 64 MiB，小文件口径待下轮复测补实测，不追溯
+      本轮）；③>4 MiB 对象：open 整载语义豁免（每次 open 支付
+      O(全文件) 一次成本，只对照不设阈值）。对复测 §1.3 逐条
+      判读：① 0.26 达线 ✓；② 未单测不判；③ 64 MiB 热开 ~32ms
+      恒定成本属豁免项 ✓。处置 B（流式读改进债）不设立——
+      partiverse V2 CAS 直连消费如需按需读，届时另行立项。
+      **本框闭合。**
 - [ ] B2 门禁全绿：`cargo fmt --all --check && cargo clippy --workspace
       --all-targets -- -D warnings && cargo test --workspace`
 - [ ] B3 tag（**确认后执行**）：`git tag -a v0.1.0-beta -m "v0.1.0-beta"
