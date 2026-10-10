@@ -31,7 +31,7 @@ minisign -Vm SHA256SUMS -p partisync.pub
 sha256sum -c SHA256SUMS
 ```
 
-如实状态（不假绿）：CI 签名 secret 未配置时 Release 显式 unsigned；复现构建当前登记 **REPRODUCIBLE=no**（cargo 构建路径相关性），`reproducibility.txt` 随 Release 分发；macOS dmg 未公证；hub 产物为演示面（hub-demo-web）。扩展签名见 [docs/release/EXT-SIGNING.md](docs/release/EXT-SIGNING.md)。
+如实状态（不假绿）：CI 签名 secret 未配置时 Release 显式 unsigned；复现构建自 v0.2.0-rc.1 起登记 **REPRODUCIBLE=yes**（`CARGO_PROFILE_RELEASE_DEBUG=false` 口径，cadence 改进项 b 实测生效；`reproducibility.txt` 随 Release 分发）；macOS dmg 未公证；hub 产物为演示面（hub-demo-web）；桌面 GUI 维护冻结（D19，由 Partiverse 接替）。扩展签名见 [docs/release/EXT-SIGNING.md](docs/release/EXT-SIGNING.md)。
 
 ## 治理与贡献
 
