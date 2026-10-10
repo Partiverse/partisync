@@ -1,6 +1,6 @@
 # ADR-0033: 许可终局与商业分层——Apache-2.0 转正、hub 治理平面商业扩展区、三阶段商业路线
 
-状态: 草稿 · 日期: 2026-10-10 · 决策人: @lead（本件由 AI 代理起草，人工签核待补）
+状态: 已接受 · 日期: 2026-10-10 · 决策人: @lead（AI 代理起草，@lead 2026-10-10 会话内核签确认）
 关联: ADR-0000（决策 5 复议）· docs/specs/M7-WP03.md（企业议题登记）· docs/reviews/M8-roadmap-proposal.md §3-4 · docs/reviews/M8-evolution-research-2026-10.md · docs/reviews/M11-roadmap-proposal.md §1.5（D19）· docs/specs/M10-WP06.md（发布节奏，本件挂 M11-WP01-T04 执行）
 
 ## 背景
@@ -21,7 +21,7 @@ ADR-0000 决策 5 将全仓许可证定为 Apache-2.0 并**显式标记「临时
 2. **商业扩展区边界（现在划界，触发后切割）**：hub 治理平面四件套——SSO/AD-LDAP、审计日志、空间配额、多租户隔离（即 M7-WP03 §3 登记清单）——为指定商业落点。触发前维持「只登记不设计」纪律不变；触发后该部分**新代码**在独立私有仓开发、以商业授权发布，本仓基座（含 hub 开源面：openraft 复制、联邦路由、分层与 EC）保持 Apache-2.0。多租户过滤语义 spike（docs/reviews/M8-WP03-tenant-spike.md）作为技术储备留在本仓。
 3. **对外贡献策略（第一个外部贡献者出现前生效）**：接受 DCO（`Signed-off-by`）；外部贡献范围限于开源基座，不进入商业扩展区（该区不开放外部贡献，从源头消灭贡献归属争议）。不设 CLA。
 4. **三阶段商业路线**（与资金现状匹配）：
-   - **阶段一（现在，零产品投入）**：GitHub Sponsors + 公益/生态资助申请（local-first + E2EE + Rust + 自托管信任工程画像与 NLnet 类资助高度吻合）；Ente 式开放信任资产顺带积累。
+   - **阶段一（现在，零产品投入）**：GitHub Sponsors + 公益/生态资助申请（local-first + E2EE + Rust + 自托管信任工程画像与 NLnet 类资助高度吻合）；Ente 式开放信任资产顺带积累。**待办登记：[docs/reviews/commercial-actions-backlog.md](../reviews/commercial-actions-backlog.md)**。
    - **阶段二（hub 可部署后）**：托管 hub 试点订阅 = 自然 SaaS。硬前置 = 以真实数字关闭 ADR-0015 的 iroh relay 定价开放项、算清单位经济后再定价；自托管永远免费（同时是信任营销）。
    - **阶段三（M7-WP03 触发条件发生）**：企业自托管授权（治理平面四件套打包）。
 5. **Partiverse 边界**：「合并后即最终产品」（D19）的收费问题归 partiverse 仓文档裁决，不在本仓视野；建议口径 = 消费端应用免费 + hub 托管同步订阅。PartiSync 本体保持纯基础设施、永不直接收费——引擎的采纳面就是 Partiverse 的获客渠道，两层互相供血。
@@ -60,9 +60,10 @@ ADR-0000 决策 5 将全仓许可证定为 Apache-2.0 并**显式标记「临时
 
 ## 修订登记
 
-- 2026-10-10 初稿（草稿，待 @lead 签核后转「已接受」并回填 ADR-0000 指针生效语）。
+- 2026-10-10 初稿（草稿）。
+- 2026-10-10 @lead 核签接受（草稿 → 已接受）；阶段一商业动作待办登记于 docs/reviews/commercial-actions-backlog.md。
 
-## 待批准项
+## 待批准项（已全部清偿）
 
-- @lead 人工签核（状态 草稿 → 已接受）。
-- 随本件落地：README.md 由 1 行标题扩为定位/许可/治理页；根 Cargo.toml `repository` 字段去 `example.invalid` 占位（改 `https://github.com/Partiverse/partisync`，M0-report D1 已建远端）。
+- ~~@lead 人工签核~~ → 已清偿：2026-10-10 会话内核签确认（Reviewed-By: @lead）。
+- ~~README.md / repository 门面落地~~ → 已清偿：随本 PR 首两笔提交落地。
