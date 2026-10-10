@@ -19,19 +19,19 @@ tokio = { workspace = true } # OnceCell 懒加载（state.rs）
 # Tauri command 处理器（get_stats / list / search / cas_stats / duplicates /
 # jobs）+ PartisyError 类型转换（error.rs）。 ADR-0024 修订 4 登记， 非顶层
 # crates.io 新依赖。
-partisync-core = { path = "../partisync-core", version = "0.1.0" }
-partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
-partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
-partisync-index = { path = "../partisync-index", version = "0.1.0" }
+partisync-core = { path = "../partisync-core", version = "0.2.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.2.0" }
+partisync-cas = { path = "../partisync-cas", version = "0.2.0" }
+partisync-index = { path = "../partisync-index", version = "0.2.0" }
 # M6-WP03-T05（mcp_call 侧车连通）： path-only deps， 仅触发 cargo 构建
 # `partisync-mcp` bin target + 拿 `env!("CARGO_BIN_EXE-partisync-mcp")` 绝对路径。
 # 不链接 gateway lib。 ADR-0024 修订 5 登记。
-partisync-gateway = { path = "../partisync-gateway", version = "0.1.0" }
+partisync-gateway = { path = "../partisync-gateway", version = "0.2.0" }
 # M8-WP05-T03（同步状态界面）： sync 域**只读**依赖——IPC 数据从 graph
 # store 既有持久态（sync_oplog / sync_conflict 表）只读派生， 不引入任何
 # 写路径/网络面（Hub/iroh 不进 desktop 进程， function-map §4-N2）；
 # `session::SyncStats` 仅作统计口径类型复用。
-partisync-sync = { path = "../partisync-sync", version = "0.1.0" }
+partisync-sync = { path = "../partisync-sync", version = "0.2.0" }
 # M8-WP05-T01（语义检索旗舰）：查询向量嵌入器（fastembed BGE-small-zh-v1.5
 # ——与 M6-D67-T03 EvalRunner 同模型同线位，ADR-0018 批次内已锚定
 # fastembed =7.0.1，workspace 既有依赖，非新增顶层 crates.io 依赖）。

@@ -12,8 +12,8 @@ index-rerank = ["dep:fastembed"]
 index-embed = ["dep:fastembed"]
 
 [dependencies]
-partisync-core = { path = "../partisync-core", version = "0.1.0" }
-partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+partisync-core = { path = "../partisync-core", version = "0.2.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.2.0" }
 tantivy = { workspace = true }
 usearch = { workspace = true }
 byteorder = { workspace = true }
@@ -29,7 +29,7 @@ fastembed = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile = "3"
 criterion = { workspace = true }
-partisync-ai = { path = "../partisync-ai", version = "0.1.0" }
+partisync-ai = { path = "../partisync-ai", version = "0.2.0" }
 tokio = { workspace = true } # #[tokio::test]（engine/hybrid 测试）
 serde_json = { workspace = true } # wp06_eval.rs 报告 JSON 序列化
 

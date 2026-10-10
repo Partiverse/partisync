@@ -9,23 +9,23 @@ description = "对外网关：FUSE、S3 端点、WebDAV、FTPS、SFTP、MCP Serv
 workspace = true
 
 [dependencies]
-partisync-index = { path = "../partisync-index", version = "0.1.0" }
-partisync-ai = { path = "../partisync-ai", version = "0.1.0" }
-partisync-core = { path = "../partisync-core", version = "0.1.0" }
+partisync-index = { path = "../partisync-index", version = "0.2.0" }
+partisync-ai = { path = "../partisync-ai", version = "0.2.0" }
+partisync-core = { path = "../partisync-core", version = "0.2.0" }
 # M7-WP01-T04（扩展系统接线）：ExtRegistry/ExtTool 高层封装 + IndexRead
 # trait。path-only（ADR-0024 修订 5 判例）；wasmtime 依赖不出 ext-host 边界。
-partisync-ext-host = { path = "../partisync-ext-host", version = "0.1.0" }
+partisync-ext-host = { path = "../partisync-ext-host", version = "0.2.0" }
 # M8-WP01-T02（FUSE 挂载面组装）：挂载 bin。path-only（同上判例）；
 # fuser 依赖不出 partisync-fuse 边界（ADR-0026）。
-partisync-fuse = { path = "../partisync-fuse", version = "0.1.0" }
+partisync-fuse = { path = "../partisync-fuse", version = "0.2.0" }
 # M8-WP07-T04（by-hash）：gateway bin 装配 ChunkStore（--cas）——workspace
 # 既有依赖（铁律 8 核对通过）。
-partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
+partisync-cas = { path = "../partisync-cas", version = "0.2.0" }
 # M9-WP01-T01（写路径接线）：装配层折叠事件 → GraphApplier/capture +
 # bisync tick。path-only（ADR-0024 修订 5 判例；sync/graph 均为 workspace
 # 既有 crate，零新增顶层依赖，铁律 8 核对通过）。
-partisync-sync = { path = "../partisync-sync", version = "0.1.0" }
-partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+partisync-sync = { path = "../partisync-sync", version = "0.2.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.2.0" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -7471,7 +7471,7 @@ dependencies = [
 
 [[package]]
 name = "partisd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "partisync-gateway",
@@ -7483,7 +7483,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-ai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "c2pa",
@@ -7505,7 +7505,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-cas"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -7522,7 +7522,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "axum-extra",
@@ -7545,7 +7545,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "getrandom 0.2.17",
@@ -7554,7 +7554,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs 5.0.1",
  "fastembed",
@@ -7574,7 +7574,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-ext-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "minisign-verify",
  "serde",
@@ -7585,7 +7585,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-fuse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fuser",
  "partisync-cas",
@@ -7600,7 +7600,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -7631,7 +7631,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "notify",
@@ -7648,7 +7648,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-hub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7674,7 +7674,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-index"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -7696,7 +7696,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-provider"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "http 1.5.0",
@@ -7710,7 +7710,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "aws-config",
@@ -7736,7 +7736,7 @@ dependencies = [
 
 [[package]]
 name = "partisync-transfer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -13492,7 +13492,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "xxhash-rust"
