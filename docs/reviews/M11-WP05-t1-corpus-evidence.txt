@@ -1,0 +1,252 @@
+== M11-WP05-T04 T1 语料积累证据 ==
+date: 2026-10-10 21:46:01 CST  main=ef9e470 (分支 m11/wp04-t02-spec-draft 工作区,本证据只读 git)
+环境: Ubuntu 26.04.1 LTS / Linux 7.0.0-38-generic x86_64 / cargo 1.94.0 (85eff7c80 2026-01-15)
+数据集: hugcyp/LCSTS (真实公开微博短文本摘要数据集), 经 hf-mirror.com 直连下载
+      (https://hf-mirror.com/datasets/hugcyp/LCSTS/resolve/main/train.jsonl, 862MB, 未走代理)
+导入面: partisync-graph dev-target example(批量直插, wp02_memory.rs 判例同口径), 非 memory_write 逐笔
+检索面: partisd MCP Streamable HTTP (127.0.0.1:7650/mcp, rmcp 3.4.0, stateless)——真实 MCP 面, 未降级
+
+--- 一、语料来源与固化 ---
+
+固化位置: ~/Data/lcsts/train.jsonl (仓外, 862MB; >1MB 数据文件零入仓 ✓)
+
+$ curl -s https://hf-mirror.com/api/datasets/hugcyp/LCSTS/tree/main
+[{"type":"file","oid":"000cbdaa…","size":2355,"path":".gitattributes"},
+ {"type":"file","oid":"37f2c5f2…","size":244668,"path":"test_public.jsonl"},
+ {"type":"file","oid":"e5f2cbad…","size":903291188,"lfs":{"oid":"0d48f7b5…","size":903291188,…},"path":"train.jsonl"},
+ {"type":"file","oid":"4f28f24d…","size":3384843,"path":"valid.jsonl"}]
+
+$ wc -l ~/Data/lcsts/train.jsonl
+2400591 /home/acme/Data/lcsts/train.jsonl        ← ≥200000 ✓(240 万行, 取前 120000 行导入)
+
+$ head -c 200 ~/Data/lcsts/train.jsonl
+{"summary": "修改后的立法法全文公布", "text": "新华社受权于18日全文播发修改后的《中华人民共和国立法法》，修改后的立法法分为“总则”“法律”“行政法规”…
+
+(行格式: JSONL, 每行 {"summary":…,"text":…}; content 取键表沿 scripts/prepare-lcsts.py CONTENT_KEYS,
+ 本数据集命中别名键 "text"。)
+
+--- 二、导入实录 ---
+
+$ cargo run --release -p partisync-graph --example import_lcsts -- \
+    /home/acme/Data/lcsts/train.jsonl /home/acme/Data/lcsts-memory/graph.db 120000
+
+[首跑: 全量实插]
+进度: 尝试 10000 / 实插 9980 / 累计 1s
+进度: 20000 / 19968 / 3s … 60000 / 59508 / 12s … 120000 / 118076 / 31s   (10 批事务, 每批 10000)
+行扫描 120000，尝试插入 120000，INSERT OR IGNORE 实插 118076
+memory 表 count(*) = 118076
+memory_root: count = 118076 root = b84dace13bfee1d2b12db660735807653cf9afa237a537fa3268667221e27575（refresh 耗时 35335ms）
+verify_memory: ok = true snapshot_root = Some("b84dace13bfee1d2b12db660735807653cf9afa237a537fa3268667221e27575") recomputed_root = b84dace13bfee1d2b12db660735807653cf9afa237a537fa3268667221e27575 count = 118076 tombstones = 0 content_mismatches = 0
+(注: 首跑该行 "refresh 耗时 35335ms" 为当时代码将累计耗时误标为 refresh 耗时; 已修正 example
+ 为独立计时, 见下行二跑真值。数据本身不受影响。)
+
+[二跑(修正计时后幂等重跑): INSERT OR IGNORE 全忽略 + 独立 refresh 计时]
+进度: 尝试 110000 / 实插 0 / 累计 2s
+进度: 尝试 120000 / 实插 0 / 累计 2s
+行扫描 120000，尝试插入 120000，INSERT OR IGNORE 实插 0
+memory 表 count(*) = 118076
+memory_root: count = 118076 root = b84dace13bfee1d2b12db660735807653cf9afa237a537fa3268667221e27575（refresh 耗时 802ms）
+verify_memory: ok = true snapshot_root = Some("b84dace13bfee1d2b12db660735807653cf9afa237a537fa3268667221e27575") recomputed_root = b84dace13bfee1d2b12db660735807653cf9afa237a537fa3268667221e27575 count = 118076 tombstones = 0 content_mismatches = 0
+
+要点: ① 120000 行尝试 → 实插 118076(语料内 1924 条同 content 重复被主键幂等去重, 真实叶量以
+  count(*) = 118076 为准); ② 二跑实插 0 且 root 与首跑全同(确定性 + 幂等双证); ③ 118076 叶
+  全量重算 802ms(10⁵ 叶亚秒级口径实测吻合); ④ verify ok=true, 0 墓碑 0 列级篡改。
+
+db 固化: ~/Data/lcsts-memory/graph.db (233,230,336 字节, 仓外)
+
+--- 三、正控(管道存活证明, MCP 面) ---
+
+$ cargo run -p partisd -- --db /home/acme/Data/lcsts-memory/graph.db
+partisd: ready — pid=1090614 http://127.0.0.1:7650/mcp (loopback，无鉴权——ADR-0032 决策 5)
+
+(握手: stateless 模式, 每 POST 携 MCP-Protocol-Version: 2025-03-26 头 + params._meta
+ {"io.modelcontextprotocol/protocolVersion":"2025-03-26"}; rmcp 3.4.0 实测; initialize 一次成功。)
+
+$ curl -s -X POST http://127.0.0.1:7650/mcp \
+    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -H 'MCP-Protocol-Version: 2025-03-26' \
+    -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-03-26"},"name":"memory_search","arguments":{"query":"立法法","limit":5}}}' \
+    -o /tmp/positive_control.json
+(「立法法」= 首条导入 memory content 的 ≥3 字连续原文子串; curl 全程 2.352s 含服务冷启动)
+
+解析: 正控 total = 14
+      top1 memory_id = 2a477bd60852544197a64267d09854a80a6bb9788219fcf33c80be4ddc4a69c1
+      top1 score = 12.62197035307449
+→ total = 14 ≥ 1, FTS 管道存活 ✓(正控通过)
+
+--- 四、语义缺口探针(100 条 LCSTS summary 逐条实录) ---
+
+探针构造: head -n 100 train.jsonl 的 summary 原文(与 content 语义对齐), 逐条 MCP memory_search
+{query:<summary>, limit:5}。原始响应落 /tmp/probe_out/{000..099}.json, 计时 = curl time_total。
+
+$ for i in $(seq -w 000 099); do
+    t=$(curl -s -o /tmp/probe_out/$i.json -w '%{time_total}' --max-time 120 -X POST http://127.0.0.1:7650/mcp \
+      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+      -H 'MCP-Protocol-Version: 2025-03-26' -d @/tmp/probe_payloads/$i.json)
+    echo "$i $t"; done > /tmp/probe_times.txt
+
+汇总:
+  probes = 100   zero_hit = 98   hit = 2   0 命中比例 = 98/100 = 98%
+  total 命中数总和 = 2(两次命中各 total=1, 无一次多命中)
+  耗时: 中位 3.5ms / 均值 3.8ms / 最小 1.8ms / 最大 12.0ms (curl 客户端墙钟)
+
+逐条(idx / total / top1 score / 耗时 / query 前 40 字):
+000	total=0	top1=-	0.0047s	修改后的立法法全文公布
+001	total=0	top1=-	0.0032s	深圳机场9死24伤续：司机全责赔偿或超千万
+002	total=0	top1=-	0.0026s	孟建柱：主动适应形势新变化提高政法机关服务大局的能力
+003	total=0	top1=-	0.0025s	工信部约谈三大运营商严查通信违规
+004	total=0	top1=-	0.0026s	食品一级召回限24小时内启动10工作日完成
+005	total=0	top1=-	0.0031s	最高检:诉讼未终结涉案财物不得上缴国库
+006	total=0	top1=-	0.0027s	聂树斌案律师10年来首获准阅卷
+007	total=0	top1=-	0.0120s	北京市第一届人民监督员向宪法集体宣誓
+008	total=0	top1=-	0.0054s	免费公共wifi存隐患黑客可轻易获取用户信息
+009	total=0	top1=-	0.0036s	一张图看懂最高法2014年工作报告
+010	total=0	top1=-	0.0046s	全国首例涉代驾软件交通事故案宣判
+011	total=0	top1=-	0.0046s	全面深化人民监督员制度改革
+012	total=0	top1=-	0.0038s	多部门联合捉“老赖”
+013	total=0	top1=-	0.0110s	去年全国查处发票违法犯罪案件10.2万起
+014	total=0	top1=-	0.0037s	环保部要求有背景单位退出环评市场
+015	total=0	top1=-	0.0025s	最新司法解释：确保民事案件再审程序充分发挥纠错功能
+016	total=0	top1=-	0.0037s	四部门明确认定家暴正当防卫：免刑罚或轻判
+017	total=0	top1=-	0.0092s	工商总局：“已拆封”不能作为拒退货理由
+018	total=0	top1=-	0.0037s	澄迈福山咖啡口感纯正，想尝尝吗
+019	total=0	top1=-	0.0029s	长征7号来了可以在文昌围观火箭发射咯
+020	total=0	top1=-	0.0027s	这个周末自驾游去摘杨桃啦！
+021	total=0	top1=-	0.0040s	好日子是“车大炮”？过年这些鞭炮你们别买
+022	total=0	top1=-	0.0034s	海口快递小哥：让我亲一口就不收你钱！
+023	total=0	top1=-	0.0031s	歌手尹相杰非法持有毒品一审获刑7个月
+024	total=0	top1=-	0.0033s	工商总局回应与淘宝争议：政府要加强对企业的指导
+025	total=0	top1=-	0.0043s	检方决定不起诉“抗癌药代购第一人”
+026	total=0	top1=-	0.0042s	网信办：“账号十条”将施行多网站自查6万个违规账号
+027	total=0	top1=-	0.0061s	最高法第一巡回法庭将开审首案：跨省买卖合同纠纷
+028	total=0	top1=-	0.0026s	政府采购法实施条例3月1日施行
+029	total=0	top1=-	0.0025s	新规：禁止个人在互联网上发布危险物品信息
+030	total=0	top1=-	0.0021s	收藏银行卡隐藏多重法律风险5张以上就有可能犯罪
+031	total=0	top1=-	0.0040s	“熊孩子”VS“牛爸爸”
+032	total=0	top1=-	0.0019s	让蕾丝搭配来丰富小细节2015要继续美下去
+033	total=0	top1=-	0.0037s	海口平价菜促销将到期春节还能吃到平价菜吗？
+034	total=0	top1=-	0.0052s	这个周末，一起去澄迈摘杨桃
+035	total=0	top1=-	0.0051s	房产、财税、工商等多项新政羊年新春后落地
+036	total=0	top1=-	0.0029s	三亚“飙车党”蛇形驾驶致人六级伤残
+037	total=0	top1=-	0.0032s	最高检推动反腐败国家立法
+038	total=0	top1=-	0.0055s	海南发布大雾橙色预警
+039	total=0	top1=-	0.0026s	期末临近海口小学生作业多家长忧负担太重帮作弊
+040	total=0	top1=-	0.0033s	海口电动车划块地就收费？谁来管管这乱象……
+041	total=0	top1=-	0.0049s	不动产登记进入倒计时具备发新证地方停发旧版证书
+042	total=0	top1=-	0.0033s	外套脱掉！脱掉！海南今日最高温直逼30℃
+043	total=0	top1=-	0.0024s	萌萌哒多肉植物来啦快快带它回家吧
+044	total=0	top1=-	0.0022s	海口女子报警：遭干爹强奸10余年为他堕胎5次
+045	total=0	top1=-	0.0018s	海口罕见同卵三胞胎早产病危盼救助
+046	total=0	top1=-	0.0041s	海南西线高速修复预计春节前全线通车
+047	total=1	top1=12.042258072927712	0.0054s	再远的距离我们也能相爱
+048	total=0	top1=-	0.0026s	地道香港街头小吃现年货展
+049	total=0	top1=-	0.0024s	澄迈几千亩杨桃滞销急盼买家
+050	total=0	top1=-	0.0040s	国家网信办开展“婚恋网站严重违规失信”专项整治
+051	total=0	top1=-	0.0044s	微博大V体验4G极速网络
+052	total=0	top1=-	0.0021s	奥运会拳击资格赛为海南房博会“打气”
+053	total=0	top1=-	0.0027s	海南东山大桥春节前可通车
+054	total=0	top1=-	0.0046s	海口红城湖路延长线限速不合理
+055	total=0	top1=-	0.0022s	王毅武：开通克拉运河是天降大任于海南
+056	total=0	top1=-	0.0039s	公务员们，要管好你们的嘴了
+057	total=0	top1=-	0.0030s	海南年货展网上年货大街开卖啦
+058	total=0	top1=-	0.0041s	怪事：车祸肇事车辆竟被刑警拖走
+059	total=1	top1=10.751294653229097	0.0053s	习大大又要来海南看我们了
+060	total=0	top1=-	0.0021s	海口要建南海明珠大桥啦
+061	total=0	top1=-	0.0093s	博鳌亚洲论坛2015年年会3月26日举行设73场讨论
+062	total=0	top1=-	0.0042s	人民日报评论员：领导干部要做尊法学法守法用法的模范
+063	total=0	top1=-	0.0041s	国家网信办等四部门专项治理网络敲诈和有偿删帖
+064	total=0	top1=-	0.0043s	海口15岁失踪少女小意找到了！只是她再也不能回家
+065	total=0	top1=-	0.0025s	新华社：绝不许“党大还是法大”伪命题干扰政治定力
+066	total=0	top1=-	0.0030s	在儋州置业准没错
+067	total=0	top1=-	0.0030s	百年龙塘粉开到年货展
+068	total=0	top1=-	0.0048s	三亚海滩有免费WIFI海边自拍还怕没流量？
+069	total=0	top1=-	0.0034s	海口港今日起再增四个定点航班
+070	total=0	top1=-	0.0040s	80后，你该换身份证了！
+071	total=0	top1=-	0.0040s	七个关键词看民诉法司法解释
+072	total=0	top1=-	0.0020s	三沙优质海鲜产品重磅来袭
+073	total=0	top1=-	0.0028s	大众新速腾补丁方案引车主质疑
+074	total=0	top1=-	0.0036s	短信、微博、网聊记录等可作民事案件证据
+075	total=0	top1=-	0.0053s	海南中小学放假时间出炉了
+076	total=0	top1=-	0.0051s	又是临时工？海口得胜沙路业主集体讨权利！
+077	total=0	top1=-	0.0029s	毛超峰任海南省常务副省长
+078	total=0	top1=-	0.0037s	“感动海南”：以草根情怀弘扬人性之美
+079	total=0	top1=-	0.0020s	三亚村干部嫁女摆50多桌宴席遭举报超标了
+080	total=0	top1=-	0.0035s	海南“报痴”王蜀生走了：一生玩命干新闻刚退休
+081	total=0	top1=-	0.0024s	海口一客运中巴车发生自燃，只剩“骨架”
+082	total=0	top1=-	0.0022s	海口：路边猪肉太便宜被砸了
+083	total=0	top1=-	0.0020s	海口：男子开捷豹吃腌粉逃单
+084	total=0	top1=-	0.0034s	周杰伦昆凌婚啦！
+085	total=0	top1=-	0.0035s	美兰机场开通停车场-候机楼免费摆渡车啦
+086	total=0	top1=-	0.0059s	借上千万元跑路的人自首了！
+087	total=0	top1=-	0.0068s	“抗癌药代购第一人”已获释检方主动撤诉
+088	total=0	top1=-	0.0048s	一批法律法规2月1日起实施
+089	total=0	top1=-	0.0033s	中国记协通报３起虚假、失实报道
+090	total=0	top1=-	0.0042s	来，感受一下传统的“海南戏”
+091	total=0	top1=-	0.0031s	“感动海南”：以草根情怀弘扬人性之美
+092	total=0	top1=-	0.0023s	司法部：认真汲取讷河监狱案件教训全面加强监所管理
+093	total=0	top1=-	0.0023s	传递海南正能量转发也是一种力量
+094	total=0	top1=-	0.0034s	全国公证行业：开门实践让群众感知公信力
+095	total=0	top1=-	0.0021s	致敬！“感动海南”这群最可爱的人
+096	total=0	top1=-	0.0019s	一批春运道路交通事故典型案例公布
+097	total=0	top1=-	0.0038s	最高法第一巡回法庭今日挂牌判决效力等同于最高法
+098	total=0	top1=-	0.0051s	“感动海南”2014十大年度人物今晚直播
+099	total=0	top1=-	0.0026s	海南银行获银监会批准筹建
+
+唯一 2 次命中的自含性复核(命中均来自 query 全串逐字出现在自身 content——trigram 精确子串
+语义下仅此一途, 非语义召回):
+$ python3 -c "…json.loads(sed -n '48p')… print(row['summary'] in row['text'])"  → 047 True
+$ python3 -c "…json.loads(sed -n '60p')… print(row['summary'] in row['text'])"  → 059 True
+反例(语 义 缺 口 实 质): 探针 000 summary「修改后的立法法全文公布」vs 自身 content
+「…修改后的《中华人民共和国立法法》…」——《》插入打断 trigram 连续链 → total=0。
+
+--- 五、LIKE 兜底旁证(<3 字符查询走全表扫) ---
+
+$ time curl -s -X POST http://127.0.0.1:7650/mcp … -d '{…"memory_search","arguments":{"query":"海口","limit":5}}…' -o /tmp/like_probe.json
+curl 全程 0.181s
+解析: total = 0  top1 = -
+
+两点诚实记录: ① 2 字 query「海口」在 118,076 行库上走 LIKE 全表扫分支, 耗时 0.181s ≈ FTS
+探针中位 3.5ms 的 ~51 倍——线性扫描随叶量增长的规模痛点旁证; ② 实测发现该兜底分支 pattern
+不加 % 通配(store.rs memory_search LIKE 路径 bind like_escape(q) 原样), 语义=整行精确匹配,
+故 total=0——兜底本身对子串查询零召回, 低召回痛点再加一档。
+
+--- 六、T1 判定对照(实测数 vs 判定口径) ---
+
+| 判定项 | 口径 | 实测 | 对照 |
+|---|---|---|---|
+| memory 叶量 ≥10⁵ | memory 表 count(*) | 118,076 | ✓ 满足(1.18×10⁵) |
+| FTS 低召回实证 | 语义对齐 query 0 命中比例记录在案 | 100 探针 0 命中 98%, 正控存活, LIKE 兜底精确匹配语义 | ✓ 实证在案 |
+
+--- 七、诚实边界 ---
+
+① 语料 = LCSTS 真实公开数据集(hugcyp/LCSTS, 真实微博短文本 + 人工摘要), 240 万行全量固化于
+   仓外 ~/Data/lcsts/; 但它是公开基准语料, 非本产品生产使用流量。
+② 导入 = 批量直插(tests/wp02_memory.rs perf 探针同口径: 事务分批 + 裸 INSERT memory 9 列,
+   hlc=NULL、oplog 零行、结束后一次 refresh_memory_root), 非逐笔 memory_write; 身份/列级哈希
+   与产品写路径同源(memory_identity / content_digest), 幂等经 INSERT OR IGNORE。
+③ 去重后真实叶量 = count(*) 实测 118,076(120,000 尝试, 1,924 语料内重复被身份主键幂等去重)。
+④ T1 判定对照见第六节: 叶量 118,076 ≥ 10⁵ ✓; FTS 低召回实证 = 98% 零命中(98/100)+ 正控
+   total=14 管道存活 + LIKE 兜底精确匹配语义(零子串召回)——两项实测均达口径。
+⑤ 本证据只记录实测, 不代裁 T1 满足——判定请用户复核。
+⑥ 附加发现(超出判定口径, 如实登记): a) LIKE 兜底对子串查询零召回(pattern 无 % 通配);
+   b) 正控「立法法」total=14 说明同一实体词在 11.8 万语料内仅 14 条子串命中, 召立面整体极窄。
+
+--- 八、验证门禁(证据落盘前实跑, 2026-10-10 21:46 CST) ---
+
+$ cargo fmt --all --check
+(空输出, exit 0)
+FMT: OK (exit 0, empty diff)
+
+$ cargo clippy -p partisync-graph --all-targets -- -D warnings
+    Checking partisync-graph v0.2.0 (/home/acme/Codebase/partisync/crates/partisync-graph)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.80s
+(零 warning 零 error)
+
+$ cargo test -p partisync-graph
+     Running tests/jobs.rs …        test result: ok. 2 passed; 0 failed
+     Running tests/journal.rs …     test result: ok. 4 passed; 0 failed
+     Running tests/store.rs …       test result: ok. 6 passed; 0 failed
+     Running tests/wp02_memory.rs … test result: ok. 10 passed; 0 failed
+     Running tests/wp04_memory.rs … test result: ok. 5 passed; 0 failed
+     Doc-tests …                    test result: ok. 0 passed; 0 failed
+(6 套件合计 27 passed / 0 failed, 含 examples 编译面——--all-targets 由 clippy 覆盖)
