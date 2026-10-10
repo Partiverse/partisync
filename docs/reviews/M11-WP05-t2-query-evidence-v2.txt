@@ -1,0 +1,25 @@
+== T2 实证 v2:全链归档(补 index/reindex 步骤 + 语料固化)==
+date: 2026-10-10 12:38:56  main=7d54c52  环境: Kubuntu 本机 CLI 只读检索
+
+--- 语料(3 文件,已固化于仓?否——临时件,本 v2 补录内容原文)---
+[baking.md]
+Sourdough baking guide: fermentation temperature and proofing time control.[quarterly-review.md]
+2026Q3 营收与利润率实现双增长,成本控制举措显著见效,现金流保持健康。[sync-minutes.md]
+Weekly sync minutes: release timeline agreed, two blockers discussed, demo scheduled Friday.
+--- 步骤① index(图谱入库)---
+  本次: 文件 3 目录 0 分块 0 跳过符号链接 0
+--- 步骤② reindex(bm25 检索索引填充,200→3 文件口径)---
+reindex 完成: indexed=3 skip_binary=0 skip_invalid=0 read_errors=0 (index: /tmp/g10-t2/index)
+--- 步骤③ 检索(只读)---
+[Q1] revenue report →
+模式: BM25（20 条，耗时 1ms）
+（0 条结果）
+[Q2] 会议纪要 →
+模式: BM25（20 条，耗时 3ms）
+（0 条结果）
+[Q4 sanity] fermentation →
+  [1.2754] aa5059c5bda9af8efc4e37b515ae1979f11b5d57638d3b17d4a2f0689254b3f7  Sourdough baking guide: [[fermentation]] temperature and proofing time control
+（1 条结果）
+[Q5 语料自洽] 营收(中文原文词)→
+  [2.1281] 4554f1722ba74376355a32c699fcf250d68e2d57d3bc46e292678341750ad41a  2026Q3 [[营]] [[收]] [[营收]] 与 收与 利 与利 润 利润 率 润率 实 率实 现 实现 双 现双 增 双增 长 增长 ,成 本 成本 控 本控 制 控制 举 制举 措 举措 显 措显 著
+（1 条结果）
