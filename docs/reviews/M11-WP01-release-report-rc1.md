@@ -25,7 +25,7 @@
 ## 3. B1–B8 复跑结论(RELEASE-CHECKLIST-beta.md rc 口径)
 
 B1 ✅(drop-caches 复测执行记录 2026-10-09;by-hash 断言处置 A/B/C 待
-拍板——不阻塞 tag,见 §遗留)/ B2 ✅(main CI 8/8)/ B3 ✅(tag 已推)
+拍板——不阻塞 tag,见 §遗留;**后记:已于 2026-10-10 拍板 A,M11-WP01-T06**)/ B2 ✅(main CI 8/8)/ B3 ✅(tag 已推)
 / B4 ✅(run 38035248623 全 job success;**一次修复实录**:macOS BSD
 strip 无 `-s` 旗标 → 裸 strip,PR #220)/ B5 ✅(41 assets:2 tar.gz +
 1 dmg + 20 minisig + 16 SBOM + SHA256SUMS + repro)/ B6 ✅(docker
@@ -43,7 +43,9 @@ E056CBB62BF3EF34;linux tar.gz sha256 一致)/ B7 ✅(yes)/ B8 ⏳(本
 
 ## 5. 遗留与后续
 
-1. **B1 by-hash 断言处置 A/B/C 待拍板**(推荐 A:重划断言口径);
+1. **B1 by-hash 断言处置**——**已拍板 A**(2026-10-10,用户裁决;
+   M11-WP01-T06:断言口径 v2 落锤,checklist 本框闭合,详见
+   RELEASE-CHECKLIST-beta.md §B 拍板记录);
 2. **GA 口径拍板文档**(cadence 尾项):GA 判据草案 = 候选 4 语料积累
    (T1 ≥10⁵)+ stored 原文域落地(M11-WP04)+ rc 反馈窗口;正式拍板
    文档随窗口出;
