@@ -41,4 +41,4 @@ docs/reviews/M11-WP05-t1-corpus-evidence.txt(新)
 - [x] cargo fmt --all --check 通过
 - [x] cargo clippy -p partisync-graph --all-targets -- -D warnings 通过
 - [x] cargo test -p partisync-graph 通过(27 passed / 0 failed)
-- [ ] T1 判定经用户复核
+- [x] T1 判定经用户复核(2026-10-10 用户裁决「T1 语料满足」;裁定记录随本提交,证据见 docs/reviews/M11-WP05-t1-corpus-evidence.txt)
