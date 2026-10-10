@@ -60,11 +60,11 @@ jobs:
         run: |
           cargo install --locked cargo-auditable
           cargo auditable build --locked --release -p partisync-cli -p partisync-gateway
-      - name: package (strip first — rc 改进项 a)
+      - name: package (strip first — rc 改进项 a;macOS BSD strip 无 -s 旗标)
         run: |
           mkdir -p dist
           for bin in partisync-cli partisync-mcp partisync-mcp-http; do
-            strip -s target/release/$bin
+            strip target/release/$bin
             cp target/release/$bin dist/
           done
           tar -czf dist/partisync-cli-0.2.0-rc.1-macos-aarch64.tar.gz -C dist \
