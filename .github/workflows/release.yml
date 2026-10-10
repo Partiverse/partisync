@@ -2,9 +2,11 @@
 # 签名工具链与密钥保管：ADR-0027 + docs/release/key-custody.md（私钥仅以
 # GitHub secret 注入，人不经手）。门禁阈值改动需 ADR；toolchain 与
 # rust-toolchain.toml 一致（ADR-0003）。
-# beta 口径（M9-WP06 §2.1，用户 2026-10-05 确认）：tag v0.1.0-beta、Cargo
-# 维持 0.1.0、产物名 -beta 后缀；tar 包扩 partisync-mcp / partisync-fuse；
-# CycloneDX SBOM 独立导出；linux 双构建 reproducibility 对账（偏差登记不假绿）。
+# rc 口径（M10-WP06-T02 落档、M11-WP01-T01 用户 2026-10-10 确认）：tag
+# v0.2.0-rc.1、workspace 0.2.0（整数版）、产物名 -rc.1 后缀；五 bin 入包
+# （新增 partisync-mcp-http）；打包前 strip（改进项 a）；CycloneDX SBOM
+# 独立导出；linux 双构建 reproducibility 对账 + CARGO_PROFILE_RELEASE_
+# DEBUG=false 联动评估（改进项 b，偏差登记不假绿）；桌面 dmg 随发（§4-2b）。
 name: release
 
 on:
@@ -28,21 +30,22 @@ jobs:
         run: |
           cargo install --locked cargo-auditable
           cargo auditable build --locked --release -p partisync-cli -p partisync-hub -p partisync-gateway -p partisync-fuse
-      - name: package
+      - name: package (strip first — rc 改进项 a，cadence §2.2)
         # hub 产物 = hub-demo-web（hub crate 无主 bin——alpha 口径延续，如实
-        # 标注 demo 面）；beta 扩 partisync-mcp（记忆三工具 stdio server）+
-        # partisync-fuse（挂载写回入口），SPEC M9-WP06 §2.1 产物面轴
+        # 标注 demo 面）；rc 扩 partisync-mcp-http（MCP 2.0 远程入口，
+        # M10-WP05）——五 bin 口径
         run: |
           mkdir -p dist
-          for bin in partisync-cli partisync-mcp partisync-fuse hub-demo-web; do
+          for bin in partisync-cli partisync-mcp partisync-mcp-http partisync-fuse hub-demo-web; do
+            strip -s target/release/$bin
             cp target/release/$bin dist/
           done
-          tar -czf dist/partisync-cli-0.1.0-beta-linux-x86_64.tar.gz -C dist \
-            partisync-cli partisync-mcp partisync-fuse hub-demo-web
+          tar -czf dist/partisync-cli-0.2.0-rc.1-linux-x86_64.tar.gz -C dist \
+            partisync-cli partisync-mcp partisync-mcp-http partisync-fuse hub-demo-web
       - uses: actions/upload-artifact@v4
         with:
           name: cli-linux
-          path: dist/partisync-cli-0.1.0-beta-linux-x86_64.tar.gz
+          path: dist/partisync-cli-0.2.0-rc.1-linux-x86_64.tar.gz
 
   build-cli-macos:
     runs-on: macos-latest
@@ -57,18 +60,19 @@ jobs:
         run: |
           cargo install --locked cargo-auditable
           cargo auditable build --locked --release -p partisync-cli -p partisync-gateway
-      - name: package
+      - name: package (strip first — rc 改进项 a)
         run: |
           mkdir -p dist
-          for bin in partisync-cli partisync-mcp; do
+          for bin in partisync-cli partisync-mcp partisync-mcp-http; do
+            strip -s target/release/$bin
             cp target/release/$bin dist/
           done
-          tar -czf dist/partisync-cli-0.1.0-beta-macos-aarch64.tar.gz -C dist \
-            partisync-cli partisync-mcp
+          tar -czf dist/partisync-cli-0.2.0-rc.1-macos-aarch64.tar.gz -C dist \
+            partisync-cli partisync-mcp partisync-mcp-http
       - uses: actions/upload-artifact@v4
         with:
           name: cli-macos
-          path: dist/partisync-cli-0.1.0-beta-macos-aarch64.tar.gz
+          path: dist/partisync-cli-0.2.0-rc.1-macos-aarch64.tar.gz
 
   build-desktop-macos:
     # 桌面壳 dmg（Tauri bundler）。公证（notarization）为 SPEC 非目标，
@@ -83,17 +87,17 @@ jobs:
         run: |
           cargo install tauri-cli --locked
           cargo tauri build --target aarch64-apple-darwin
-      - name: rename (beta suffix)
+      - name: rename (rc.1 suffix)
         run: |
           mkdir -p dist
           for f in target/aarch64-apple-darwin/release/bundle/dmg/*.dmg; do
             base=$(basename "$f")
-            cp "$f" "dist/PartiSync.Desktop_0.1.0-beta_aarch64.dmg"
+            cp "$f" "dist/PartiSync.Desktop_0.2.0-rc.1_aarch64.dmg"
           done
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-macos
-          path: dist/PartiSync.Desktop_0.1.0-beta_aarch64.dmg
+          path: dist/PartiSync.Desktop_0.2.0-rc.1_aarch64.dmg
 
   sbom:
     # CycloneDX SBOM 独立导出（M9-WP06 §2.1；A6 cargo auditable 嵌入面之外的
@@ -123,7 +127,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
-      - name: build twice (separate target dirs)
+      - name: build twice (separate target dirs; rc 改进项 b 评估——无 debug info 干扰)
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: "false"
         run: |
           CARGO_TARGET_DIR=target-a cargo build --locked --release -p partisync-cli
           CARGO_TARGET_DIR=target-b cargo build --locked --release -p partisync-cli
