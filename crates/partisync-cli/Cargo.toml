@@ -6,14 +6,14 @@ license.workspace = true
 description = "PartiSync 命令行界面：init/index/ls/find/dedupe/serve/sync 等子命令"
 
 [dependencies]
-partisync-core = { path = "../partisync-core", version = "0.1.0" }
-partisync-sync = { path = "../partisync-sync", version = "0.1.0" } # M5-WP03-T05 scan-plan 子命令（壳→能力层向下依赖）
-partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
-partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
-partisync-ai = { path = "../partisync-ai", version = "0.1.0" } # M4-WP01 sidecar 调度
-partisync-index = { path = "../partisync-index", version = "0.1.0" } # M4-WP02 检索引擎
+partisync-core = { path = "../partisync-core", version = "0.2.0" }
+partisync-sync = { path = "../partisync-sync", version = "0.2.0" } # M5-WP03-T05 scan-plan 子命令（壳→能力层向下依赖）
+partisync-graph = { path = "../partisync-graph", version = "0.2.0" }
+partisync-cas = { path = "../partisync-cas", version = "0.2.0" }
+partisync-ai = { path = "../partisync-ai", version = "0.2.0" } # M4-WP01 sidecar 调度
+partisync-index = { path = "../partisync-index", version = "0.2.0" } # M4-WP02 检索引擎
 md-5 = { workspace = true } # S3 ETag
-partisync-provider = { path = "../partisync-provider", version = "0.1.0" }
+partisync-provider = { path = "../partisync-provider", version = "0.2.0" }
 base64 = "0.22"
 percent-encoding = "2.3"
 axum-extra = { version = "0.12", features = ["query"], default-features = false }

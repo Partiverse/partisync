@@ -13,8 +13,8 @@ ai-embed = ["dep:fastembed"]
 ai-transcribe = ["dep:whisper-rs", "dep:symphonia"]
 
 [dependencies]
-partisync-core = { path = "../partisync-core", version = "0.1.0" }
-partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+partisync-core = { path = "../partisync-core", version = "0.2.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.2.0" }
 tokio = { workspace = true }
 sqlx = { workspace = true }
 serde_json = { workspace = true }
@@ -31,7 +31,7 @@ symphonia = { workspace = true, optional = true }
 tempfile = "3"
 criterion = { workspace = true } # SPEC M0-WP00 D2 基准基建
 # e2e（T06）：scan→入队→管线全链走真 indexer
-partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
+partisync-cas = { path = "../partisync-cas", version = "0.2.0" }
 
 [[bench]]
 name = "wp01_bench"

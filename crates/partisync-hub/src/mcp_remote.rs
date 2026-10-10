@@ -158,7 +158,7 @@ impl RemoteMcpSkeleton {
                         "capabilities": { "tools": { "listChanged": false } },
                         "serverInfo": {
                             "name": "partisync-hub-mcp-remote-skeleton",
-                            "version": "0.1.0",
+                            "version": "0.2.0",
                         },
                         "instructions": "M9-WP05 骨架（不承诺生产可用）：仅握手评估面；token 不验证（mock）；无工具执行。",
                     },

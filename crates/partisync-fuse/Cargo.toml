@@ -1,6 +1,6 @@
 [package]
 name = "partisync-fuse"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "FUSE 挂载面（ADR-0026）：mountpoint-s3 式「诚实非 POSIX」语义——只读 + 新文件顺序写"
@@ -18,7 +18,7 @@ fuser = { workspace = true }
 # M8-WP07-T04（/by-hash 命名空间）：CAS 直连读（digest → 内容）+ 专用
 # runtime（fuser handler 同步线程内 block_on CAS 异步 API）。两者均为
 # workspace 既有顶层依赖（铁律 8 核对通过）。
-partisync-cas = { path = "../partisync-cas", version = "0.1.0" }
+partisync-cas = { path = "../partisync-cas", version = "0.2.0" }
 tokio = { workspace = true }
 # M8-WP07-T02（写回日志）：WAL JSONL 序列化——workspace 既有顶层依赖
 # （serde 主仓多处使用），非新增顶层（铁律 8 核对通过）。
@@ -34,6 +34,6 @@ proptest = { workspace = true }
 tempfile = "3"
 # M8-WP07-T05：索引接线 e2e（挂载写 = CLI 写同根校验）——sync/graph 为
 # workspace 既有依赖（铁律 8 核对通过）。
-partisync-sync = { path = "../partisync-sync", version = "0.1.0" }
-partisync-graph = { path = "../partisync-graph", version = "0.1.0" }
+partisync-sync = { path = "../partisync-sync", version = "0.2.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.2.0" }
 tokio = { workspace = true }
