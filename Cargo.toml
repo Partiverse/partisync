@@ -23,7 +23,7 @@ members = [
 version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://example.invalid/partisync" # 占位：仓库远端待定（ADR-0000）
+repository = "https://github.com/Partiverse/partisync" # ADR-0033 门面收口（远端见 M0-report D1）
 
 [workspace.dependencies]
 proptest = "1"
