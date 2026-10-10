@@ -3,7 +3,9 @@
 //! 索引字段：filename / tags / ocr_text / transcript_text。
 //! 分词：filename = text 标准分词；其余 = text_stemmed（降噪 OCR/转写）。
 //!
-//! 索引 schema：`content_id`（主键） + 四字段 + `updated_ns`（增量更新时间戳）。
+//! 索引 schema：`content_id`（主键） + 四字段 + `updated_ns`（增量更新时间戳），
+//! 另有两个 stored-only 原文域（M11-WP04-T03：不分词、零 postings、不进
+//! QueryParser、不参与评分，仅作摘要回落链 ①的原文源）。
 
 use std::path::Path;
 use std::sync::RwLock;
@@ -23,6 +25,9 @@ const FIELD_TAGS: &str = "tags";
 const FIELD_OCR_TEXT: &str = "ocr_text";
 const FIELD_TRANSCRIPT_TEXT: &str = "transcript_text";
 const FIELD_UPDATED_NS: &str = "updated_ns";
+/// stored-only 原文域（M11-WP04-T03 SPEC §2.1）：ocr/transcript 同源原文。
+const FIELD_OCR_TEXT_ORIG: &str = "ocr_text_orig";
+const FIELD_TX_ORIG: &str = "transcript_text_orig";
 
 /// 单条可检索文档（写入 BM25 索引前从 sidecar_items + entries 聚合）。
 #[derive(Debug, Clone)]
@@ -77,6 +82,13 @@ fn schema() -> Schema {
     schema_builder.add_text_field(FIELD_OCR_TEXT, TEXT | STORED); // snippet 依赖 stored 值
     schema_builder.add_text_field(FIELD_TRANSCRIPT_TEXT, TEXT | STORED);
     schema_builder.add_i64_field(FIELD_UPDATED_NS, INDEXED | STORED);
+    // M11-WP04-T03（SPEC §2.1）：stored-only 原文域——单独传 `STORED` 即
+    // indexing:None + stored:true（tantivy 0.26.2 text_options.rs:307-316
+    // `From<StoredFlag>`），零 postings / 零 fieldnorm（segment_writer.rs
+    // :167-169 直接 continue）；不进 QueryParser（query_parser.rs:541-543）、
+    // 不参与评分。追加在既有 6 字段之后：序号 0-5 不变（存量对齐）。
+    schema_builder.add_text_field(FIELD_OCR_TEXT_ORIG, STORED);
+    schema_builder.add_text_field(FIELD_TX_ORIG, STORED);
     schema_builder.build()
 }
 
@@ -192,6 +204,74 @@ fn head_truncate(s: &str) -> String {
     format!("{}…", &s[..end])
 }
 
+/// ①原文定位摘要的首个命中前导上下文（字符数；非契约量——契约是窗口
+/// 总宽 ≤ [`SNIPPET_MAX_CHARS`]，SPEC M11-WP04 §2.2）。
+const SNIPPET_ORIG_LEAD_CHARS: usize = 40;
+
+/// 原文词面定位（SPEC M11-WP04 §2.2 ①）：查询词项面逐个按字面子串在原文
+/// 定位（Latin 大小写不敏感；CJK 无大小写，同规则覆盖），命中区段以 char
+/// 下标返回（已排序折叠）；一处都未命中 → None。词项面口径与 parser 实际
+/// 可见 term 面对齐：tantivy 默认 "std" 链含 RemoveLongFilter(40 **字节**)
+/// （tokenizer_manager.rs:61-72、remove_long.rs:31），≥40 字节 token 永不
+/// 成为查询 term，此处同口径剔除。词形边界长尾（SPEC §6-R2）只影响
+/// sentinel 框选精度，不影响召回/排序。
+fn orig_hit_ranges(orig: &str, tokens: &[String]) -> Option<Vec<std::ops::Range<usize>>> {
+    let chars: Vec<char> = orig.chars().collect();
+    let mut ranges = Vec::new();
+    for token in tokens {
+        // RemoveLongFilter(40 字节) 同口径；空 token 跳过（windows 非零长度要求）
+        if token.is_empty() || token.len() >= 40 {
+            continue;
+        }
+        let t: Vec<char> = token.chars().collect();
+        for (start, window) in chars.windows(t.len()).enumerate() {
+            if window
+                .iter()
+                .zip(t.iter())
+                .all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
+            {
+                ranges.push(start..start + t.len());
+            }
+        }
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    // 区段重叠折叠（tantivy 内部自带排序去重，char 下标只是数字区间）
+    Some(collapse_overlapped_ranges(&ranges))
+}
+
+/// ①原文定位摘要（SPEC M11-WP04 §2.2）：orig 域存在且非空、且查询词面在
+/// 原文至少命中一处 → 以首个命中为锚开窗（前导 [`SNIPPET_ORIG_LEAD_CHARS`]
+/// 字符上下文，总宽 ≤ [`SNIPPET_MAX_CHARS`] 字符、按字符边界截断），窗口
+/// 内命中区段（越界裁剪）以 sentinel `[[`/`]]` 包裹；否则 None → 调用方
+/// 按回落链走 ②③④。与 ②扇出串定位不混搭：单侧输出恒为单一原文源。
+fn orig_snippet(tokens: &[String], orig: Option<&str>) -> Option<String> {
+    let orig = orig.filter(|s| !s.is_empty())?;
+    if tokens.is_empty() {
+        return None;
+    }
+    let ranges = orig_hit_ranges(orig, tokens)?;
+    let chars: Vec<char> = orig.chars().collect();
+    let ws = ranges[0].start.saturating_sub(SNIPPET_ORIG_LEAD_CHARS);
+    let we = (ws + SNIPPET_MAX_CHARS).min(chars.len());
+    let mut out = String::with_capacity((we - ws) * 4);
+    let mut pos = ws;
+    for r in &ranges {
+        let (s, e) = (r.start.max(ws), r.end.min(we));
+        if s >= e {
+            continue;
+        }
+        out.extend(chars[pos..s].iter());
+        out.push_str(SNIPPET_OPEN);
+        out.extend(chars[s..e].iter());
+        out.push_str(SNIPPET_CLOSE);
+        pos = e;
+    }
+    out.extend(chars[pos..we].iter());
+    Some(out)
+}
+
 /// 是否 CJK 统一表意（基本汉字 + 扩展 A–F + 兼容 + 部首 + 笔画）。
 /// 与 jieba 等中文分词器对「中文」的覆盖一致。
 fn is_cjk(c: char) -> bool {
@@ -262,6 +342,14 @@ pub struct Bm25Index {
     /// 尊重，parser 恒含 tx 字段，「关闭可提升速度/排除转写」名存实亡）。
     parser_no_tx: QueryParser,
     schema: Schema,
+    /// orig 域（M11-WP04-T03 SPEC §2.1）按「索引内嵌 schema」解析：新建 /
+    /// 新 schema 目录 → Some；存量旧 6 字段 schema → None → 不写 orig、
+    /// 摘要逐字段回落。必须以内嵌 schema 为准：写路径对文档每个字段调
+    /// `get_field_entry`（segment_writer.rs:155-165），而它是裸 Vec 下标
+    /// （schema.rs:281-283）——向旧 schema 写新字段序号会 panic（tantivy
+    /// 索引 schema 内嵌 meta.json，无就地扩展字段面，重建新目录后获得）。
+    ocr_orig_field: Option<Field>,
+    tx_orig_field: Option<Field>,
 }
 
 impl Bm25Index {
@@ -303,12 +391,20 @@ impl Bm25Index {
             QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field, tx_field]);
         let parser_no_tx = QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field]);
 
+        // orig 域按内嵌 schema 解析（新建 = 本地新 schema；存量旧目录 =
+        // 旧 schema → None，SPEC §2.1 存量兼容；get_field 0.26 返回 Result）
+        let index_schema = index.schema();
+        let ocr_orig_field = index_schema.get_field(FIELD_OCR_TEXT_ORIG).ok();
+        let tx_orig_field = index_schema.get_field(FIELD_TX_ORIG).ok();
+
         Ok(Self {
             writer: Some(RwLock::new(writer)),
             reader,
             parser,
             parser_no_tx,
             schema,
+            ocr_orig_field,
+            tx_orig_field,
         })
     }
 
@@ -346,12 +442,18 @@ impl Bm25Index {
             QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field, tx_field]);
         let parser_no_tx = QueryParser::for_index(&index, vec![fn_field, tags_field, ocr_field]);
 
+        // orig 域按内嵌 schema 解析（旧 schema → None，SPEC §2.1 存量兼容）
+        let ocr_orig_field = schema.get_field(FIELD_OCR_TEXT_ORIG).ok();
+        let tx_orig_field = schema.get_field(FIELD_TX_ORIG).ok();
+
         Ok(Self {
             writer: None,
             reader,
             parser,
             parser_no_tx,
             schema,
+            ocr_orig_field,
+            tx_orig_field,
         })
     }
 
@@ -386,16 +488,24 @@ impl Bm25Index {
         let term = tantivy::Term::from_field_text(id_field, &doc.content_id);
         writer.delete_term(term);
 
-        // 再添加新文档
+        // 再添加新文档。M11-WP04-T03（SPEC §2.1）：同源双写——扇出串进
+        // 索引域（检索不变），原文进 orig 域，同调用点一次成文；IndexedDoc
+        // None → 两域皆不写；orig 域缺失（旧 schema）→ 跳过 orig 侧写入。
         let mut d = TantivyDocument::default();
         d.add_text(id_field, &doc.content_id);
         d.add_text(fn_field, &doc.filename);
         d.add_text(tags_field, doc.tags.join(" "));
         if let Some(ref ocr) = doc.ocr_text {
             d.add_text(ocr_field, cjk_fan_out(ocr));
+            if let Some(orig_field) = self.ocr_orig_field {
+                d.add_text(orig_field, ocr);
+            }
         }
         if let Some(ref tx) = doc.transcript_text {
             d.add_text(tx_field, cjk_fan_out(tx));
+            if let Some(orig_field) = self.tx_orig_field {
+                d.add_text(orig_field, tx);
+            }
         }
         d.add_i64(upd_field, doc.updated_ns);
 
@@ -421,15 +531,22 @@ impl Bm25Index {
             let term = tantivy::Term::from_field_text(id_field, &doc.content_id);
             writer.delete_term(term);
 
+            // 同源双写（SPEC §2.1，口径与 upsert 一致）
             let mut d = TantivyDocument::default();
             d.add_text(id_field, &doc.content_id);
             d.add_text(fn_field, &doc.filename);
             d.add_text(tags_field, doc.tags.join(" "));
             if let Some(ref ocr) = doc.ocr_text {
                 d.add_text(ocr_field, cjk_fan_out(ocr));
+                if let Some(orig_field) = self.ocr_orig_field {
+                    d.add_text(orig_field, ocr);
+                }
             }
             if let Some(ref tx) = doc.transcript_text {
                 d.add_text(tx_field, cjk_fan_out(tx));
+                if let Some(orig_field) = self.tx_orig_field {
+                    d.add_text(orig_field, tx);
+                }
             }
             d.add_i64(upd_field, doc.updated_ns);
             writer
@@ -476,6 +593,12 @@ impl Bm25Index {
         let searcher = self.reader.searcher();
 
         let pre_query = cjk_fan_out(&sanitize_query(&q.query));
+        // M11-WP04-T03（SPEC §2.2）：①原文定位摘要的词项面 = sanitize +
+        // fan-out 后 token 集（去重），与 parser 消费的 pre_query 同源一次成文。
+        let mut query_tokens: Vec<String> =
+            pre_query.split_whitespace().map(str::to_string).collect();
+        query_tokens.sort_unstable();
+        query_tokens.dedup();
         let parsed = if q.include_transcript {
             self.parser.parse_query(&pre_query)
         } else {
@@ -509,13 +632,24 @@ impl Bm25Index {
                 .unwrap_or_default()
                 .to_string();
 
-            // 命中词定位摘要优先（ocr → tx）；无词面/生成器缺失/字段空
-            // → 回落旧头部截断（ocr → tx → None，现状行为不变）。
+            // 摘要四级回落链（M11-WP04-T03 SPEC §2.2，逐字段回落、①②不
+            // 混搭）：ocr 侧 ①orig 定位 → ②扇出串定位（存量索引触达）→
+            // ③头部截断；tx 侧按同序独立判定；全空 → None。
+            let ocr_orig = self
+                .ocr_orig_field
+                .and_then(|f| retrieved.get_first(f))
+                .and_then(|v| v.as_str());
+            let tx_orig = self
+                .tx_orig_field
+                .and_then(|f| retrieved.get_first(f))
+                .and_then(|v| v.as_str());
             let ocr_val = retrieved.get_first(ocr_field).and_then(|v| v.as_str());
             let tx_val = retrieved.get_first(tx_field).and_then(|v| v.as_str());
-            let highlight = field_snippet(gen_ocr.as_ref(), ocr_val)
-                .or_else(|| field_snippet(gen_tx.as_ref(), tx_val))
+            let highlight = orig_snippet(&query_tokens, ocr_orig)
+                .or_else(|| field_snippet(gen_ocr.as_ref(), ocr_val))
                 .or_else(|| ocr_val.filter(|s| !s.is_empty()).map(head_truncate))
+                .or_else(|| orig_snippet(&query_tokens, tx_orig))
+                .or_else(|| field_snippet(gen_tx.as_ref(), tx_val))
                 .or_else(|| tx_val.filter(|s| !s.is_empty()).map(head_truncate));
 
             hits.push(Bm25Hit {
@@ -746,11 +880,12 @@ mod tests {
         );
     }
 
-    /// 中文命中例（R1：CJK fan-out 词面必须可高亮）+ 无词面回落契约：
-    /// 查询词仅在 filename（ocr 有文本无词面）→ 回落头部截断（无
-    /// sentinel）；ocr/tx 全空 → None；全程不 panic。回落截断按字符边界
-    /// （旧实现 `&s[..200]` 按字节切，中文多字节中界 panic——回落路径
-    /// 重写时一并修正）。
+    /// M11-WP04-T03 改写（原 M10-WP01-T02「中文命中例 + 无词面回落」，
+    /// 改写理由：摘要源迁移后中文命中不再走扇出串定位，断言随契约更新，
+    /// SPEC §3）：中文命中走 ①原文定位摘要——highlight 为可读原文（无
+    /// fan-out「字 间空格」碎片流）、bigram「夸克」被 sentinel 包裹、命中
+    /// 位于 >200 字符偏移处；无词面例（查询词仅在 filename）→ 回落头部
+    /// 截断（无 sentinel）；ocr/tx 全空 → None；全程不 panic。
     #[test]
     fn t02_snippet_cjk_hit_and_no_term_fallback() {
         let dir = tempfile::tempdir().unwrap();
@@ -791,8 +926,9 @@ mod tests {
         idx.commit().unwrap();
         idx.force_reload().unwrap();
 
-        // 1) 中文命中：sentinel 包裹 fan-out 词面（bigram「夸克」单独成
-        //    token，必被包裹），窗口定位在 >200 字符偏移处
+        // 1) 中文命中：①原文定位摘要——可读原文 + bigram「夸克」被
+        //    sentinel 包裹（fan-out 碎片形态「了 新 的 夸 克」不得再现），
+        //    命中位于 >200 字符偏移（filler 不含「夸」「克」）
         let r = idx
             .search(Bm25Query {
                 query: "夸克".to_string(),
@@ -805,10 +941,13 @@ mod tests {
             .highlight
             .as_deref()
             .expect("中文命中 highlight Some");
-        assert!(hl.contains("[[夸克]]"), "sentinel 包裹中文命中词：{hl}");
+        assert!(
+            hl.contains("发现了新的[[夸克]]"),
+            "可读原文 + sentinel 包裹 bigram：{hl}"
+        );
+        assert!(!hl.contains("了 新 的"), "不得为 fan-out 碎片流：{hl}");
         let plain = hl.replace("[[", "").replace("]]", "");
         assert!(plain.chars().count() <= 200, "窗口有界：{hl}");
-        assert!(hl.contains('夸'), "窗口含命中字：{hl}");
 
         // 2) 无词面回落例：查询词仅在 filename
         let r = idx
@@ -825,6 +964,209 @@ mod tests {
         assert!(!fb.contains("[["), "回落不得引入 sentinel：{fb}");
         // ocr/tx 全空 → None
         assert!(by_id("mt1").highlight.is_none(), "字段全空 → None");
+    }
+
+    /// M11-WP04-T03（SPEC §2.1 存量兼容 / §3 回落链测试）：旧 6 字段
+    /// schema（M10-WP01-T02 形态，无 orig 域）内嵌索引 fixture——打开/
+    /// 检索不受影响；orig 缺失 → 摘要逐字段回落 ②③（与现状一致），全链
+    /// 不 panic。写侧守卫同测：旧 schema 目录 upsert 自动降级不写 orig、
+    /// 不 panic（依据见 [`Bm25Index.ocr_orig_field`] 注）。
+    #[test]
+    fn t03_legacy_schema_six_fields_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        // 直接以旧 schema 建索引目录（6 字段、无 orig 域）
+        let mut sb = Schema::builder();
+        let id_f = sb.add_text_field("content_id", STRING | STORED);
+        let fn_f = sb.add_text_field("filename", TEXT | STORED);
+        let tags_f = sb.add_text_field("tags", TEXT | STORED);
+        let ocr_f = sb.add_text_field("ocr_text", TEXT | STORED);
+        let _tx_f = sb.add_text_field("transcript_text", TEXT | STORED);
+        let upd_f = sb.add_i64_field("updated_ns", INDEXED | STORED);
+        let legacy = sb.build();
+        let index = Index::create_in_dir(dir.path(), legacy).unwrap();
+        let mut writer = index.writer(50_000_000).unwrap();
+        // 旧二进制写入路径：ocr/tx 落盘的就是扇出串
+        for (cid, name, ocr, upd) in [
+            (
+                "lg1",
+                "legacy-zh.md",
+                cjk_fan_out("粒子物理实验发现了新的夸克。"),
+                1,
+            ),
+            (
+                "lg3",
+                "legacy-falcon.md",
+                cjk_fan_out("这份文档正文完全不含查询词面。"),
+                3,
+            ),
+        ] {
+            let mut d = TantivyDocument::default();
+            d.add_text(id_f, cid);
+            d.add_text(fn_f, name);
+            d.add_text(tags_f, "");
+            d.add_text(ocr_f, &ocr);
+            d.add_i64(upd_f, upd);
+            writer.add_document(d).unwrap();
+        }
+        writer.commit().unwrap();
+        drop(writer);
+
+        // 旧目录打开 + 检索：行为与现状一致
+        let idx = Bm25Index::open_read_only(dir.path()).unwrap();
+        idx.force_reload().unwrap();
+
+        // ②扇出串定位（orig 缺失触达）：bigram token 在扇出串上被包裹
+        let r = idx
+            .search(Bm25Query {
+                query: "夸克".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert_eq!(r.total, 1);
+        let hl = r.hits[0].highlight.as_deref().expect("legacy ② Some");
+        assert!(hl.contains("[[夸克]]"), "扇出串定位摘要：{hl}");
+
+        // ③头部截断：查询词仅在 filename（ocr 有文本无词面）→ Some、无 sentinel
+        let r = idx
+            .search(Bm25Query {
+                query: "falcon".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert_eq!(r.total, 1);
+        let hl = r.hits[0].highlight.as_deref().expect("legacy ③ Some");
+        assert!(!hl.contains("[["), "头部截断不得引入 sentinel：{hl}");
+
+        // 写侧守卫：旧 schema 目录 upsert 同源双写自动降级（不写 orig），
+        // 不 panic、不新增错误面
+        let widx = Bm25Index::open_or_create(dir.path()).unwrap();
+        widx.upsert(IndexedDoc {
+            content_id: "lg4".to_string(),
+            filename: "legacy-new.md".to_string(),
+            tags: vec![],
+            ocr_text: Some("新的夸克文档。".to_string()),
+            transcript_text: None,
+            updated_ns: 4,
+        })
+        .unwrap();
+        widx.commit().unwrap();
+        widx.force_reload().unwrap();
+        let r = widx
+            .search(Bm25Query {
+                query: "夸克".to_string(),
+                limit: 10,
+                include_transcript: true,
+            })
+            .unwrap();
+        assert_eq!(r.total, 2, "旧 schema 目录写入后检索不受影响");
+        let lg4 = r.hits.iter().find(|h| h.content_id == "lg4").unwrap();
+        let hl = lg4.highlight.as_deref().expect("lg4 highlight Some");
+        assert!(hl.contains("[[夸克]]"), "旧 schema 上新写入走 ②回落：{hl}");
+    }
+
+    /// M11-WP04-T03（SPEC §3 检索等价钉）：固定语料 × 固定查询集，命中集
+    /// （content_id + score + 序）与改造前（main 分支 bm25.rs 经临时 harness
+    /// 采集，方法随任务卡）逐项一致——orig 域不进 parser、不参与评分。
+    /// 形态：结构断言（orig 不在 parser 注册面）+ fixture 快照对照（分数
+    /// 取 f32 Display 最短往返表示，容差 1e-6）；覆盖论断见任务卡。
+    #[test]
+    fn t03_search_equivalence_with_orig_fields() {
+        // 结构钉：orig 域不在 parser 注册面（注册未 indexed 字段 tantivy
+        // 即 Err：query_parser.rs:541-543；不注册则 FieldDoesNotExist）
+        let dir = tempfile::tempdir().unwrap();
+        let idx = Bm25Index::open_or_create(dir.path()).unwrap();
+        assert!(idx.parser.parse_query("ocr_text_orig:hello").is_err());
+        assert!(idx
+            .parser
+            .parse_query("transcript_text_orig:hello")
+            .is_err());
+        assert!(idx.parser.parse_query("ocr_text:hello").is_ok());
+
+        fn doc(
+            cid: &str,
+            name: &str,
+            tags: &[&str],
+            ocr: Option<String>,
+            tx: Option<&str>,
+            upd: i64,
+        ) -> IndexedDoc {
+            IndexedDoc {
+                content_id: cid.into(),
+                filename: name.into(),
+                tags: tags.iter().map(|s| s.to_string()).collect(),
+                ocr_text: ocr,
+                transcript_text: tx.map(str::to_string),
+                updated_ns: upd,
+            }
+        }
+        let zh_filler = "粒子物理标准模型描述基本粒子及其相互作用。".repeat(12);
+        let en_filler = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(8);
+        idx.upsert_batch([
+            doc(
+                "eq3",
+                "物理笔记.md",
+                &[],
+                Some(format!("{zh_filler}实验发现了新的夸克。")),
+                None,
+                1_700_000_000_000_000_002,
+            ),
+            doc(
+                "eq4",
+                "lcsts_doc.md",
+                &["lcsts"],
+                Some("新华社受权于18日全文播发修改后的立法法全文".into()),
+                None,
+                1_700_000_000_000_000_003,
+            ),
+            doc(
+                "eq5",
+                "wildlife.md",
+                &[],
+                Some(format!("{en_filler}The quokka is a small marsupial.")),
+                Some("quokka habitat notes from the field"),
+                1_700_000_000_000_000_004,
+            ),
+            doc(
+                "eq6",
+                "budget-falcon.md",
+                &[],
+                Some("这份文档正文完全不含查询词面，用于验证回落行为。".into()),
+                None,
+                1_700_000_000_000_000_005,
+            ),
+        ])
+        .unwrap();
+        idx.commit().unwrap();
+        idx.force_reload().unwrap();
+
+        // 快照（main 分支 harness 输出逐字节转录，4 文档语料同源）
+        let expected: &[(&str, &[(f32, &str)])] = &[
+            ("夸克", &[(1.998_594, "eq3")]),
+            ("新华社受权", &[(14.989_013, "eq4"), (0.383_541_26, "eq3")]),
+            ("quokka habitat", &[(2.652_593_9, "eq5")]),
+            ("立法", &[(5.601_679, "eq4")]),
+            ("银行：房贷政策没变？", &[(1.722_074_4, "eq6")]),
+        ];
+        for (q, want) in expected {
+            let r = idx
+                .search(Bm25Query {
+                    query: (*q).to_string(),
+                    limit: 10,
+                    include_transcript: true,
+                })
+                .unwrap();
+            assert_eq!(r.total, want.len(), "query {q:?} total 不一致");
+            for (h, (score, cid)) in r.hits.iter().zip(*want) {
+                assert_eq!(h.content_id, *cid, "query {q:?} 命中集不一致");
+                assert!(
+                    (h.score - score).abs() < 1e-6,
+                    "query {q:?} score {} vs 快照 {score}",
+                    h.score
+                );
+            }
+        }
     }
 
     #[test]
