@@ -10,6 +10,7 @@
 | **创建日期** | 2026-10-11 |
 | **被测** | main@611e8f5(WP06 #241 后),release 构建,worktree 隔离(并行会话共用主树) |
 | **语料** | LCSTS 资产域 12,000 文档 + memory 域 118,076 叶 + big.db 负控 |
+| **判据精确定义** | docs/reviews/M11-WP01-ga-cadence.md §1 J1 行门槛③(0.1 补记 M12-WP02-T02:合入 commit trailer 的 Spec 字段所指 M10-WP06-release-cadence.md 为谱系母本,非判据条款所在——M11-report §5 债表行 8 清账) |
 
 ## 交付
 
