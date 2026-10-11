@@ -6,6 +6,7 @@ all-features = true
 
 [licenses]
 allow = [
+    "AGPL-3.0-only", # ADR-0034：基座许可终局转 AGPL-3.0-only（M11-WP01-T06 #231 随行——workspace 自身许可入白名单，非新依赖引入）
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception", # ADR-0024 amend（Tauri 传递链 target-lexicon → cfg-expr → system-deps； GTK 链纯 Rust 间接依赖）
     "MIT",
