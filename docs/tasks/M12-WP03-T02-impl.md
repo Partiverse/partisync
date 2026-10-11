@@ -23,9 +23,9 @@
 
 ## 验收
 
-- [ ] minisig 入仓且签后回验通过（工作流 run log 输出 SIGN-AND-VERIFY=ok 归档）；
-- [ ] install 脚本执行后四件齐，真 sidecar 面 ext_list 列出 ext_demo_echo（desktop e2e 全链 PASS 实录归档，沿 D19 修订验证面）；
-- [ ] e2e 三态行为正确（无安装 skip / 有装无签 skip-with-reason / 有装有签 PASS）；
-- [ ] 零 ANCHOR_PUBKEYS 变更、零 partisync-ext-host 代码变更、零新依赖（git diff 实证）；
-- [ ] EXT-SIGNING 窗口节回填闭合注记（PR-b）；
-- [ ] 三门禁绿。
+- [x] minisig 入仓且签后回验通过（run 38154604256 log `SIGN-AND-VERIFY=ok`，docs/reviews/M12-WP03-t02-evidence.txt [1]）；
+- [x] install 脚本执行后三件齐（wasm/json/minisig），真 sidecar 面 ext_list 列出 ext_demo_echo（desktop e2e 全链 PASS 实录，证据件 [3]；签名文件名勘误 = 替换式 `demo_ext.minisig`，[2]）；
+- [x] e2e 三态行为正确（证据件 [4]）；
+- [x] 零 ANCHOR_PUBKEYS 变更、零 partisync-ext-host 代码变更、零新依赖（PR-b diff = workflow/脚本/e2e 守卫文案 + minisig + EXT-SIGNING + 证据件/本卡，零 Cargo 面零 ext-host 面）；
+- [x] EXT-SIGNING 窗口节回填闭合注记（2026-10-11，CI 子钥 + run id）；
+- [x] 三门禁绿（fmt/clippy 全绿 + workspace test 含真装载链 e2e 绿）。
