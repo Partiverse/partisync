@@ -2811,7 +2811,7 @@ impl Store {
         artifact_path: impl AsRef<Path>,
         embedder: Option<Arc<dyn MemoryEmbedder>>,
     ) -> Result<(), PartisyError> {
-        let index = MemoryVectorIndex::open_or_create(artifact_path)?;
+        let index = MemoryVectorIndex::open_or_create(artifact_path.as_ref())?;
         if let Some(embedder) = &embedder {
             let probe = embedder
                 .embed(crate::memory_vector::EMBED_PROBE_CONTENT)
@@ -2841,6 +2841,7 @@ impl Store {
             Some(Arc::new(MemoryVectorChannel {
                 index: Arc::new(index),
                 embedder,
+                artifact: artifact_path.as_ref().to_path_buf(),
             }));
         Ok(())
     }
@@ -2866,9 +2867,16 @@ impl Store {
         }
         let pool = self.pool.clone();
         tokio::spawn(async move {
-            // 伴生任务零 panic：全部失败路径走伴表 failed 记账或静默放弃
-            //（回填器可重算，ADR-0035 决策 3）。
-            let _ = embed_companion_task(&pool, &channel, &memory_id).await;
+            // 伴生任务零 panic：任务内失败走伴表 failed 记账；任务级 Err
+            //（含墓碑竞态兜底摘除失败）亦记账 status=4 + detail——零静默
+            //（M11-WP06-T05 审查处置；回填器重试，ADR-0035 决策 3）。
+            if let Err(e) = embed_companion_task(&pool, &channel, &memory_id).await {
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as i64);
+                let detail = format!("companion task: {e}");
+                let _ = embed_status_record(&pool, &memory_id, 4, None, &detail, now_ns).await;
+            }
         });
     }
 
@@ -2900,6 +2908,30 @@ impl Store {
         embed_companion_task(&self.pool, &channel, memory_id).await
     }
 
+    /// 向量索引落盘（M11-WP06-T05 审查处置，ADR-0035 决策 3 崩溃恢复闭环
+    /// 的宿主侧）：把挂载通道的内存 usearch 实例写入挂载时登记的
+    /// artifact。宿主（partisd）在优雅关停时调用——daemon 伴生产物随
+    /// SIGTERM 落盘，重启 restore 不丢；崩溃（未走优雅关停）丢失窗口由
+    /// 回填器 done 行 contains 对账重嵌补齐（examples
+    /// backfill_memory_vectors reconcile 口径）。通道缺位 = Ok(false) no-op。
+    ///
+    /// # Errors
+    /// usearch save / IO 错误 → Fatal。
+    pub async fn save_memory_vector_artifact(&self) -> Result<bool, PartisyError> {
+        let Some(channel) = self.vector_channel_ref() else {
+            return Ok(false);
+        };
+        let path = channel.artifact.clone();
+        // save 是同步阻塞 IO（usearch FFI）——spawn_blocking 防阻塞 runtime
+        tokio::task::spawn_blocking(move || channel.index.save(&path))
+            .await
+            .map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("save_memory_vector_artifact join: {e}").into()),
+            })??;
+        Ok(true)
+    }
+
     /// memory_search hybrid 查询腿（SPEC M11-WP06 §2.5，T04；mode 参数在
     /// gateway 层透出）：BM25 Top-N（既有 [`Store::memory_search`] 全路径，
     /// FTS5+LIKE 行为零变更）+ 向量近邻 Top-N → RRF 融合（k=60，
@@ -2921,6 +2953,7 @@ impl Store {
         query: &str,
         tag: Option<&str>,
         limit: u32,
+        offset: u32,
     ) -> Result<MemoryHybridReport, PartisyError> {
         // BM25 腿：既有通道全路径（FTS5 trigram + LIKE 兜底 + tag 过滤）
         let bm25 = self.memory_search(Some(query), tag, None, limit, 0).await?;
@@ -3013,8 +3046,11 @@ impl Store {
         for hit in candidates_by_key.into_values() {
             merged.entry(hit.memory_id.clone()).or_insert(hit);
         }
+        // offset 透传（M11-WP06-T05 审查处置：融合榜第 offset 名起取
+        // Top-N；total 口径 = 融合命中数截断前，不随 offset 折减）
         let results = fused
             .iter()
+            .skip(offset as usize)
             .take(limit as usize)
             .filter_map(|(id, score)| {
                 merged.remove(id).map(|mut hit| {
@@ -3086,9 +3122,11 @@ impl Store {
         let cutoff =
             partisync_core::Hlc::from_wall(0, now_ms.saturating_sub(retention_ms)).to_key();
         // 生命周期腿（M11-WP06-T04，P25-c 全链）：先取物理删目标 id（同一
-        // 判据），删除后逐 id 同步摘除向量——覆盖「通道摘除期挂载/重放」
-        // 场景（remove 幂等；通道缺位 no-op）。伴表行随 DELETE 级联清
-        //（v19 FK CASCADE）。
+        // 判据），**先逐 id 摘除向量、后 DELETE**（M11-WP06-T05 审查处置：
+        // 先删后摘时中途 usearch 错误会让已物理删行的向量永久残留
+        // artifact——重试 GC 不再选中这些 id，泄漏只增不减；先摘后删则
+        // 摘除失败即整体失败，墓碑行仍在、重试可续，remove 幂等）。通道
+        // 缺位 no-op；伴表行随 DELETE 级联清（v19 FK CASCADE）。
         let purged_ids: Vec<String> = sqlx::query_scalar(
             "SELECT memory_id FROM memory WHERE deleted != 0 AND hlc IS NOT NULL AND hlc < ?",
         )
@@ -3096,6 +3134,9 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| db_err("memory gc 目标选取", e))?;
+        for id in &purged_ids {
+            self.vector_lifecycle_remove(id).await?;
+        }
         let result =
             sqlx::query("DELETE FROM memory WHERE deleted != 0 AND hlc IS NOT NULL AND hlc < ?")
                 .bind(&cutoff)
@@ -3103,9 +3144,6 @@ impl Store {
                 .await
                 .map_err(|e| db_err("memory gc", e))?;
         let purged = result.rows_affected();
-        for id in &purged_ids {
-            self.vector_lifecycle_remove(id).await?;
-        }
         let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM memory WHERE deleted != 0")
             .fetch_one(&self.pool)
             .await

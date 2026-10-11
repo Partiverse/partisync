@@ -188,10 +188,11 @@ async fn main() {
     // 嵌入伴生宿主位（M11-WP06-T05，SPEC §2.1 + ADR-0035 决策 3 + §6-8）：
     // 挂载即激活三腿（写入腿 memory_write 事务外 spawn = 宿主内内存队列；
     // 查询腿 memory_search mode=hybrid；生命周期腿 tombstone/GC 同步摘除）。
-    // 生命周期语义：队列无持久化，崩溃/终止丢队列不做增量恢复——重启后
-    // 批量回填器（graph examples backfill_memory_vectors）按伴表嵌入状态
-    // 全量重算补齐，派生数据无一致性债；SIGTERM 优雅退出时未完成伴生任务
-    // 随 runtime 终止（零承诺面影响，P20 语义零变更）。
+    // 生命周期语义：队列无持久化；SIGTERM 优雅关停时向量索引落盘（下方
+    // clean exit 路径）——daemon 伴生产物重启不丢；崩溃窗口残留由回填器
+    // （graph examples backfill_memory_vectors）按伴表状态 + artifact
+    // mtime 对账重嵌补齐（memory_vector_reconcile_candidates + contains
+    // 复核），派生数据无一致性债（ADR-0035 决策 3，P20 语义零变更）。
     // init fail-fast（SPEC §2.2）：模型加载/首嵌维度失败 → 拒绝启动（宿主
     // 显式降级 = 去掉 --memory-embed 重启，查询腿 BM25 + 降级标记保可用）。
     #[cfg(feature = "memory-embed")]
@@ -291,6 +292,19 @@ async fn main() {
         eprintln!("partisd: {e}");
         let _ = std::fs::remove_file(&pid_path);
         std::process::exit(1);
+    }
+    // 向量索引落盘（M11-WP06-T05 审查处置，ADR-0035 决策 3 崩溃恢复闭环
+    // 宿主侧）：优雅关停时把 daemon 伴生产物写回 artifact——重启 restore
+    // 不丢。save 失败不阻断关停（stderr 告警；崩溃/失败窗口由回填器
+    // 对账重嵌补齐——examples backfill_memory_vectors reconcile 口径）。
+    #[cfg(feature = "memory-embed")]
+    if memory_embed {
+        match state.save_memory_vector_artifact().await {
+            Ok(()) => eprintln!("partisd: memory vector artifact saved"),
+            Err(e) => {
+                eprintln!("partisd: memory vector artifact save 失败（回填器对账重嵌兜底）: {e}")
+            }
+        }
     }
     let _ = std::fs::remove_file(&pid_path);
     eprintln!("partisd: clean exit");

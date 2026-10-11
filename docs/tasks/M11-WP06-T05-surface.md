@@ -86,3 +86,38 @@ Cargo.lock（optional 边登记自动行）· docs/tasks/M11-WP06-T05-surface.md
   store 面接口与 partisd 装配），判例 #231/#237/#238；请评审显式处置。
 - 分支基线：m11/wp06-t04-store-wiring @e5544e5（T04 已合入 main squash
   303842d），叠加分支存活判例。
+
+## 审查处置（2026-10-11 对抗审查，逐条；fix PR 落码）
+
+- [x] **【阻断·生命周期】向量落盘恢复闭环**——落锤 = 审查建议 (a)+(b) 组合：
+  ①daemon 关停 save——`MemoryVectorChannel` 登记挂载 artifact 路径 +
+  `Store::save_memory_vector_artifact`（spawn_blocking 包同步 FFI IO）+
+  gateway `save_memory_vector_artifact` 包装 + partisd clean-exit 路径
+  调用（SIGTERM 优雅关停即落盘，save 失败 stderr 告警不阻断关停）；
+  ②回填器对账重嵌——done 行逐 id `index.contains` 全量对账（缺失即
+  重嵌；contains 实测 10⁵ 条目 ~0.2µs/次，临时基准 2026-10-11，与
+  index crate vector.rs:170-173 判例的 30ms remove 口径区分），覆盖
+  daemon 崩溃/save 失败窗口；`--no-reconcile` 显式跳过（登记用）。
+  无模型探针 2 件锁定原语面：save 往返持久化（restore 在盘）+ 未落盘
+  向量 contains 检出（回填器触发依据）。审查三条备选中未选 (c)（ADR
+  登记不消除丢失，且 ADR-0035 决策 3 原承诺经 (a)+(b) 兑现，无需修订）。
+- [x] **【次要·契约】hybrid offset 静默忽略**——透传落锤：`memory_search_hybrid`
+  增 `offset: u32` 参（融合榜 skip(offset).take(limit)，total 口径 =
+  融合命中数截断前不折减）；mcp.rs hybrid 分支传 `input.offset`；既有
+  探针调用点全量更新（offset=0 语义不变）。T04 卡诚实边界同步改写。
+- [x] **【次要·GC 泄漏】**——摘除序落锤：memory_gc 改为**先逐 id
+  vector_lifecycle_remove、后 DELETE**——摘除失败即整体失败（墓碑行
+  仍在、重试可续，remove 幂等），消灭「已物理删行向量永久残留 artifact」
+  的窗口；残留后果（召回安全/artifact 膨胀）随代码注释登记。
+- [x] **【次要·静默面】**——伴生任务级失败记账：spawn wrapper 对
+  `embed_companion_task` 的 Err（含墓碑竞态兜底摘除失败）落伴表
+  status=4 + detail（`companion task: {e}`）——零静默；失败行由回填器
+  重试。
+- [x] **【小疵】**——wp06_surface.rs 复制粘贴重复断言删除；backfiller
+  Outcome 三态（Embedded/Failed/Skipped）——行缺失/墓碑计 Skipped 不再
+  计入 failed，embed/upsert 失败才计 Failed（伴表 status=4）。
+- [x] **contains 代价实证登记**：临时基准（zz_bench_contains，未入库）
+  10⁵ 条目 upsert 85.7s、contains 0.2µs/次（1000 次命中/1000 次未命中
+  均 <1ms）——index crate vector.rs:170-173 判例「contains 随规模超线性
+  30ms@10⁴」的 contains 部分与本次实测不符（该口径为 remove）；全量
+  contains 对账 @118k done 行 ≈ 24ms，回填预算内。

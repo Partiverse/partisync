@@ -70,6 +70,9 @@ pub trait MemoryEmbedder: Send + Sync {
 pub struct MemoryVectorChannel {
     pub index: std::sync::Arc<MemoryVectorIndex>,
     pub embedder: Option<std::sync::Arc<dyn MemoryEmbedder>>,
+    /// artifact 路径（挂载时登记；宿主经 `Store::save_memory_vector_artifact`
+    /// 关停落盘——M11-WP06-T05 审查处置，ADR-0035 决策 3 崩溃恢复闭环）。
+    pub artifact: std::path::PathBuf,
 }
 
 // 通道随 Store 进异步上下文（sqlx 并发面），Send+Sync 是硬前提：
