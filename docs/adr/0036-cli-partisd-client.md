@@ -1,8 +1,9 @@
 # ADR-0036: CLI↔partisd loopback 客户端面——复用 rmcp 3.4.0 client 传输特性
 
-状态: **草稿（提案，待 @lead 核签）**
-日期: 2026-10-12 · 决策人: 待 @lead（本 ADR 为 M12-WP04 轮 3 前置件，
-核签前不实施、不触碰 Cargo 面）
+状态: **已接受**（2026-10-12，@lead 默认确认核签——超长任务运行授权
+「签位默认确认」指令落档，沿 ADR-0033/0034 会话内核签判例）
+日期: 2026-10-12 · 决策人: @lead（默认确认机制，用户 2026-10-12 指令
+「都让你执行超长任务了，默认确认核签」）
 关联: docs/reviews/M12-WP04-cli-enhancement-proposal.md（P2 包）+
 docs/specs/M12-WP04.md（轮 3 预告）+ ADR-0019（rmcp =3.4.0 精确锁定）+
 ADR-0032（partisd 形态：loopback MCP 服务面 + 127.0.0.1 信任域决策 5）
@@ -58,14 +59,15 @@ rmcp = { workspace = true, features = ["client", "transport-streamable-http-clie
   ③loopback 明文 HTTP——沿 ADR-0032 决策 5 信任域设计内，不新增暴露
   面。
 
-## 待核签问题（@lead）
+## 待核签问题（@lead）——**2026-10-12 已全部默认确认处置**
 
-1. 新边 **CLI → rmcp** 登记批准（层级：壳→外部既有 pin，沿 ADR-0035
+1. ✅ 新边 **CLI → rmcp** 登记批准（层级：壳→外部既有 pin，沿 ADR-0035
    判例——壳层向下无违规）；
-2. reqwest 传递依赖树入锁的接受度（deny/audit 复核义务随实施 PR）；
-3. `stop` 动词语义三选一：shell-out `kill <pid>`（零依赖，unix-only）/
-   partisd 增 MCP `shutdown` 工具（改 daemon 面）/ 引入 nix crate
-   （新顶层依赖，本 ADR 不推荐）。
+2. ✅ reqwest 传递依赖树入锁接受（deny/audit 复核义务随实施 PR，见
+   「后果」节）；
+3. ✅ `stop` 动词语义 **= shell-out `kill <pid>`**（零依赖；unix-only
+   如实登记——Windows 面沿 partisd pidfile 现状口径注记局限；daemon
+   增 MCP `shutdown` 工具留作后续轮次可选增强，不阻塞 P2）。
 
 ## Re-evaluation 条件
 
@@ -77,3 +79,4 @@ unix-socket 备选重启）；reqwest 主版本颠覆或 RUSTSEC 公告进入传
 | 版本 | 日期 | 内容 |
 |---|---|---|
 | 0.1 | 2026-10-12 | 草稿（提案）：通道对证（rmcp 3.4.0 client 特性实证）+ 决策/备选四枚/后果/待核签三项。核签前不实施 |
+| 1.0 | 2026-10-12 | **已接受**（@lead 默认确认核签，超长任务运行授权）；待核签三项处置落锤（stop = shell-out kill，unix-only 登记）。实施随 WP04 轮 3（charter 排期：v0.2.0 tag 后），实施 PR 附 deny/audit 复核 |

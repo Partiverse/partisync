@@ -24,3 +24,7 @@ docs/adr/0036-cli-partisd-client.md（新）· docs/tasks/M12-WP04-T06-p2-transp
 - [x] 备选 ≥3 枚各附否决理由（铁律 8「无聊依赖」记录质量在备选）；
 - [x] 编号 T06 续 SPEC 任务表（T02–T05），无撞号；
 - [x] docs-only；纯两文件新增；提交挂 Task-ID `M12-WP04-T06`。
+
+> **0.1 补记（2026-10-12）**：用户超长任务运行授权「签位默认确认」→
+> ADR-0036 落**已接受**（v1.0，@lead 默认确认核签）；三项处置落锤
+> （stop = shell-out `kill`，unix-only 登记）。核签 PR 与本补记同车。
