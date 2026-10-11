@@ -13,7 +13,7 @@ cargo run -p partisync-cli -- --help   # index / ui / watch / ls / find / dedupe
 
 ## 许可证
 
-Apache-2.0（[LICENSE](LICENSE)）。此为终局决策、非临时标签——复议过程与商业扩展区边界见 [ADR-0033](docs/adr/0033-license-finality-and-commercial-tiers.md)。
+**AGPL-3.0-only**（[LICENSE](LICENSE)）：核心基座（全部 crate）下游分发或网络服务使用均须遵守 AGPL-3.0 强制开源义务（含 §13 网络条款）。v0.2.0-rc.1 及更早发布物仍按 Apache-2.0。决策链见 [ADR-0034](docs/adr/0034-copyleft-core-agpl.md)（取代 ADR-0033 的 Apache-2.0 终局条款）；ADR-0033 的商业扩展区边界与贡献策略仍有效。
 
 ## 状态与发布
 

@@ -22,7 +22,7 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "AGPL-3.0-only" # ADR-0034（取代 ADR-0033 的 Apache-2.0 终局；v0.2.0-rc.1 及更早发布物仍 Apache-2.0）
 repository = "https://github.com/Partiverse/partisync" # ADR-0033 门面收口（远端见 M0-report D1）
 
 [workspace.dependencies]
