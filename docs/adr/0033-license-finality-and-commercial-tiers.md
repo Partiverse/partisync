@@ -3,6 +3,8 @@
 状态: 已接受 · 日期: 2026-10-10 · 决策人: @lead（AI 代理起草，@lead 2026-10-10 会话内核签确认）
 关联: ADR-0000（决策 5 复议）· docs/specs/M7-WP03.md（企业议题登记）· docs/reviews/M8-roadmap-proposal.md §3-4 · docs/reviews/M8-evolution-research-2026-10.md · docs/reviews/M11-roadmap-proposal.md §1.5（D19）· docs/specs/M10-WP06.md（发布节奏，本件挂 M11-WP01-T04 执行）
 
+> 修订（2026-10-11）：决策 1（Apache-2.0 转正终局）与备选方案中的 AGPL/FSL 否决段由 [ADR-0034](0034-copyleft-core-agpl.md) 取代——基座转 AGPL-3.0-only（下游强制开源）；本件其余条款（商业扩展区边界、贡献策略、三阶段商业路线、「临时许可」义务终结）继续有效。
+
 ## 背景
 
 ADR-0000 决策 5 将全仓许可证定为 Apache-2.0 并**显式标记「临时」**：复议条件为「治理结构（基金会/公司/社区）确定」；其后果条款要求「许可证复议前，所有对外发布的产物须附带『临时许可』说明」。三项实况使复议条件实质已满足、继续推迟的成本开始大于收益：
