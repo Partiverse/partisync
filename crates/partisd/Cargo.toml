@@ -7,9 +7,18 @@ description = "PartiSync 底座常驻守护进程（loopback MCP 服务面；ADR
 
 [dependencies]
 partisync-gateway = { path = "../partisync-gateway", version = "0.2.0" }
+partisync-graph = { path = "../partisync-graph", version = "0.2.0", optional = true }
 rmcp = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+
+[features]
+default = []
+# M11-WP06-T05（SPEC §2.1/§2.3 + ADR-0035 决策 3）：嵌入伴生宿主位——
+# 启动时挂载记忆域向量通道（graph-embed 门控的 fastembed BGESmallZHV15
+# 嵌入器）；模型下载/推理不入 CI，真模型 e2e 留 T06 实测（本 feature
+# 默认关）
+memory-embed = ["dep:partisync-graph", "partisync-graph/graph-embed"]
 
 [dev-dependencies]
 tempfile = "3"

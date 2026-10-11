@@ -385,3 +385,97 @@ mod tests {
         assert_eq!(memory_vector_key("m1"), expect);
     }
 }
+
+/// fastembed BGESmallZHV15 真嵌入器（SPEC M11-WP06 §2.1/§2.2；ADR-0035
+/// 决策 1——`graph-embed` feature 门控默认关，沿 ai-embed/index-embed
+/// 判例 partisync-index Cargo.toml:11-12；模型下载/推理不入 CI，评估件
+/// M11-WP05-t05 §7）。fastembed 7.0.1 pinned 源码核实（cargo registry
+/// `fastembed-7.0.1/src/`）：`TextEmbedding::try_new(TextInitOptions)`
+/// （text_embedding/impl.rs:32，hf-hub feature = fastembed default
+/// `hf-hub-native-tls` 在位）/`TextInitOptions::new(model)
+/// .with_cache_dir(dir)`（init.rs:71-92）/`embed(&mut self, texts,
+/// batch_size) -> Vec<Embedding>`（impl.rs:379，Embedding = Vec<f32>，
+/// common.rs:32）——非凭记忆。
+#[cfg(feature = "graph-embed")]
+pub mod embed {
+    use super::{MemoryEmbedder, PartisyError, Severity, MEMORY_VECTOR_DIM};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// BGESmallZHV15 嵌入器（内部持 `Mutex<TextEmbedding>`——fastembed
+    /// embed 为 `&mut self`，串行化并发嵌入；维度契约 512 由
+    /// `Store::attach_vector_channel` init fail-fast 首嵌校验兜底）。
+    pub struct FastembedMemoryEmbedder {
+        model: Mutex<fastembed::TextEmbedding>,
+        #[allow(dead_code)] // 保留缓存路径供诊断输出
+        cache_dir: PathBuf,
+    }
+
+    impl FastembedMemoryEmbedder {
+        /// 加载 BGESmallZHV15（逻辑名 [`EMBED_MODEL_LOGICAL`]）。`cache_dir
+        /// = None` 时沿 fastembed 默认（`FASTEMBED_CACHE_DIR` 环境变量，
+        /// 否则 `.fastembed_cache`——common.rs:19-23 同口径，不引入对
+        /// fastembed 内部 API 的额外依赖面）。模型缓存缺失时经 HF 下载
+        /// （`HF_ENDPOINT=https://hf-mirror.com` 直连/代理，SPEC §6-3
+        /// 下载腿协议风险登记）；哈希钉版校验见 partisync-ai
+        /// `BGE_SMALL_ZH_V15_FILES`。
+        ///
+        /// # Errors
+        /// 模型加载/下载失败 → Fatal（init fail-fast 语义，宿主应拒绝启动）。
+        pub fn new(cache_dir: Option<&Path>) -> Result<Self, PartisyError> {
+            let cache_dir = match cache_dir {
+                Some(dir) => dir.to_path_buf(),
+                None => std::env::var_os("FASTEMBED_CACHE_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(".fastembed_cache")),
+            };
+            let model = fastembed::TextEmbedding::try_new(
+                fastembed::TextInitOptions::new(fastembed::EmbeddingModel::BGESmallZHV15)
+                    .with_cache_dir(cache_dir.clone())
+                    .with_show_download_progress(true),
+            )
+            .map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("fastembed BGESmallZHV15 加载失败: {e}").into()),
+            })?;
+            Ok(Self {
+                model: Mutex::new(model),
+                cache_dir,
+            })
+        }
+    }
+
+    /// 清单逻辑名（partisync-ai models.rs `EMBED_MODEL_TEXT_ZH` 同值；
+    /// 字符串常量直写避免 graph → ai 依赖边——领域层不依赖能力层）。
+    pub const EMBED_MODEL_LOGICAL: &str = "embed-text-zh";
+
+    impl MemoryEmbedder for FastembedMemoryEmbedder {
+        fn embed(&self, content: &str) -> Result<Vec<f32>, PartisyError> {
+            let mut model = self.model.lock().map_err(|_| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("fastembed embedder lock poison".into()),
+            })?;
+            let vectors = model.embed([content], None).map_err(|e| PartisyError {
+                severity: Severity::Fatal,
+                source: Some(format!("fastembed embed 失败: {e}").into()),
+            })?;
+            let vector = vectors.into_iter().next().ok_or_else(|| PartisyError {
+                severity: Severity::Fatal,
+                source: Some("fastembed embed 返回空向量集".into()),
+            })?;
+            if vector.len() != MEMORY_VECTOR_DIM {
+                return Err(PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(
+                        format!(
+                            "fastembed 输出维度 {} ≠ {MEMORY_VECTOR_DIM}（模型漂移防线，SPEC §2.2）",
+                            vector.len()
+                        )
+                        .into(),
+                    ),
+                });
+            }
+            Ok(vector)
+        }
+    }
+}
