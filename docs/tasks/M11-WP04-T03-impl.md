@@ -19,9 +19,11 @@ crates/partisync-index/src/search/bm25.rs（唯一产品代码面，hybrid.rs �
 
 ## 验收
 
-- [ ] 三门禁绿（cargo fmt --all --check / cargo clippy --workspace --all-targets -- -D warnings / cargo test --workspace）
-- [ ] t02 中文摘要改写（可读原文、bigram [[..]] 包裹、无「字 间空格」碎片流；仅此项按 SPEC §3 改写，其余用例零断言放宽）
-- [ ] 旧 schema fixture 回落链测试（②③与现状一致、全链不 panic）
-- [ ] 检索等价测试（结构钉+快照钉，形态与覆盖论断见交付段）
-- [ ] 零新依赖、零 unsafe、IndexedDoc/Bm25Index/IndexEngine 公共签名不变
-- [ ] T04 实测报告（存储域 ≤+35% / reindex <5% / CLI 高亮对照）为独立任务 M11-WP04-T04，不在本卡
+- [x] 三门禁绿（cargo fmt --all --check / cargo clippy --workspace --all-targets -- -D warnings / cargo test --workspace）——PR #229 CI 全绿（合入 2026-10-11T03:36Z）；本地复跑 2026-10-11 fmt/clippy 绿 + workspace test 绿（期间唯一红灯 `partisync-desktop::mcp_call_real_sidecar_ext_list` 为本机环境态：无签名 demo 扩展触发 [P21] verify-mandatory 拒载，恢复设计跳过态后 25/25 绿，根因与处置详见审查报告 §1，与 T03 diff 零代码交集）
+- [x] t02 中文摘要改写（可读原文、bigram [[..]] 包裹、无「字 间空格」碎片流；仅此项按 SPEC §3 改写，其余用例零断言放宽）——审查核实改写为 SPEC §3 唯一授权项且断言实质收紧（`[[夸克]]` → `发现了新的[[夸克]]` + 碎片流负断言）
+- [x] 旧 schema fixture 回落链测试（②③与现状一致、全链不 panic）——`t03_legacy_schema_six_fields_fallback`（读侧②③ + 写侧降级不 panic + 检索不受影响）；跨字段优先级维度缺口见审查报告 §5-建议 1（已回执登记，见 PR 正文）
+- [x] 检索等价测试（结构钉+快照钉，形态与覆盖论断见交付段）——`t03_search_equivalence_with_orig_fields`：parser 注册面负向结构钉（tantivy query_parser.rs:541-543 源码核实）+ 4 文档×5 查询快照钉逐项 assert（容差 1e-6）；provenance 缺口回执见 PR 正文
+- [x] 零新依赖、零 unsafe、IndexedDoc/Bm25Index/IndexEngine 公共签名不变——Cargo.toml/lock/deny.toml/rust-toolchain.toml 零 diff；diff 零 unsafe；公共面仅私有字段增量
+- [x] T04 实测报告（存储域 ≤+35% / reindex <5% / CLI 高亮对照）为独立任务 M11-WP04-T04，不在本卡——T04 已独立收官（#232–#234，SPEC v0.2 预算裁决）
+
+> 勾闭依据：AI 对抗审查 R1 全审报告 docs/reviews/M11-WP04-t03-review.md（2026-10-11，阻断 0 / 建议 3 / 风格 3，结论「可勾闭」；建议条回执随勾闭 PR 正文），合入即人工终审面。
