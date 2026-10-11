@@ -192,11 +192,22 @@ async fn mcp_call_on_stub_sidecar_returns_result() {
 async fn mcp_call_real_sidecar_ext_list() {
     let exe = std::env::current_exe().expect("current_exe");
     let bin = exe.parent().unwrap().join("../partisync-mcp");
-    let ext_json = dirs::home_dir()
-        .unwrap()
-        .join(".partisync/extensions/demo_ext.json");
+    let ext_dir = dirs::home_dir().unwrap().join(".partisync/extensions");
+    let ext_json = ext_dir.join("demo_ext.json");
+    let ext_sig = ext_dir.join("demo_ext.wasm.minisig");
     if !bin.exists() || !ext_json.exists() {
         eprintln!("skip: sidecar binary or demo extension missing");
+        return;
+    }
+    if !ext_sig.exists() {
+        // SPEC M12-WP03 §2.3：装了无签 demo 时 [P21] 强制验签必拒载
+        // （registry.rs Unsigned → dir:null）——预期环境态非回归，
+        // skip-with-reason，不让断言假红。
+        eprintln!(
+            "skip: demo extension installed but unsigned (missing .minisig; \
+[P21] verify-mandatory 拒载属预期，闭合动作见 docs/release/EXT-SIGNING.md \
+「示例扩展签名窗口」节)"
+        );
         return;
     }
 

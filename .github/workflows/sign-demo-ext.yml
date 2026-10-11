@@ -1,0 +1,70 @@
+# 示例扩展签名工作流（SPEC docs/specs/M12-WP03.md §2.1/§2.4，M12-WP03-T02）。
+# CI 子钥（RELEASE_SIGNING_CI_KEY，已锚定 ANCHOR_PUBKEYS[1]，
+# crates/partisync-ext-host/src/signature.rs:17-24 任一通过即有效）对
+# examples/extensions/demo_ext.wasm 签名；.minisig 经人工下载后以正常
+# PR 入仓（铁律 2 追溯，不用 GITHUB_TOKEN 自动提交）。私钥仅 GitHub
+# secret 注入、人不经手（ADR-0027 判例，沿 release.yml:178-199 同款）。
+name: sign-demo-ext
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install minisign
+        if: env.RELEASE_SIGNING_CI_KEY != ''
+        env:
+          RELEASE_SIGNING_CI_KEY: ${{ secrets.RELEASE_SIGNING_CI_KEY }}
+        run: |
+          curl -sL https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz | tar xz
+          sudo install minisign-linux/x86_64/minisign /usr/local/bin/minisign
+          minisign -v
+      - name: drift-check (SPEC §2.4：已入仓 minisig 对当前 wasm 的防漂移校验)
+        if: env.RELEASE_SIGNING_CI_KEY != ''
+        env:
+          RELEASE_SIGNING_CI_KEY: ${{ secrets.RELEASE_SIGNING_CI_KEY }}
+        run: |
+          if [ -f examples/extensions/demo_ext.wasm.minisig ]; then
+            printf '%s\n' "$RELEASE_SIGNING_CI_KEY" > /tmp/ci.key
+            trap 'rm -f /tmp/ci.key' EXIT
+            printf 'PartiSync CI subkey\n%s\n' "RWQ07/MrtstW4BJcQJxvDyj415FpHOt9qD6/5PDzjkQKQF/HDvxgaX4j" > /tmp/ci.pub
+            minisign -V -x examples/extensions/demo_ext.wasm.minisig -p /tmp/ci.pub \
+              -m examples/extensions/demo_ext.wasm
+            echo "DRIFT-CHECK=ok"
+          else
+            echo "DRIFT-CHECK=absent（仓内 minisig 未产出，进入签名步）"
+          fi
+      - name: sign (CI subkey)
+        if: env.RELEASE_SIGNING_CI_KEY != ''
+        env:
+          RELEASE_SIGNING_CI_KEY: ${{ secrets.RELEASE_SIGNING_CI_KEY }}
+        run: |
+          printf '%s\n' "$RELEASE_SIGNING_CI_KEY" > /tmp/ci.key
+          trap 'rm -f /tmp/ci.key' EXIT
+          minisign -Sm examples/extensions/demo_ext.wasm -s /tmp/ci.key \
+            -t "PartiSync demo extension (CI subkey; $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          printf 'PartiSync CI subkey\n%s\n' "RWQ07/MrtstW4BJcQJxvDyj415FpHOt9qD6/5PDzjkQKQF/HDvxgaX4j" > /tmp/ci.pub
+          # 签后即时回验（SPEC §3 验收 1 的命令输出证据，随 run log 归档）
+          minisign -V -x examples/extensions/demo_ext.wasm.minisig -p /tmp/ci.pub \
+            -m examples/extensions/demo_ext.wasm
+          echo "SIGN-AND-VERIFY=ok"
+      - name: upload minisig artifact
+        if: env.RELEASE_SIGNING_CI_KEY != ''
+        env:
+          RELEASE_SIGNING_CI_KEY: ${{ secrets.RELEASE_SIGNING_CI_KEY }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-ext-minisig
+          path: examples/extensions/demo_ext.wasm.minisig
+          if-no-files-found: error
+      - name: secret 未配置显式失败（不假绿）
+        if: env.RELEASE_SIGNING_CI_KEY == ''
+        run: |
+          echo "RELEASE_SIGNING_CI_KEY secret 未配置——签名腿无法执行（沿 release.yml 显式标注口径，此处为必需产物故 fail）"
+          exit 1
