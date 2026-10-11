@@ -26,13 +26,21 @@ R2 评审面。诚实边界:T2 降格、LCSTS 语料真实口径、冒烟单机�
 ## 涉及文件清单(Iron Rule 9)
 
 docs/reviews/M11-WP05-t05-vector-reinitiation-eval.md(新)·
-docs/tasks/M11-WP05-T05-vector-reeval.md(本卡)
+docs/tasks/M11-WP05-T05-vector-reeval.md(本卡)·
+docs/specs/M11-WP06.md(0.1 补记:实施立项 SPEC 草稿随 #235 同车新建,
+为本评估「前置条件=新立实施 SPEC」载体的直接产出——卡面此前漏登)
 
 ## 验收
 
-- [ ] T1–T4 逐项复核全部有证据锚点(仓内 path:line 或本件全文引录的实测实录)
-- [ ] 判定与 t03「暂缓」对照升级理由明确(T1 硬条件已由 M11-WP05-T04 实测 + 用户裁决清偿),无伪造触发
-- [ ] T3 冒烟为本会话实际运行实录(dim=512;命令、输出、blake3 哈希全文引录于评估件)
-- [ ] MANIFEST 候填哈希齐备(model.onnx/tokenizer.json/config.json/tokenizer_config.json/special_tokens_map.json 五文件 blake3)
-- [ ] 诚实边界登记:T2 自建语料降格、LCSTS≠生产流量、冒烟单机非 CI、l2norm 未测、纸面预估逐项标注
-- [ ] docs-only;零代码 diff;零新依赖;零既有文件修改
+- [x] T1–T4 逐项复核全部有证据锚点(仓内 path:line 或本件全文引录的实测实录)——评估件 §1–§4:T1 锚 #226/#227/#228 + 用户裁决登记(#228),T2 沿 t03 降格口径,T4 窗口对齐 WP06 排期
+- [x] 判定与 t03「暂缓」对照升级理由明确(T1 硬条件已由 M11-WP05-T04 实测 + 用户裁决清偿),无伪造触发——评估件对照节;后验:WP06 据此立项并全部落地(T02–T06,#236–#241,ADR-0035)
+- [x] T3 冒烟为本会话实际运行实录(dim=512;命令、输出、blake3 哈希全文引录于评估件)——评估件 §2(dim=512 十句全 512;延迟真中位 3.52ms,harness 上中位 3.6ms 修正登记 §2 注/§7)
+- [x] MANIFEST 候填哈希齐备(model.onnx/tokenizer.json/config.json/tokenizer_config.json/special_tokens_map.json 五文件 blake3)——评估件 §3 五文件哈希全套
+- [x] 诚实边界登记:T2 自建语料降格、LCSTS≠生产流量、冒烟单机非 CI、l2norm 未测、纸面预估逐项标注——评估件诚实边界节
+- [x] docs-only;零代码 diff;零新依赖;零既有文件修改——PR #235 三文件全为新建 .md,Cargo 面/代码面零 diff
+
+> 勾闭依据(0.1,2026-10-11):M11 里程碑 §7 抽查审计指「验收未勾闭 + WP06
+> 立项未回写本卡」,本卡随勾闭一并回写:WP06 已立项落地(SPEC M11-WP06
+> 批准,T02–T06 合入 #236–#241,ADR-0035,P25 登记),评估件前置条件
+> (512d 契约/key 域/降级语义/blake3 钉版/新 ADR/R2 评审面)全部满足。
+> 合入即人工终审面。
