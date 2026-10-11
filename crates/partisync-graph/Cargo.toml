@@ -20,9 +20,23 @@ serde = { workspace = true }
 # 依赖图新边登记，usearch 为 workspace 既有顶层 pin Cargo.toml:53，非新
 # 顶层依赖，deny.toml 零变更；此前仅 partisync-index 引用）
 usearch = { workspace = true }
+# M11-WP06-T05：fastembed 依赖边（graph-embed feature 门控，沿
+# ai-embed/index-embed 判例 partisync-index Cargo.toml:11-12 默认关；
+# fastembed 为 workspace 既有 pin Cargo.toml:58 =7.0.1，非新顶层依赖）
+fastembed = { workspace = true, optional = true }
+
+[features]
+default = []
+# M11-WP06-T05（SPEC §2.1/§2.3）：fastembed BGESmallZHV15 真嵌入器 +
+# 批量回填器 example（dev-target）——模型下载/推理不入 CI（评估件 §7）
+graph-embed = ["dep:fastembed"]
 
 [dev-dependencies]
 proptest = { workspace = true }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "backfill_memory_vectors"
+required-features = ["graph-embed"]

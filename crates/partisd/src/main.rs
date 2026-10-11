@@ -9,6 +9,8 @@
 //! ```text
 //! partisd [--db <graph.db>] [--index-root <dir>] [--cas <dir>(预留)]
 //!         [--listen <ip:port>] [--pid-file <path>]
+//!         [--memory-embed [--memory-vec-artifact <path>] [--model-cache <dir>]]
+//!         (memory-embed 需构建 feature `memory-embed`，M11-WP06-T05)
 //! ```
 //!
 //! - 默认 `--listen 127.0.0.1:7650`；**红线：仅环回**（ADR-0032 决策 5，
@@ -43,7 +45,9 @@ fn print_usage() {
     eprintln!(
         "用法: partisd [--db <graph.db>] [--index-root <目录>] [--cas <目录>(预留)]\n\
          \x20 [--listen <ip:port>] [--pid-file <path>]\n\
-         缺省: listen 127.0.0.1:7650（红线:仅环回，ADR-0032 决策 5）; pid-file partisd.pid"
+         \x20 [--memory-embed [--memory-vec-artifact <path>] [--model-cache <dir>]]\n\
+         缺省: listen 127.0.0.1:7650（红线:仅环回，ADR-0032 决策 5）; pid-file partisd.pid;\n\
+         memory-embed artifact = <db 同目录>/memory_vec.usearch; model-cache = FASTEMBED_CACHE_DIR"
     );
 }
 
@@ -100,6 +104,10 @@ async fn main() {
     let mut cas: Option<PathBuf> = None;
     let mut listen: Option<String> = None;
     let mut pid_file: Option<PathBuf> = None;
+    // M11-WP06-T05（SPEC §2.1 + ADR-0035 决策 3）：记忆域向量通道宿主位
+    let mut memory_embed = false;
+    let mut memory_vec_artifact: Option<PathBuf> = None;
+    let mut model_cache: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -108,6 +116,14 @@ async fn main() {
             "--cas" => cas = Some(PathBuf::from(next_arg(&mut args, "--cas"))),
             "--listen" => listen = Some(next_arg(&mut args, "--listen")),
             "--pid-file" => pid_file = Some(PathBuf::from(next_arg(&mut args, "--pid-file"))),
+            "--memory-embed" => memory_embed = true,
+            "--memory-vec-artifact" => {
+                memory_vec_artifact =
+                    Some(PathBuf::from(next_arg(&mut args, "--memory-vec-artifact")))
+            }
+            "--model-cache" => {
+                model_cache = Some(PathBuf::from(next_arg(&mut args, "--model-cache")))
+            }
             "--help" | "-h" => {
                 print_usage();
                 return;
@@ -158,7 +174,8 @@ async fn main() {
     }
 
     let state = std::sync::Arc::new(
-        match partisync_gateway::mcp::build_server_state(db, index_root).await {
+        // db.clone()：artifact 缺省路径需 db 兄弟目录（memory-embed 宿主位）
+        match partisync_gateway::mcp::build_server_state(db.clone(), index_root).await {
             Ok(state) => state,
             Err(e) => {
                 eprintln!("partisd: {e}");
@@ -167,6 +184,58 @@ async fn main() {
             }
         },
     );
+
+    // 嵌入伴生宿主位（M11-WP06-T05，SPEC §2.1 + ADR-0035 决策 3 + §6-8）：
+    // 挂载即激活三腿（写入腿 memory_write 事务外 spawn = 宿主内内存队列；
+    // 查询腿 memory_search mode=hybrid；生命周期腿 tombstone/GC 同步摘除）。
+    // 生命周期语义：队列无持久化，崩溃/终止丢队列不做增量恢复——重启后
+    // 批量回填器（graph examples backfill_memory_vectors）按伴表嵌入状态
+    // 全量重算补齐，派生数据无一致性债；SIGTERM 优雅退出时未完成伴生任务
+    // 随 runtime 终止（零承诺面影响，P20 语义零变更）。
+    // init fail-fast（SPEC §2.2）：模型加载/首嵌维度失败 → 拒绝启动（宿主
+    // 显式降级 = 去掉 --memory-embed 重启，查询腿 BM25 + 降级标记保可用）。
+    #[cfg(feature = "memory-embed")]
+    if memory_embed {
+        let artifact: PathBuf = memory_vec_artifact.clone().unwrap_or_else(|| {
+            db.as_ref()
+                .and_then(|p| p.parent())
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|dir| dir.join("memory_vec.usearch"))
+                .unwrap_or_else(|| PathBuf::from("memory_vec.usearch"))
+        });
+        let embedder = match partisync_graph::memory_vector::embed::FastembedMemoryEmbedder::new(
+            model_cache.as_deref(),
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("partisd: 嵌入器加载失败（init fail-fast）: {e}");
+                let _ = std::fs::remove_file(&pid_path);
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = state
+            .install_memory_vector_channel(&artifact, Some(std::sync::Arc::new(embedder)))
+            .await
+        {
+            eprintln!("partisd: 向量通道挂载失败: {e}");
+            let _ = std::fs::remove_file(&pid_path);
+            std::process::exit(1);
+        }
+        eprintln!(
+            "partisd: memory vector channel attached（artifact = {}；三腿激活，BGESmallZHV15）",
+            artifact.display()
+        );
+    }
+    #[cfg(not(feature = "memory-embed"))]
+    if memory_embed {
+        eprintln!(
+            "partisd: --memory-embed 需要构建 feature `memory-embed`（cargo build -p partisd --features memory-embed）"
+        );
+        let _ = std::fs::remove_file(&pid_path);
+        std::process::exit(2);
+    }
+    #[cfg(not(feature = "memory-embed"))]
+    let _ = (&memory_vec_artifact, &model_cache);
 
     let bound = tcp
         .local_addr()

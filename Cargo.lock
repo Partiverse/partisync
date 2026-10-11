@@ -7475,6 +7475,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "partisync-gateway",
+ "partisync-graph",
  "partisync-index",
  "rmcp",
  "tempfile",
@@ -7634,6 +7635,7 @@ name = "partisync-graph"
 version = "0.2.0"
 dependencies = [
  "blake3",
+ "fastembed",
  "notify",
  "partisync-cas",
  "partisync-core",

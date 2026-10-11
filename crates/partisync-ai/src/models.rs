@@ -16,6 +16,8 @@ use partisync_core::error::{PartisyError, Severity};
 
 /// 嵌入文本模型逻辑名（清单键 / 缓存目录名）。
 pub const EMBED_MODEL_TEXT: &str = "embed-text";
+/// 记忆域语义嵌入模型逻辑名（M11-WP06-T05；清单键 / 缓存目录名）。
+pub const EMBED_MODEL_TEXT_ZH: &str = "embed-text-zh";
 /// 嵌入图像模型逻辑名。
 pub const EMBED_MODEL_IMAGE: &str = "embed-image";
 /// 转写模型逻辑名（whisper ggml，冒烟定版）。
@@ -40,14 +42,70 @@ pub struct ModelSpec {
     pub blake3: Option<&'static str>,
 }
 
-/// 模型清单（v2：嵌入两模型 + 转写 + OCR det/rec；blake3 待真模型
-/// 冒烟后填实——2026-09-22 会话 HF 不可达，冒烟移交登记 T05 报告）。
-pub const MANIFEST: [ModelSpec; 5] = [
+/// 模型文件钉版条目（M11-WP06-T05：逐文件 blake3 + 字节数——评估件
+/// M11-WP05-t05 §2 候填哈希表的同源 Rust 常量形态）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFileSpec {
+    /// 相对模型 repo 根的文件路径（fastembed 缓存布局）。
+    pub path: &'static str,
+    /// blake3 hex（64 字符，评估件 §2 逐字）。
+    pub blake3: &'static str,
+    /// 文件字节数（评估件 §2）。
+    pub bytes: u64,
+}
+
+/// BGESmallZHV15 五文件钉版（SPEC M11-WP06 §2.3；值 = 评估件
+/// M11-WP05-t05-vector-reinitiation-eval.md §2 候填哈希表**逐字**填入，
+/// 2026-10-11 冒烟实录：Xenova/bge-small-zh-v1.5，snapshot
+/// 75c43b069aac4d136ba6bc1122f995fedcfd2781）。真模型文件哈希重验为
+/// 本地验收（模型文件不进 CI，评估件 §7）——下载流程
+/// `HF_ENDPOINT=https://hf-mirror.com`，校验不符即拒绝使用。
+pub const BGE_SMALL_ZH_V15_FILES: [ModelFileSpec; 5] = [
+    ModelFileSpec {
+        path: "onnx/model.onnx",
+        blake3: "f1c661f38644b20ef51d58cfb9cf92cf21ed80ed796c8994eb78cfd4f4764529",
+        bytes: 94_851_877,
+    },
+    ModelFileSpec {
+        path: "tokenizer.json",
+        blake3: "2948cdb566aa39990222fc687d6b2b214f91c602627c7f664b8748114756afad",
+        bytes: 439_125,
+    },
+    ModelFileSpec {
+        path: "config.json",
+        blake3: "8455defe17a2d02c705ccd02d2703a401e9a012b172041ab1dfc89ee734b081b",
+        bytes: 716,
+    },
+    ModelFileSpec {
+        path: "tokenizer_config.json",
+        blake3: "4bd4620b7434b5da448bf9a6cd8859aec19f7bdefacf6f2dd6f0eac70ccfa259",
+        bytes: 367,
+    },
+    ModelFileSpec {
+        path: "special_tokens_map.json",
+        blake3: "a18633786802dd5a6c0bd6b1a99ea58d6c846b73efd862830fdb86318943fdff",
+        bytes: 125,
+    },
+];
+
+/// 模型清单（v3，M11-WP06-T05：+记忆域语义嵌入 BGESmallZHV15——五文件
+/// blake3 全套钉版，评估件 §2 候填哈希表逐字；嵌入两模型 + 转写 + OCR
+/// det/rec 的 blake3 仍 None——欠账不在 M11-WP06 强制范围，SPEC §2.3）。
+pub const MANIFEST: [ModelSpec; 6] = [
+    ModelSpec {
+        name: EMBED_MODEL_TEXT_ZH,
+        version: "BGESmallZHV15 (fastembed 7.0.1 EmbeddingModel::BGESmallZHV15; \
+                  Xenova/bge-small-zh-v1.5 snapshot 75c43b069aac4d136ba6bc1122f995fedcfd2781)",
+        source: "Xenova/bge-small-zh-v1.5",
+        // 权重主文件 = onnx/model.onnx（94,851,877 B，verify 校验对象）；
+        // 五文件全套钉版见 BGE_SMALL_ZH_V15_FILES（常量对照单测锁定）。
+        blake3: Some("f1c661f38644b20ef51d58cfb9cf92cf21ed80ed796c8994eb78cfd4f4764529"),
+    },
     ModelSpec {
         name: EMBED_MODEL_TEXT,
         version: "bge-m3 (fastembed 7.0.1 EmbeddingModel::BGEM3)",
         source: "BAAI/bge-m3",
-        blake3: None, // TODO(冒烟): 实测后填实
+        blake3: None, // TODO(冒烟): 实测后填实（M11-WP06 不强制，SPEC §2.3）
     },
     ModelSpec {
         name: EMBED_MODEL_IMAGE,
@@ -210,4 +268,80 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+#[cfg(test)]
+mod wp06_manifest_tests {
+    use super::*;
+
+    /// SPEC M11-WP06 §2.3 单测义务：MANIFEST 条目存在性 + 哈希格式
+    /// （64 hex）+ 与评估件 §2 值逐字一致的常量对照断言。
+    #[test]
+    fn manifest_has_bgesmallzhv15_entry_with_pinned_blake3() {
+        let spec = ModelManager::new("unused")
+            .spec(EMBED_MODEL_TEXT_ZH)
+            .expect("BGESmallZHV15 条目在 MANIFEST");
+        assert_eq!(spec.source, "Xenova/bge-small-zh-v1.5");
+        let pin = spec.blake3.expect("blake3 已填实（编译面非 None）");
+        assert_eq!(pin.len(), 64, "blake3 hex 64 字符");
+        assert!(pin.chars().all(|c| c.is_ascii_hexdigit()));
+        // 权重主文件哈希 = 五文件表中 onnx/model.onnx 行（同源）
+        let weights = BGE_SMALL_ZH_V15_FILES
+            .iter()
+            .find(|f| f.path == "onnx/model.onnx")
+            .expect("权重行在五文件表");
+        assert_eq!(pin, weights.blake3);
+        assert_eq!(weights.bytes, 94_851_877);
+    }
+
+    /// 常量对照断言：五文件哈希/字节数与评估件 §2 候填哈希表**逐字**
+    /// 一致（M11-WP05-t05-vector-reinitiation-eval.md §2，2026-10-11）。
+    #[test]
+    fn bge_files_match_eval_doc_verbatim() {
+        let expected: [(&str, &str, u64); 5] = [
+            (
+                "onnx/model.onnx",
+                "f1c661f38644b20ef51d58cfb9cf92cf21ed80ed796c8994eb78cfd4f4764529",
+                94_851_877,
+            ),
+            (
+                "tokenizer.json",
+                "2948cdb566aa39990222fc687d6b2b214f91c602627c7f664b8748114756afad",
+                439_125,
+            ),
+            (
+                "config.json",
+                "8455defe17a2d02c705ccd02d2703a401e9a012b172041ab1dfc89ee734b081b",
+                716,
+            ),
+            (
+                "tokenizer_config.json",
+                "4bd4620b7434b5da448bf9a6cd8859aec19f7bdefacf6f2dd6f0eac70ccfa259",
+                367,
+            ),
+            (
+                "special_tokens_map.json",
+                "a18633786802dd5a6c0bd6b1a99ea58d6c846b73efd862830fdb86318943fdff",
+                125,
+            ),
+        ];
+        assert_eq!(BGE_SMALL_ZH_V15_FILES.len(), expected.len());
+        for (got, (path, hash, bytes)) in BGE_SMALL_ZH_V15_FILES.iter().zip(expected) {
+            assert_eq!(got.path, path, "文件路径逐字");
+            assert_eq!(got.blake3, hash, "{path} blake3 逐字");
+            assert_eq!(got.bytes, bytes, "{path} 字节数");
+            assert_eq!(got.blake3.len(), 64, "{path} 64 hex");
+            assert!(got.blake3.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+    }
+
+    /// SPEC §2.3 诚实边界：bge-m3/clip-vit-b32 blake3 None 欠账不在本 WP
+    /// 强制范围——保持 None（不得顺手填）。
+    #[test]
+    fn legacy_embed_entries_blake3_still_none() {
+        for name in [EMBED_MODEL_TEXT, EMBED_MODEL_IMAGE] {
+            let spec = ModelManager::new("unused").spec(name).expect("条目在");
+            assert!(spec.blake3.is_none(), "{name} 欠账维持 None（SPEC §2.3）");
+        }
+    }
 }

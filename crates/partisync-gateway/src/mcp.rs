@@ -355,6 +355,29 @@ impl McpServerState {
         *self.index_engine.write().await = Some(Arc::new(engine));
     }
 
+    /// 注入记忆域向量通道（M11-WP06-T05，partisd 宿主位；SPEC M11-WP06
+    /// §2.1 + ADR-0035 决策 3）：daemon 启动时挂载后三腿激活——写入腿
+    /// 伴生（memory_write 事务外 spawn，本进程内存队列）、查询腿 hybrid、
+    /// 生命周期腿 tombstone/GC 同步摘除。生命周期语义（SPEC §6-8 /
+    /// ADR-0035 决策 3）：进程内 spawn 队列无持久化，崩溃丢队列不做增量
+    /// 恢复——重启后批量回填器（graph examples backfill_memory_vectors）
+    /// 按伴表嵌入状态全量重算补齐，派生数据无一致性债；SIGTERM 优雅退出
+    /// 时未完成伴生任务随 runtime 终止（同上语义，零承诺面影响）。
+    /// `embedder = None` = 通道挂载但无嵌入器（查询腿恒降级，伴生 no-op）
+    /// ——不推荐，宿主应传真嵌入器或完全不挂载。
+    pub async fn install_memory_vector_channel(
+        &self,
+        artifact_path: impl AsRef<std::path::Path>,
+        embedder: Option<Arc<dyn partisync_graph::MemoryEmbedder>>,
+    ) -> Result<(), ErrorData> {
+        let store = self.graph_store().await?;
+        store
+            .attach_vector_channel(artifact_path, embedder)
+            .map_err(|e| {
+                ErrorData::internal_error(format!("memory vector channel 挂载失败: {e}"), None)
+            })
+    }
+
     /// 注入扩展注册表（M7-WP01-T04 第 3 步）。装载失败由调用方降级
     /// （stderr 告警 + 不注入），扩展目录损坏不拖垮 MCP 主服务。
     pub async fn install_ext_registry(
@@ -476,15 +499,20 @@ fn all_tools() -> Vec<Tool> {
                 "required": ["content"]
             })),
         ),
+        // M11-WP06-T05（SPEC §2.5）：memory_search 增量可选参数 mode=hybrid
+        // ——BM25 Top-N + 向量近邻 Top-N → RRF 融合；无该参数的请求工具
+        // schema 与响应载荷形状与现状一致（增量可选参数判例）。
         Tool::new(
             "memory_search",
-            "Search verifiable memories: SQLite full-text (FTS5 trigram) with LIKE fallback; exact tag filter; exact memory_id lookup",
+            "Search verifiable memories: SQLite full-text (FTS5 trigram) with LIKE fallback; exact tag filter; exact memory_id lookup. Optional mode=hybrid adds a semantic vector kNN leg fused with BM25 via RRF (k=60); when the vector channel is unavailable the BM25 results are returned as-is with a degraded=vector_unavailable marker.",
             schema(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Full-text query over content"},
                     "tag": {"type": "string", "description": "Exact tag filter"},
                     "memory_id": {"type": "string", "description": "Exact memory lookup (overrides query)"},
+                    "mode": {"type": "string", "enum": ["bm25", "hybrid"], "default": "bm25",
+                             "description": "bm25 = FTS5/LIKE only (default; response shape unchanged). hybrid = BM25 Top-N + semantic vector kNN fused via RRF (k=60); response carries degraded=vector_unavailable when the vector leg is unavailable (fail-open, never silent)"},
                     "limit": {"type": "number", "default": 20, "description": "Max results (default 20)"},
                     "offset": {"type": "number", "default": 0, "description": "Result offset (default 0)"}
                 }
@@ -554,6 +582,10 @@ impl ServerHandler for McpServerState {
                  (M10-WP04): memory_update (content-addressed: a real update \
                  tombstones the old id and writes a new row) and memory_delete \
                  (soft-delete tombstone; the row stays in the commitment set). \
+                 memory_search accepts optional mode=hybrid (M11-WP06): BM25 \
+                 Top-N + semantic vector kNN fused via RRF (k=60); if the vector \
+                 channel is unavailable it fails open to BM25 with a \
+                 degraded=vector_unavailable marker (never silent). \
                  All calls are stateless.",
         )
     }
@@ -655,6 +687,10 @@ struct MemorySearchInput {
     tag: Option<String>,
     #[serde(default)]
     memory_id: Option<String>,
+    /// M11-WP06-T05（SPEC §2.5）：缺省/bm25 = 现状路径（响应形状不变）；
+    /// hybrid = store 层 hybrid 检索（降级标记随载荷透传）。
+    #[serde(default)]
+    mode: Option<String>,
     #[serde(default)]
     limit: Option<u32>,
     #[serde(default)]
@@ -745,14 +781,40 @@ impl McpServerState {
         }))
     }
 
-    /// `memory_search`：FTS5 trigram / LIKE 兜底 + tag 精确过滤 + id 精确查。
+    /// `memory_search`：FTS5 trigram / LIKE 兜底 + tag 精确过滤 + id 精确查；
+    /// 可选 mode=hybrid（M11-WP06-T05，SPEC §2.5）= store 层 hybrid 检索
+    /// （BM25 Top-N + 向量近邻 Top-N → RRF），降级标记随载荷透传（SPEC
+    /// §2.4 fail-open）。无 mode 参数的请求响应载荷形状与现状一致
+    /// （MemorySearchReport 序列化面零变更，增量可选参数判例）。
     async fn memory_search(&self, args: &JsonValue) -> Result<CallToolResult, ErrorData> {
         let input: MemorySearchInput = match serde_json::from_value(args.clone()) {
             Ok(v) => v,
             Err(e) => return Err(ErrorData::invalid_params(e.to_string(), None)),
         };
+        let mode = input.mode.as_deref();
+        if let Some(m) = mode {
+            if m != "bm25" && m != "hybrid" {
+                return tool_err(format!(
+                    "memory_search mode 不支持: {m}（可选 bm25 | hybrid）"
+                ));
+            }
+        }
         let store = self.graph_store().await?;
-        let report = store
+        if mode == Some("hybrid") && input.memory_id.is_none() {
+            // hybrid = 语义查询腿；memory_id 精确查在场时沿现状优先（精确
+            // 路径无融合语义）。hybrid 需 query（无词面/语义输入不可融合）。
+            let Some(query) = input.query.as_deref() else {
+                return tool_err("memory_search mode=hybrid 需要 query");
+            };
+            return match store
+                .memory_search_hybrid(query, input.tag.as_deref(), input.limit.unwrap_or(20))
+                .await
+            {
+                Ok(r) => ok_json(&r),
+                Err(e) => tool_err(format!("memory_search hybrid 失败: {e}")),
+            };
+        }
+        match store
             .memory_search(
                 input.query.as_deref(),
                 input.tag.as_deref(),
@@ -760,12 +822,11 @@ impl McpServerState {
                 input.limit.unwrap_or(20),
                 input.offset.unwrap_or(0),
             )
-            .await;
-        let report = match report {
-            Ok(r) => r,
-            Err(e) => return tool_err(format!("memory_search 失败: {e}")),
-        };
-        ok_json(&report)
+            .await
+        {
+            Ok(r) => ok_json(&r),
+            Err(e) => tool_err(format!("memory_search 失败: {e}")),
+        }
     }
 
     /// `memory_verify`（只读）：无 id = 全库快照根 vs 重算根 + 列级校验；
@@ -2154,5 +2215,179 @@ mod tests {
             .await
             .expect_err("registry 未装载必须拒");
         assert!(err.to_string().contains("registry not loaded"));
+    }
+
+    // ── M11-WP06-T05：memory_search mode=hybrid 契约面（SPEC §2.5/§2.4）──
+
+    /// memory 工具面测试态：完整 graph schema（`Store::from_pool` 幂等
+    /// 迁移——memory/FTS/v19 伴表全在位；test_state 的手搓 asset 表
+    /// 不含完整 entry 列，迁移必败故不适用）。
+    async fn memory_test_state() -> McpServerState {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = partisync_graph::Store::from_pool(pool.clone())
+            .await
+            .expect("graph 迁移");
+        // memory_write 要求设备登记（origin_device 面——wp02_memory.rs
+        // seeded_store 判例同口径）
+        store
+            .seed_device_volume("dev-a", "Device A", "fp-a")
+            .await
+            .expect("播种设备");
+        McpServerState::from_pool(pool)
+    }
+
+    /// 合成嵌入器（mock，零模型）：内容字节和选基向量（与 graph T04 探针
+    /// 同口径）——查询串 == 内容串时向量一致（自距离 0）。
+    struct ByteSumEmbedder;
+
+    impl partisync_graph::MemoryEmbedder for ByteSumEmbedder {
+        fn embed(&self, content: &str) -> Result<Vec<f32>, partisync_core::error::PartisyError> {
+            let idx = content.bytes().map(usize::from).sum::<usize>() % 512;
+            let mut v = vec![0.0f32; 512];
+            v[idx] = 1.0;
+            Ok(v)
+        }
+    }
+
+    /// MCP 契约探针（SPEC §3）：tools/list 中 memory_search schema 透出
+    /// 可选参数 mode（enum bm25|hybrid）。
+    #[test]
+    fn memory_search_schema_exposes_hybrid_mode() {
+        let tools = all_tools();
+        let ms = tools
+            .iter()
+            .find(|t| t.name.as_ref() == "memory_search")
+            .expect("memory_search 工具在列");
+        let schema = serde_json::json!(ms.input_schema.as_ref());
+        let mode = &schema["properties"]["mode"];
+        assert_eq!(mode["type"], "string", "mode 为 string 参数");
+        assert_eq!(mode["enum"], serde_json::json!(["bm25", "hybrid"]));
+        assert!(
+            ms.description
+                .as_ref()
+                .is_some_and(|d| d.contains("hybrid")),
+            "工具描述含 hybrid 语义"
+        );
+    }
+
+    /// 无 mode 参数请求响应载荷形状与现状一致（SPEC §3 默认行为回归）：
+    /// 序列化面恰为 results/total 两键，零新字段。
+    #[tokio::test]
+    async fn memory_search_default_shape_unchanged() {
+        let state = memory_test_state().await;
+        let w = state
+            .memory_write(&json!({"content": "默认形状探针行 蓝天白云"}))
+            .await
+            .expect("写入");
+        assert!(
+            !w.is_error.unwrap_or(false),
+            "memory_write 工具级失败: {:?}",
+            w.content
+        );
+        let r = state
+            .memory_search(&json!({"query": "蓝天白云"}))
+            .await
+            .expect("检索");
+        let v = r.structured_content.expect("structured 输出");
+        let keys: Vec<&str> = v
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys.len(), 2, "恰 results/total 两键: {keys:?}");
+        assert!(keys.contains(&"results") && keys.contains(&"total"));
+        assert_eq!(v["total"], 1);
+    }
+
+    /// mode=hybrid 降级透传（P25-d MCP 面）：通道未挂载 → BM25 结果原样 +
+    /// degraded=vector_unavailable，零静默零 panic；与 bm25 路径结果一致
+    ///（SPEC §2.0 零变更对照）。
+    #[tokio::test]
+    async fn memory_search_hybrid_degrades_without_channel() {
+        let state = memory_test_state().await;
+        state
+            .memory_write(&json!({"content": "降级透传探针行 蓝天白云"}))
+            .await
+            .expect("写入");
+        let hybrid = state
+            .memory_search(&json!({"query": "蓝天白云", "mode": "hybrid"}))
+            .await
+            .expect("hybrid 零 panic");
+        let v = hybrid.structured_content.expect("structured 输出");
+        assert_eq!(v["degraded"], "vector_unavailable", "显式降级标记透传");
+        let bm25 = state
+            .memory_search(&json!({"query": "蓝天白云", "mode": "bm25"}))
+            .await
+            .expect("bm25 路径");
+        let v25 = bm25.structured_content.expect("structured 输出");
+        assert_eq!(v["results"], v25["results"], "降级输出 = BM25 原样");
+        assert!(
+            v25.get("degraded").is_none(),
+            "bm25 路径响应无 degraded 字段（形状与现状一致）"
+        );
+    }
+
+    /// mode=hybrid 正控（mock 通道）：向量腿参与（degraded 缺失/null），
+    /// 语义近邻（BM25 词面零命中）经向量腿进入结果。
+    #[tokio::test]
+    async fn memory_search_hybrid_with_mock_channel_fuses() {
+        let state = memory_test_state().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = state.graph_store().await.expect("store");
+        store
+            .attach_vector_channel(
+                dir.path().join("memory_vec.usearch"),
+                Some(std::sync::Arc::new(ByteSumEmbedder)),
+            )
+            .expect("挂载 mock 通道");
+        let a_content = "hybrid 蓝天白云 正控探针";
+        let b_content = "hybrid 绿草如茵 正控探针";
+        let a = state
+            .memory_write(&json!({"content": a_content}))
+            .await
+            .expect("写 A");
+        let _ = a;
+        state
+            .memory_write(&json!({"content": b_content}))
+            .await
+            .expect("写 B");
+        // 伴生嵌入（确定性路径；memory_write 的 spawn 伴生幂等重叠无害）
+        let store2 = state.graph_store().await.expect("store");
+        for id in [
+            partisync_graph::memory::memory_identity(a_content, "[]", "{}").as_str(),
+            partisync_graph::memory::memory_identity(b_content, "[]", "{}").as_str(),
+        ] {
+            assert!(store2.memory_embed_one(id).await.expect("伴生嵌入"));
+        }
+        // 查询串 = A 内容（mock 嵌入向量与 A 一致；B 被 BM25 词面零命中）
+        let r = state
+            .memory_search(&json!({"query": a_content, "mode": "hybrid"}))
+            .await
+            .expect("hybrid 查询");
+        let v = r.structured_content.expect("structured 输出");
+        assert!(
+            v.get("degraded").is_none() || v["degraded"].is_null(),
+            "向量腿已参与（非降级）"
+        );
+        let ids: Vec<&str> = v["results"]
+            .as_array()
+            .expect("results 数组")
+            .iter()
+            .map(|h| h["memory_id"].as_str().expect("memory_id"))
+            .collect();
+        assert_eq!(
+            ids[0],
+            partisync_graph::memory::memory_identity(a_content, "[]", "{}"),
+            "A 融合分最高"
+        );
+        assert!(
+            ids.contains(&partisync_graph::memory::memory_identity(b_content, "[]", "{}").as_str()),
+            "B 经向量腿进入结果（BM25 词面零命中）"
+        );
     }
 }
