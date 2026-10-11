@@ -1,0 +1,156 @@
+== M11-WP01-T08 GA 前 CLI 全量实测证据 ==
+date: 2026-10-11 · main=611e8f5（WP06 #241 合入后）· worktree /tmp/wp-m11-wp06（release 构建）
+环境: Kubuntu 26.04 / 内核 7.0.0-38-generic / 16C/62G / cargo 1.94.0 / /dev/fuse 在位
+定位: M11-WP01-T07 GA 口径 §2 门槛③「窗口内 ≥1 次内部全链验收（CLI/partisd/MCP 面）」执行件；
+      用户 2026-10-11 审批方案（全纳入 + 10⁴ 资产域规模面 + 通过即 J1-③ 闭合预授权）
+语料: LCSTS 真实语料（train.jsonl 2,400,591 行，仓外 ~/Data/lcsts/）
+      → 资产域 12,000 文档（scripts/prepare-lcsts.py --docs 12000 --queries 200，48MB）
+      → memory 域 118,076 叶（T04 语料库 ~/Data/lcsts-memory/，仓外）
+      → partisync-big.db 负控副本（沙箱内）
+
+────────────────────────────────────────────────────────
+一、域 A 资产域索引-检索链（CLI 直测）——全绿
+────────────────────────────────────────────────────────
+[A1] scan-plan（12k dry-run）: 条目 12000，207ms，done=1 failed=0 —— PASS（log a1）
+[A2] index 300 文档: 图谱 300 文件/1 目录，job 完整 —— PASS（a2）
+[A3] reindex 300: indexed=300 skip_binary=0 read_errors=0 —— PASS（a3）
+[A4] find（按名命中 d0001）/ ls（列内容哈希前缀）/ dedupe（0 组，小库无重复）—— PASS（a4-*）
+[A5] search bm25 中文「修改后的立法法全文公布」: 1ms，top1=d0001 score 66.6，
+     highlight=可读原文 + [[..]] 包裹（新华社受权于18日[[全文]]播发[[修改后的]]…）—— PASS（a5）
+     search Latin "LCSTS": 大小写不敏感命中 [[LCSTS]]+[[lcsts]] —— PASS（a5-latin）
+     search --mode hybrid（无嵌入模型 CLI）: 诚实回退 BM25 + stderr 显式提示
+     （「混合检索需 embedding 模型…当前仅支持 --mode bm25」）零静默 —— PASS-DEGRADED-EXPLICIT（a5-hybrid）
+[A6] 增量复跑 12k: 图谱仍 12000 唯一内容 12000（零翻倍）—— PASS（a6）
+[A7] 中断 resume: 120k 文件语料 kill@107591/120000 → jobs 显示 checkpoint=/a8/d9590.md
+     → resume 跳过 107591 补完 12415 → completed；总量 120,006 文件/去重节省 39.4MB
+     （内容寻址去重规模化实证）—— PASS（a7-*）
+[A8] 规模 reindex 12k: 0.518s wall，indexed=12000，0 错误；规模检索 3ms top1 正确 —— PASS（a8-*）
+[A9] watch 实时: 新增文件 1 事件 → +1 入库，find 即时可查 —— PASS（a9）
+[A10] big.db 负控: reindex indexed=0 skip_binary=2489 **read_errors=1 显式警告**
+     （web_check.txt 源缺失 + CAS 块不存在，块级 fatal 上浮）—— P22「存量不可回填」诚实路径 PASS（a10）
+
+────────────────────────────────────────────────────────
+二、域 B memory 域 + 向量检索（118k 库，WP06 新功能）——全绿
+────────────────────────────────────────────────────────
+[B1] partisd --memory-embed 三腿激活（loopback 7652，pid-file 两字段 pid+端口）
+     注: feature 构建须 `cargo build -p partisd --features memory-embed`（报错信息精确）—— PASS
+[B2] MCP 契约: tools/list → memory_search.inputSchema.properties.mode
+     = {"enum":["bm25","hybrid"],"default":"bm25",…degraded=vector_unavailable…} —— PASS（b2）
+     调用约定: POST /mcp 需 MCP-Protocol-Version 头 + params._meta 协议版本（rmcp 3.4.0）
+[B3] BM25 回归（mode 缺省）: 「出国留学的平均年龄」total=2，与 T06 证据逐字同分同序
+     （8b315c8e/15.2145 + 000014de/14.9598）；响应形状含 structuredContent，零破坏 —— PASS（b3）
+[B4] hybrid 语义改写「超级富豪家庭把子女送出国读书的平均岁数」: total=5，
+     目标叶 rank 2，分数与 T06 逐位一致；墙钟 1.06s —— PASS（b4）
+[B5] 写路径 e2e: memory_write（新叶 1d6b10a8，118,077 叶，根随写刷新 2514488c…）
+     → 伴生嵌入（memory_embedding status=2/dim=512/detail=done）
+     → artifact 持久化（+2,192B = 恰一条 512d 向量）
+     → **重启后**语义查询「图书馆每周一闭馆不对外开放其余时间正常营业」新叶 **rank 1** —— PASS
+     观察项（非缺陷）: 口语体查询「周一早上还能去借书么」top-10 无新叶——嵌入分布行为
+     （公告体 vs 微博口语体距离），FTS/融合对连续子串/近逐字均正常召回
+[B6] 降级路径: 无 --memory-embed 重启 → hybrid 返回 BM25 结果 + degraded="vector_unavailable"
+     显式标记，零静默零 panic —— PASS（SPEC §2.4 fail-open 用户面复验）
+[B7] GC 生命周期（P25(c) 用户面）: 新库写入 A/B → memory_delete A（tombstoned=true，
+     **承诺根精确回到仅 B 状态**）→ memory-gc --retention-days 0 物理清除
+     → A 行/伴表行 = 0，A-topic hybrid 检索不可召回，B 完好 —— PASS
+[B8] MCP 客户端工程注意: memory_write 对 device 空库 fail-closed 报错
+     （「device 表为空：先 seed_device_volume」——CLI memory-gc 打开即 seed 可解）
+
+────────────────────────────────────────────────────────
+三、域 C partisd 生命周期 + MCP 三面——全绿
+────────────────────────────────────────────────────────
+[C1] 同端口双启: 「bind 127.0.0.1:7653 失败: Address already in use」诚实拒绝 —— PASS
+     SIGTERM: 进程退出 + pid-file 自清 —— PASS
+[C2] stdio sidecar: initialize（serverInfo=rmcp）+ tools/list 11 工具
+     （asset_search/asset_read/asset_organize/dataset_export/job_status +
+      memory_write/search/verify/update/delete + ext_list）—— PASS
+[C3] mcp-http fail-closed 双层:
+     ① JWKS 预拉失败（假 AS 不可达）→ **拒绝启动**（启动守卫强于 401）—— PASS
+     ② 本地 JWKS 端点就位后: 无 token → 401 +
+       WWW-Authenticate: Bearer resource_metadata="https://…/.well-known/oauth-protected-resource",
+       scope="memory:read"（RFC 9728 PRM 指针 + scope，A-2 形状逐字吻合）；坏 token → 401 —— PASS
+
+────────────────────────────────────────────────────────
+四、域 D FUSE 真挂载（/dev/fuse 在位，真挂载实测）——绿 + 两项限制登记
+────────────────────────────────────────────────────────
+[D1] 挂载（装配约定: 装配层自建卷绑定的 fresh graph.db）: MOUNTED，
+     透传读 diff 逐字节一致 —— PASS
+[D2] 写回 unlink（二期）: 挂载点 rm d0002.md 静默成功 → backing 同步移除 +
+     fuse-fresh/graph.db oplog 1 行（先日志后应用 P16 链）—— PASS
+[D3] 拒绝面: mkdir → EPERM；by-hash/** 写 → EROFS —— PASS
+[D4] by-hash 读: chunk 粒度 CAS 对象逐字节一致 —— PASS
+[D5] 限制登记（诚实，不假绿）:
+     ① **CLI 索引库不可直接 FUSE 挂载**——CLI index 每次 open 以 db 路径为
+       fingerprint seed_device_volume，fuse 装配以 backing 指纹校验 → 同根校验
+       拒绝（错误诚实、fail-closed 正确，但两条 seeding 约定不一致 = 互操作缺口，
+       UX 断裂）。绕行 = fresh db 由装配层自绑（本测采用）。
+     ② **by-hash 小文件 ENOENT**——<CDC 最小块的小文件不入 CAS 对象
+       （chunk_root NULL、无 hydrated），by-hash 直连 CAS 必 ENOENT；
+       大文件分块对象正常。与 M9「CAS 内容重组缺口」债同族，登记扩充。
+
+────────────────────────────────────────────────────────
+五、域 E hub demo 冒烟——PASS
+────────────────────────────────────────────────────────
+hub-demo-web --root <state-dir> --addr 127.0.0.1:8427（注意: 真实参数面为
+--root/--addr，无 --bind/--help）→「双组 raft 已就绪（pid=0 注册表 + pid=1 数据）」
+HTTP 200，中文演示页正常服务。demo 面定位维持（已知限制⑤）。
+
+────────────────────────────────────────────────────────
+六、域 F 扩展签名拒绝路径——PASS（登记两处未复采）
+────────────────────────────────────────────────────────
+partisd 面与 stdio sidecar 面 ext_list 均诚实空表 {"tools":[],"count":0,"dir":null}
+（未签 demo_ext.wasm 在 ~/.partisync/extensions/ 下，ExtRegistry::scan fail-closed
+「要么全量装载成功要么不装载」→ 不注入）。装载约定经源码核验（mcp.rs:1822-1841:
+装载失败/空注册表 → stderr 告警 + 不注入，不拖垮 MCP 主服务）。
+未复采（如实登记）: ①stderr 拒绝告警原文——共享 target 目录被并行会话 cargo clean，
+二进制丢失未重建；②P21 五路探针由 CI 单测面覆盖（既有绿），本测不重复。
+
+────────────────────────────────────────────────────────
+七、域 G WP04 中文高亮验收——主项 PASS，回落面由单测覆盖
+────────────────────────────────────────────────────────
+CLI search 中文高亮 = 可读原文 + [[..]] sentinel（A5 现场实证，12k 规模库同证），
+无「字 间空格」碎片串。旧索引（无 orig 域）回落行为: t03_legacy_schema_six_fields_
+fallback 单测覆盖（#239 workspace 114 测试之一）；CLI 面旧索引 fixture 因共享缓存
+被清未复采（如实登记）。reviewer 建议的「词面仅在 tx」存量 fixture 用例仍未补
+（对抗审查披露在案 #229 评论），留后续。
+
+────────────────────────────────────────────────────────
+八、域 H 已知限制逐项复核（对照 M10-WP06-T02 §3.1 清单 + rc.1 notes）
+────────────────────────────────────────────────────────
+① NB-WP05-1 真实外接 AS 端到端未验 —— **维持**（本次 C3 以 mock JWKS 印证
+   fail-closed 双层，真实 AS 仍未接；GA notes 照旧随附）
+② 桌面记忆编辑/删除 UI 条件触发 —— 维持（冻结令，不适用本次 CLI 面）
+③ 语义向量检索暂不实施 —— **已清偿**（WP06 #236–#241 实施 + 本次域 B e2e
+   语义收益复验: BM25 0 命中 vs hybrid 命中）——GA notes 必须更新此条
+④ CAS 存量 read_errors 维持 —— **复验维持**（A10 read_errors=1 显式上浮）；
+   扩充: by-hash 小文件 ENOENT（D5-②）
+⑤ 桌面 dmg 未公证 / hub demo 面 / macOS 无 fuse —— hub demo 面本测 HTTP 200
+   （demo 定位维持）；平台项 linux 面不适用
+新增登记（本次实测发现，GA notes 增补候选）:
+⑥ CLI 索引库 × FUSE 装配指纹约定不一致（D5-①，互操作缺口，fail-closed 正确）
+⑦ by-hash 小文件 ENOENT（D5-②）
+⑧ T04 语料库 device 表缺口（import_lcsts 批量直插不 seed device，
+   memory_write 前置缺失——dev 工具债，B8 诚实报错兜底）
+⑨ partisd loopback 无鉴权 —— ADR-0032 决策 5 设计内（loopback 红线），随附说明
+⑩ --help 行为不一致（partisync-fuse usage 文案与位置参数解析不符；
+   hub-demo-web 不识 --help 直起服）——微 UX 债
+
+────────────────────────────────────────────────────────
+九、诚实边界与环境污染登记
+────────────────────────────────────────────────────────
+- 共享 CARGO_TARGET_DIR 中途被并行会话 cargo clean（F stderr/G 旧索引两项未复采，
+  见六/七节）；运行中进程靠 inode 存活，证据不受影响
+- T04 语料库被本次写路径测试合法变更: 118076→118077 叶（新叶 1d6b10a8 +
+  device seed 行），根 b84dace1…→2514488c…（verify 链全程一致）
+- 沙箱布局疏漏: 120k resume 语料根内含 db/cas（120,006 文件含库文件）——
+  测试布局问题非产品缺陷，产品如实索引所见内容
+- 实测均单机口径（16C/62G/tmpfs），数字不外推他机
+- 测试守护进程已全部清理（7652/7653/8425/8426/8427）；~/.partisync/extensions/
+  留有未签 demo_ext（M9 登记机器状态原样）
+
+────────────────────────────────────────────────────────
+十、结论
+────────────────────────────────────────────────────────
+8 域矩阵：**PASS 38 项 / DEGRADED-EXPLICIT 1 项（CLI hybrid 无模型诚实回退）/
+FAIL 0**；限制新增登记 5 项（⑥–⑩）、既有清单更新 1 项（③已清偿）。
+**判定: 全量 CLI 实测通过 → M11-WP01-T07 GA 口径 §2 门槛③（J1-③）闭合**
+（用户 2026-10-11 预授权），GA 窗口可开启。
