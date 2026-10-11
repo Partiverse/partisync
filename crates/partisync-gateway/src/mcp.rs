@@ -378,6 +378,21 @@ impl McpServerState {
             })
     }
 
+    /// 向量索引落盘（M11-WP06-T05 审查处置）：partisd 优雅关停路径调用
+    /// ——daemon 伴生产物随 SIGTERM 落盘，重启 restore 不丢（ADR-0035
+    /// 决策 3 崩溃恢复闭环的宿主侧；崩溃窗口由回填器对账重嵌补齐）。
+    /// 通道缺位 = no-op。
+    pub async fn save_memory_vector_artifact(&self) -> Result<(), ErrorData> {
+        let store = self.graph_store().await?;
+        store
+            .save_memory_vector_artifact()
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                ErrorData::internal_error(format!("memory vector artifact save 失败: {e}"), None)
+            })
+    }
+
     /// 注入扩展注册表（M7-WP01-T04 第 3 步）。装载失败由调用方降级
     /// （stderr 告警 + 不注入），扩展目录损坏不拖垮 MCP 主服务。
     pub async fn install_ext_registry(
@@ -807,7 +822,13 @@ impl McpServerState {
                 return tool_err("memory_search mode=hybrid 需要 query");
             };
             return match store
-                .memory_search_hybrid(query, input.tag.as_deref(), input.limit.unwrap_or(20))
+                .memory_search_hybrid(
+                    query,
+                    input.tag.as_deref(),
+                    input.limit.unwrap_or(20),
+                    // offset 透传（M11-WP06-T05 审查处置：静默忽略 → 参与融合榜分页）
+                    input.offset.unwrap_or(0),
+                )
                 .await
             {
                 Ok(r) => ok_json(&r),

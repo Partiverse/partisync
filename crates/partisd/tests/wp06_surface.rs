@@ -158,10 +158,6 @@ fn t05_loopback_hybrid_mode_degraded_marker() {
         body.contains("hybrid"),
         "tools/list schema 透出 mode=hybrid: 片段缺失"
     );
-    assert!(
-        body.contains("hybrid"),
-        "tools/list schema 透出 mode=hybrid: 片段缺失"
-    );
 
     // tools/call mode=hybrid（通道未挂载 → fail-open 降级标记透传）
     let (status, body) = http_post(

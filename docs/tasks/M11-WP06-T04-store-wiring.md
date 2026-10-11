@@ -80,3 +80,5 @@ crates/partisync-graph/tests/wp06_memory_vector.rs（6 新探针 + 头注
   行为，**不顺手修**（BM25 零变更红线 SPEC §2.0；如需修正另立任务）。
 - **hybrid total 口径 = 融合命中数（截断前）**，与 memory_search 的
   全库匹配数语义不同——gateway 透出时如需对齐再议（登记待评审）。
+  （T05 审查处置更新：offset 口径偏离本卡原未登记——已以透传落锤，
+  memory_search_hybrid 增 offset 参，融合榜 skip(offset).take(limit)。）

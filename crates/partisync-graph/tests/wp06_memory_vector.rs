@@ -400,7 +400,7 @@ async fn t04_attach_dim_drift_refused() {
     assert!(r.is_err(), "首嵌维度 ≠ 512 拒绝挂载（SPEC §2.2 fail-fast）");
     // 拒绝后通道保持未挂载 → 查询腿降级而非报错（§2.4 不对称设计）
     let rep = store
-        .memory_search_hybrid("任意查询", None, 10)
+        .memory_search_hybrid("任意查询", None, 10, 0)
         .await
         .expect("hybrid 不 panic");
     assert_eq!(rep.degraded, Some(DEGRADED_VECTOR_UNAVAILABLE));
@@ -427,7 +427,7 @@ async fn p25d_degraded_artifact_missing() {
     // ≥3 字符 → FTS trigram 路径（LIKE 兜底路径为既有精确匹配语义，
     // store.rs 2592 原样——零变更红线，探针按 FTS 路径构造正/负控）
     let hybrid = store
-        .memory_search_hybrid("蓝色天空", None, 10)
+        .memory_search_hybrid("蓝色天空", None, 10, 0)
         .await
         .expect("hybrid 零 panic");
     assert_eq!(
@@ -465,7 +465,7 @@ async fn p25d_degraded_model_unavailable() {
     );
     assert!(r.is_err(), "init 失败拒绝挂载（SPEC §2.2）");
     let rep = store
-        .memory_search_hybrid("蓝色", None, 10)
+        .memory_search_hybrid("蓝色", None, 10, 0)
         .await
         .expect("hybrid 零 panic");
     assert_eq!(rep.degraded, Some(DEGRADED_VECTOR_UNAVAILABLE));
@@ -483,13 +483,13 @@ async fn p25d_degraded_model_unavailable() {
         )
         .expect("init 通过挂载");
     let rep_ok = store2
-        .memory_search_hybrid("任意", None, 10)
+        .memory_search_hybrid("任意", None, 10, 0)
         .await
         .expect("hybrid 正常态");
     assert_eq!(rep_ok.degraded, None, "通道可用 = 非降级（索引空属正常）");
     fail.store(true, Ordering::SeqCst);
     let rep_fail = store2
-        .memory_search_hybrid("任意", None, 10)
+        .memory_search_hybrid("任意", None, 10, 0)
         .await
         .expect("hybrid 运行期失败零 panic");
     assert_eq!(rep_fail.degraded, Some(DEGRADED_VECTOR_UNAVAILABLE));
@@ -549,7 +549,7 @@ async fn t04_hybrid_fuses_bm25_and_vector() {
     assert!(store.memory_embed_one(&b).await.expect("嵌 B"));
 
     let rep = store
-        .memory_search_hybrid("blue", None, 10)
+        .memory_search_hybrid("blue", None, 10, 0)
         .await
         .expect("hybrid");
     assert_eq!(rep.degraded, None, "向量腿已参与，无降级");
@@ -568,7 +568,7 @@ async fn t04_hybrid_fuses_bm25_and_vector() {
     );
     // tag 过滤同 BM25 口径：tag 不匹配的向量腿候选被过滤
     let rep_tag = store
-        .memory_search_hybrid("blue", Some("nomatch-tag"), 10)
+        .memory_search_hybrid("blue", Some("nomatch-tag"), 10, 0)
         .await
         .expect("hybrid tag 过滤");
     assert!(
@@ -616,7 +616,7 @@ async fn p25c_full_chain_store_wired_lifecycle() {
 
     // 写入期召回基线：A、B 均可经向量腿召回
     let rep = store
-        .memory_search_hybrid("q-A", None, 10)
+        .memory_search_hybrid("q-A", None, 10, 0)
         .await
         .expect("基线 hybrid");
     let ids: Vec<String> = rep.results.iter().map(|h| h.memory_id.clone()).collect();
@@ -626,7 +626,7 @@ async fn p25c_full_chain_store_wired_lifecycle() {
     // ① tombstone：store 生命周期腿自动摘除向量（探针零手工驱动）
     store.memory_delete(&a).await.expect("删 A");
     let rep = store
-        .memory_search_hybrid("q-A", None, 10)
+        .memory_search_hybrid("q-A", None, 10, 0)
         .await
         .expect("tombstone 后 hybrid");
     assert!(
@@ -649,7 +649,7 @@ async fn p25c_full_chain_store_wired_lifecycle() {
     assert!(store.memory_by_id(&a).await.expect("查 A").is_none());
     assert_eq!(companion_count(&store, &a).await, 0, "伴表随级联清");
     let rep = store
-        .memory_search_hybrid("q-A", None, 10)
+        .memory_search_hybrid("q-A", None, 10, 0)
         .await
         .expect("GC 后 hybrid");
     assert!(
@@ -659,7 +659,7 @@ async fn p25c_full_chain_store_wired_lifecycle() {
 
     // ③ 未删项召回不回退 + GC 幂等
     let rep = store
-        .memory_search_hybrid("q-B", None, 10)
+        .memory_search_hybrid("q-B", None, 10, 0)
         .await
         .expect("B 召回");
     assert!(
@@ -670,5 +670,102 @@ async fn p25c_full_chain_store_wired_lifecycle() {
     let again = store.memory_gc(0).await.expect("二次 GC");
     assert_eq!(again.purged, 0, "GC 幂等空转");
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// M11-WP06-T05 审查处置：向量落盘恢复闭环（ADR-0035 决策 3 崩溃恢复承诺
+// 的实现落锤）——save_memory_vector_artifact 往返 + 未落盘向量 contains
+// 对账检出（回填器 reconcile 口径的原语面）
+// ---------------------------------------------------------------------------
+
+/// 合成嵌入器（graph 测试侧 mock，零模型）：内容字节和选基向量。
+struct ByteSumEmbedder;
+
+impl partisync_graph::MemoryEmbedder for ByteSumEmbedder {
+    fn embed(&self, content: &str) -> Result<Vec<f32>, partisync_core::error::PartisyError> {
+        let idx = content.bytes().map(usize::from).sum::<usize>() % MEMORY_VECTOR_DIM;
+        let mut v = vec![0.0f32; MEMORY_VECTOR_DIM];
+        v[idx] = 1.0;
+        Ok(v)
+    }
+}
+
+/// 宿主侧落盘（partisd 关停 save 对应原语）：挂载通道 → 伴生嵌入 →
+/// save_memory_vector_artifact → 新索引实例 restore 后向量在盘（重启
+/// restore 不丢——daemon 伴生产物持久化闭环）。
+#[tokio::test]
+async fn t05_save_artifact_persists_companion_vectors() {
+    let store = seeded_store().await;
+    let dir = temp_artifact_dir("save-roundtrip");
+    let path = dir.join("memory_vec.usearch");
+    store
+        .attach_vector_channel(&path, Some(Arc::new(ByteSumEmbedder)))
+        .expect("挂载通道");
+    let a = store
+        .memory_write("落盘闭环探针行 A", &[], &json!({}))
+        .await
+        .expect("写 A")
+        .memory_id;
+    assert!(store.memory_embed_one(&a).await.expect("嵌 A"));
+    assert!(store.save_memory_vector_artifact().await.expect("save"));
+
+    // 新实例 restore（模拟 daemon 重启）：向量在盘
+    let restored = MemoryVectorIndex::open_or_create(&path).expect("restore");
+    assert!(restored.contains(&a).expect("A 在盘"), "save 后向量持久化");
+
+    // 通道缺位 save = Ok(false) no-op
+    let bare = seeded_store().await;
+    assert!(!bare
+        .save_memory_vector_artifact()
+        .await
+        .expect("缺位 no-op"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 崩溃窗口检出（回填器 reconcile 原语）：save 后新增伴生产物不落盘 →
+/// restore 实例 contains 可区分在盘/丢失——回填器据此对账重嵌（阻断项
+/// 处置：丢失窗口可检出、可修复，零静默）。
+#[tokio::test]
+async fn t05_unsaved_vector_detectable_by_contains_reconcile() {
+    let store = seeded_store().await;
+    let dir = temp_artifact_dir("reconcile-detect");
+    let path = dir.join("memory_vec.usearch");
+    store
+        .attach_vector_channel(&path, Some(Arc::new(ByteSumEmbedder)))
+        .expect("挂载通道");
+    let a = store
+        .memory_write("对账检出探针行 A", &[], &json!({}))
+        .await
+        .expect("写 A")
+        .memory_id;
+    assert!(store.memory_embed_one(&a).await.expect("嵌 A"));
+    assert!(store.save_memory_vector_artifact().await.expect("save"));
+
+    // save 之后新增的伴生产物（未再 save）——daemon 崩溃窗口形态
+    let b = store
+        .memory_write("对账检出探针行 B", &[], &json!({}))
+        .await
+        .expect("写 B")
+        .memory_id;
+    assert!(store.memory_embed_one(&b).await.expect("嵌 B"));
+
+    // restore 实例（回填器视角）：A 在盘、B 丢失——contains 对账检出
+    let restored = MemoryVectorIndex::open_or_create(&path).expect("restore");
+    assert!(restored.contains(&a).expect("A 在盘"));
+    assert!(
+        !restored.contains(&b).expect("B 判位"),
+        "未落盘向量被 contains 对账检出（回填器重嵌触发依据）"
+    );
+    // 重嵌后（预计算注入，mock 向量确定性）检出项归零
+    restored
+        .upsert(
+            &b,
+            &basis_vec(
+                "对账检出探针行 B".bytes().map(usize::from).sum::<usize>() % MEMORY_VECTOR_DIM,
+            ),
+        )
+        .expect("重嵌 B");
+    assert!(restored.contains(&b).expect("B 重嵌后在位"));
     std::fs::remove_dir_all(&dir).ok();
 }
