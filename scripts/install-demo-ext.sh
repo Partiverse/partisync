@@ -12,13 +12,13 @@ mkdir -p "$DEST"
 cp "$SRC/demo_ext.wasm" "$DEST/demo_ext.wasm"
 cp "$SRC/demo_ext.json" "$DEST/demo_ext.json"
 
-if [ -f "$SRC/demo_ext.wasm.minisig" ]; then
-  cp "$SRC/demo_ext.wasm.minisig" "$DEST/demo_ext.wasm.minisig"
-  echo "installed: $DEST/demo_ext.{wasm,json,wasm.minisig}"
+if [ -f "$SRC/demo_ext.minisig" ]; then
+  cp "$SRC/demo_ext.minisig" "$DEST/demo_ext.minisig"
+  echo "installed: $DEST/demo_ext.{wasm,json,minisig}"
 else
   # [P21] 强制验签下无签扩展必被拒载（registry.rs Unsigned）——显式告警
   # 不静默（SPEC M12-WP03 §2.2）。
-  echo "warning: 仓内无 demo_ext.wasm.minisig——[P21] 强制验签将拒载本扩展（预期行为；闭合动作见 docs/release/EXT-SIGNING.md「示例扩展签名窗口」节）" >&2
+  echo "warning: 仓内无 demo_ext.minisig——[P21] 强制验签将拒载本扩展（预期行为；闭合动作见 docs/release/EXT-SIGNING.md「示例扩展签名窗口」节）" >&2
   echo "installed: $DEST/demo_ext.{wasm,json}（无签名件）"
 fi
 echo "next: restart partisync-mcp (or the desktop shell), then check the 扩展 tab / mcp_call ext_list."

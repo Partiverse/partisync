@@ -1,0 +1,46 @@
+M12-WP03-T02 签名腿实施证据（2026-10-11，收集会话 sess_f567abb7）
+================================================================================
+
+[1] CI 签名工作流（sign-demo-ext.yml，workflow_dispatch）
+    run 38154604256（2026-10-11T16:14Z）：
+      - install minisign                 SUCCESS（minisign -v 通过）
+      - drift-check                      SUCCESS（仓内 minisig 未产出 → 进入签名步）
+      - sign (CI subkey)                 SUCCESS，签后回验日志：
+          Signature and comment signature verified
+          Trusted comment: PartiSync demo extension (CI subkey; 2026-10-11T16:14:24Z)
+          SIGN-AND-VERIFY=ok
+      - upload minisig artifact          SUCCESS（demo-ext-minisig, 425B → 下载 320B）
+      - 守卫步 FAILURE = 首轮运行实测暴露的守卫缺陷（守卫步未挂自身
+        env 映射 → 读到 workflow 级空值误触发），修复随 PR-b 同提交；
+        签名链四步不受影响全部成功。
+    私钥面：RELEASE_SIGNING_CI_KEY 仅 GitHub secret 注入（日志显示 ***），
+    人不经手（ADR-0027 判例）；零 ANCHOR_PUBKEYS/零 ext-host 代码变更。
+
+[2] 签名文件名约定勘误（实施中发现，随 PR-b 落地）
+    装载器签名路径 = wasm_path.with_extension("minisig")（registry.rs:166
+    —— 对 .wasm 是【替换】非追加）→ 期望名 demo_ext.minisig；
+    minisign 默认追加产出 demo_ext.wasm.minisig → 扫描器孤儿签名拒绝
+    （scan: orphan signature (no component)，本机 sidecar stderr 实录）。
+    处置：工作流签后 mv 对齐 + 脚本/e2e 守卫统一 demo_ext.minisig
+    （EXT-SIGNING.md:54「-x demo_ext.minisig」为文档既有约定）。
+
+[3] 真装载链 e2e（desktop → 真实 sidecar → 扩展工具面，D19 验证面口径）
+    前置：bash scripts/install-demo-ext.sh →
+      installed: ~/.partisync/extensions/demo_ext.{wasm,json,minisig}
+    cargo test -p partisync-desktop --test commands mcp_call_real_sidecar_ext_list
+      test mcp_call_real_sidecar_ext_list ... ok
+      test result: ok. 1 passed; 0 failed
+    —— 签名 demo 扩展经 [P21] 强制验签装载成功，ext_list 列出
+    ext_demo_echo（M7 以来该面首次真装载通过；EXT-SIGNING「示例扩展
+    签名窗口」M10 债清账）。
+
+[4] 三态守卫覆盖（commands.rs mcp_call_real_sidecar_ext_list）
+    a) 无安装（bin 或 json 缺失）→ skip（本日早前 25 passed 轮实录）
+    b) 有装无签 → skip-with-reason（stderr 指向 EXT-SIGNING；2026-10-11
+       17:4x 轮实录：该机制落地前同场景为断言红）
+    c) 有装有签 → 真实断言 PASS（[3]）
+
+[5] 防漂移（SPEC §2.4）
+    drift-check 步常驻工作流：仓内 minisig 对当前 wasm 每次工作流运行
+    校验，失配显式失败（下一轮运行即覆盖已入仓 minisig 的漂移路径）。
+================================================================================

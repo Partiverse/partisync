@@ -194,7 +194,7 @@ async fn mcp_call_real_sidecar_ext_list() {
     let bin = exe.parent().unwrap().join("../partisync-mcp");
     let ext_dir = dirs::home_dir().unwrap().join(".partisync/extensions");
     let ext_json = ext_dir.join("demo_ext.json");
-    let ext_sig = ext_dir.join("demo_ext.wasm.minisig");
+    let ext_sig = ext_dir.join("demo_ext.minisig");
     if !bin.exists() || !ext_json.exists() {
         eprintln!("skip: sidecar binary or demo extension missing");
         return;

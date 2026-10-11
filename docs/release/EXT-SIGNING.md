@@ -58,6 +58,15 @@ minisign -Vm my_tool.wasm -p partisync.pub
   （`LoadError::Unsigned` 在编译器接触字节前拒绝，[P21] 不变）——
   非缺陷回归，属待持有人闭合的登记窗口；本机装有旧版未签名 demo
   扩展的机器上 desktop e2e 相应失败（M9-report §5 债表行如实登记）。
+- **✅ 2026-10-11 窗口闭合（M12-WP03-T02）**：以 **CI 子钥**（已锚定
+  `ANCHOR_PUBKEYS[1]`，零密钥面变更）经 `sign-demo-ext` 工作流签名，
+  `demo_ext.minisig` 入仓（run 38154604256，签后回验
+  `SIGN-AND-VERIFY=ok`）；真装载链 desktop e2e
+  `mcp_call_real_sidecar_ext_list` 全链 PASS（工具注册成功）。
+  实施注记：签名文件名 = **替换式 `<name>.minisig`**（`-x
+  demo_ext.minisig`，registry.rs:166 `with_extension` 语义）——
+  CI 签名默认追加产出 `<file>.minisig` 需改名对齐；防漂移校验步常驻
+  签名工作流（wasm 变更后签名失配显式失败）。
 
 ## 端到端自验（对应宿主行为）
 
