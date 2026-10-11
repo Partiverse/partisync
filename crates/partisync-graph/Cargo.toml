@@ -16,6 +16,10 @@ blake3 = { workspace = true } # M2-WP03 merkle.rs 状态叶哈希
 serde_json = { workspace = true } # M9-WP02 memory canonical JSON + oplog payload
 tokio = { workspace = true }
 serde = { workspace = true }
+# M11-WP06-T03：记忆域向量通道（SPEC M11-WP06 §2.1；ADR-0035 决策 1/5——
+# 依赖图新边登记，usearch 为 workspace 既有顶层 pin Cargo.toml:53，非新
+# 顶层依赖，deny.toml 零变更；此前仅 partisync-index 引用）
+usearch = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

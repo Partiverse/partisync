@@ -249,3 +249,21 @@ CREATE TABLE IF NOT EXISTS content_chunk (
     chunk_hash TEXT NOT NULL,
     PRIMARY KEY (content_id, seq)
 );
+
+-- v19（M11-WP06-T03，SPEC M11-WP06 §2.1 + ADR-0035 决策 1/3）：记忆域向量
+-- 通道嵌入状态伴表——嵌入异步伴生（不进 memory_write 写事务）与批量回填器
+-- 的范围判定面（回填器按 status 扫描补齐，upsert 幂等）。派生数据记账：
+-- 向量本体在独立 memory_vec.usearch artifact（不入承诺树不入 oplog，P20
+-- 语义零变更），本表仅承载可观测性 + 回填范围判定，不承载恢复承诺
+-- （崩溃语义 = 重启后全量重算）。status 沿 sidecar_items 五态机
+-- （0=pending,1=running,2=done,3=skipped,4=failed）；ON DELETE CASCADE
+-- （沿 v18 content_chunk 判例）：伴表为 memory 派生数据，GC 物理删父行
+-- （store.rs memory_gc DELETE）时随行级联清，无级联时 FK 会炸 GC 路径。
+CREATE TABLE IF NOT EXISTS memory_embedding (
+    memory_id  TEXT PRIMARY KEY REFERENCES memory(memory_id) ON DELETE CASCADE,
+    status     INTEGER NOT NULL DEFAULT 0,  -- 0=pending,1=running,2=done,3=skipped,4=failed
+    dim        INTEGER,                     -- 嵌入维度（done 时回填；维度契约 512 审计面）
+    detail     TEXT,                        -- skipped/failed 原因；done 时产物摘要
+    updated_ns INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_embedding_status ON memory_embedding(status);
