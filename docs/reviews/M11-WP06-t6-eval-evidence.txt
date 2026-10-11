@@ -1,0 +1,158 @@
+== M11-WP06-T06 真模型实测证据件（全链实录）==
+date: 2026-10-11  worktree: /tmp/wp-m11-wp06  base: m11/wp06-t05-fix@97d4cb7
+环境: Kubuntu 本机（16 核 / 62G RAM / 单机口径），模型缓存 /tmp/wp06-t06-proxy-cache，
+     真实库 ~/Data/lcsts-memory/graph.db（118076 叶 LCSTS，仓外路径，只读使用 +
+     回填器按 ADR-0035 决策 3 写伴表/派生 artifact）
+代码变更: crates/partisync-graph/src/memory_vector.rs 新增
+     `real_model_probe::dimension_contract_12_sentences_all_512`（graph-embed
+     门控单测，SPEC §5「src/…/**(graph-embed) 门控真模型探针」清单项）。
+
+--- ① release 构建（SPEC §3 维度探针前置）---
+$ export CARGO_TARGET_DIR=/home/acme/Codebase/partisync/target
+$ cargo build --release -p partisync-graph --features graph-embed --examples
+   Compiling partisync-graph v0.2.0 (/tmp/wp-m11-wp06/crates/partisync-graph)
+    Finished `release` profile [optimized + debuginfo] target(s) in 10.08s
+
+--- ② 下载腿复测 A：HF_ENDPOINT=https://hf-mirror.com 直连（无代理）---
+预期 = 协议不兼容前科（t03:23 BGEM3 / SPEC §6-3），实测复现：
+
+$ env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+    HF_ENDPOINT=https://hf-mirror.com FASTEMBED_CACHE_DIR=/tmp/wp06-t06-hfmirror-cache \
+    cargo test --release -p partisync-graph --features graph-embed real_model_probe -- --nocapture
+thread 'memory_vector::real_model_probe::dimension_contract_12_sentences_all_512' panicked at \
+  crates/partisync-graph/src/memory_vector.rs:419:59:
+BGESmallZHV15 加载: PartisyError { severity: Fatal, source: \
+  Some("fastembed BGESmallZHV15 加载失败: HuggingFace API error: Header Content-Range is missing") }
+test result: FAILED. 0 passed; 1 failed; ... finished in 6.49s
+EXIT=101
+
+结论：hf-mirror 直连下载腿对 fastembed 7.0.1（hf-hub）**协议不兼容复现**
+（Range/Content-Range 语义缺失），与 t03 BGEM3 前科一致——下载腿必须走代理。
+
+--- ③ 下载腿 B：HTTPS_PROXY=http://127.0.0.1:7897 代理下载（HF_ENDPOINT 未设）---
+$ env -u HF_ENDPOINT HTTPS_PROXY=http://127.0.0.1:7897 HTTP_PROXY=http://127.0.0.1:7897 \
+    FASTEMBED_CACHE_DIR=/tmp/wp06-t06-proxy-cache \
+    cargo test --release -p partisync-graph --features graph-embed real_model_probe -- --nocapture
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.29s
+     Running unittests src/lib.rs (.../partisync_graph-38873dfc1941f29d)
+running 1 test
+dim per sentence: [512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512]
+test memory_vector::real_model_probe::dimension_contract_12_sentences_all_512 ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 18.80s
+EXIT=0
+
+缓存落位 Xenova/bge-small-zh-v1.5，snapshot 75c43b069aac4d136ba6bc1122f995fedcfd2781
+（与评估件 §2 钉版 snapshot 逐字一致）。**维度契约（SPEC §3）：12 句（≥10）全 512 维 PASS。**
+
+--- ④ 逐文件 blake3 与 MANIFEST 断言值核对（SPEC §2.3 本地验收）---
+仓外一次性工具 /tmp/b3check（blake3 = "1"），对缓存 snapshot 五文件实测：
+
+f1c661f38644b20ef51d58cfb9cf92cf21ed80ed796c8994eb78cfd4f4764529  onnx/model.onnx (94851877 bytes)
+2948cdb566aa39990222fc687d6b2b214f91c602627c7f664b8748114756afad  tokenizer.json (439125 bytes)
+8455defe17a2d02c705ccd02d2703a401e9a012b172041ab1dfc89ee734b081b  config.json (716 bytes)
+4bd4620b7434b5da448bf9a6cd8859aec19f7bdefacf6f2dd6f0eac70ccfa259  tokenizer_config.json (367 bytes)
+a18633786802dd5a6c0bd6b1a99ea58d6c846b73efd862830fdb86318943fdff  special_tokens_map.json (125 bytes)
+
+与 models.rs `BGE_SMALL_ZH_V15_FILES`（crates/partisync-ai/src/models.rs:58-88）
+逐字一致（哈希 + 字节数全对齐）→ **下载再验哈希一致，红灯未触发。**
+
+--- ⑤ 全量回填实测（SPEC §2.6/§3 存储与时长，118076 叶真实库）---
+$ FASTEMBED_CACHE_DIR=/tmp/wp06-t06-proxy-cache cargo run --release -p partisync-graph \
+    --features graph-embed --example backfill_memory_vectors -- /home/acme/Data/lcsts-memory/graph.db
+嵌入器就绪（BGESmallZHV15，cache=/tmp/wp06-t06-proxy-cache，init 170ms）
+artifact = /home/acme/Data/lcsts-memory/memory_vec.usearch（restore 前条目 0）
+待补嵌活行 118076（pending/running/failed/未登记 口径）
+进度 1000/118076：done 1000 failed 0 skipped 0，累计 8s
+…（进度行全文见运行日志，~61–110 行/10s 区间波动）…
+进度 118000/118076：done 118000 failed 0 skipped 0，累计 1449s
+补嵌完成：attempted 118076，done 118076，failed 0，skipped 0，耗时 1449s
+对账 done 行 118076
+对账完成：sweep 118076 行耗时 15ms，重嵌 0，失败 0
+回填完成：耗时 1450s（预算 ≤1800s @10⁵ 叶，SPEC §2.6）
+artifact 落盘 259347120 B vs 库主文件 255565824 B = 1.015×（预算 ≤1.5×，SPEC §2.6）
+伴表终态：done 118076 failed 0 全部 118076
+artifact 条目 118076（save 后 size）
+EXIT=0
+
+预算判定：
+- 全量嵌入耗时 **1450s = 24m10s ≤ 1800s（30 min）达线**；
+- artifact **259,347,120 B**：vs 运行时库主文件 255,565,824 B = 1.015×；
+  vs SPEC §2.6 预算锚（回填前主文件 233,230,336 B）= 1.112×——**均 ≤1.5× 达线**
+  （主文件因回填写伴表自身增长 +22,335,488 B，双口径如实并报）。
+
+--- ⑥ partisd loopback MCP 冒烟 + e2e 语义收益（127.0.0.1:7650/mcp，rmcp 3.4.0 stateless）---
+$ /home/acme/Codebase/partisync/target/release/partisd --db /home/acme/Data/lcsts-memory/graph.db \
+    --model-cache /tmp/wp06-t06-proxy-cache --memory-embed --listen 127.0.0.1:7650 \
+    --pid-file /tmp/wp06-t06-partisd.pid
+partisd: memory vector channel attached（artifact = /home/acme/Data/lcsts-memory/memory_vec.usearch；三腿激活，BGESmallZHV15）
+partisd: ready — pid=570862 http://127.0.0.1:7650/mcp (loopback，无鉴权——ADR-0032 决策 5)
+
+[⑥-1 MCP 契约] tools/list → memory_search.inputSchema.properties.mode：
+  {"type":"string","enum":["bm25","hybrid"],"default":"bm25","description":"…degraded=vector_unavailable…"}
+  → 可选参数 schema 透出 PASS（HTTP 200）。
+
+[⑥-2 BM25 正控] mode 缺省（bm25），query=出国留学的平均年龄（目标叶字面子串）：
+  total: 2 | degraded: None
+   8b315c8e41a9eb2d 15.2145 在胡润百富15周年庆典之际，由胡润研究院与中信银行22日在北京联合发布的。报告显示，
+   000014de93d6df4e 14.9598 千万富豪送孩子出国留学的平均年龄为18岁，亿万富豪送孩子出国留学的平均年龄为16岁。
+
+[⑥-3 BM25 负控] query=超级富豪家庭把子女送出国读书的平均岁数
+  （语义近义改写；SQLite LIKE 全库验证 = 0 条子串命中 → trigram 短语查询 0 命中）：
+  total: 0 | degraded: None
+  （空）
+
+[⑥-4 e2e 语义收益] 同改写查询，mode=hybrid：
+  total: 5 | degraded: None
+   8b315c8e41a9eb2d 0.0167 在胡润百富15周年庆典之际，由胡润研究院与中信银行22日在北京联合发布的。…
+   000014de93d6df4e 0.0164 千万富豪送孩子出国留学的平均年龄为18岁，亿万富豪送孩子出国留学的平均年龄为16岁。…
+   4f880fd9fa46540c 0.0161 据京华时报，昨日胡润等发布报告表明，中国个人资产在600万元以上的富人达270万人，…
+   20858686efedf233 0.0159 根据1项对全球超级富豪的调查，2/3的受访富豪都拥有大学文凭，他们多从事金融业，…
+   fb6cb8800cc519c6 0.0156 他，75岁当背包客，畅游欧洲；93岁到医院做义工；98岁硕士毕业。100岁他的书法被…
+  → **BM25 0 命中 vs hybrid 5 命中（目标叶 rank 2）**，语义收益成立（负控/正控成对）。
+
+[⑥-5 冒烟正控 hybrid] query=出国留学的平均年龄，mode=hybrid：total 5，目标叶在位（0.0328），
+  另召回语义近邻（留学蓝皮书/赴美留学生/高中留学意愿）→ hybrid 正控命中 PASS。
+
+[⑥-6 加测（语义收益第二组）] query=市民反映储蓄银行定期存款凭证遗失无法查询，mode=hybrid：
+  total: 5 | degraded: None
+   0002fb6098b7f923 0.0167 近日，有网友爆料称其5年前在邮政储蓄银行开立的定期存款无法查到数据。客户要求查询…
+  → 改写查询 rank 1 即真实语料叶 PASS。
+
+[⑥-7 降级标记对照（关闭态）] 第二实例 `partisd --db … --listen 127.0.0.1:7651`
+  （**无 --memory-embed**，向量腿关闭），mode=hybrid query=出国留学的平均年龄：
+  total: 2 | degraded: vector_unavailable
+   8b315c8e41a9eb2d 15.2145 …
+   000014de93d6df4e 14.9598 …
+  → fail-open 回退 BM25 + 显式降级标记（SPEC §2.4）PASS，零静默零 panic。
+
+[⑥-8 hybrid 单查延迟（curl 客户端墙钟，×3）]
+  run1 0.879335s / run2 0.875542s / run3 0.885337s
+  （含 MCP HTTP + 查询嵌入 + 118076 条目 kNN；BM25 对照 0.076s 一例见 ⑥-7）
+
+[⑥-9 关停闭环] SIGTERM → 两实例均 `partisd: clean exit`；
+  实例 A `partisd: memory vector artifact saved`（优雅关停落盘，ADR-0035 决策 3）。
+
+--- ⑦ 本地门禁（提交前）---
+$ cargo fmt --all --check          → FMT-OK
+$ cargo clippy --workspace --all-targets -- -D warnings   → Finished（零告警）
+$ cargo test --workspace           → EXIT=0，116 个套件行 `test result: ok`、0 failed
+  （含 partisync-graph 默认 feature 套件零断言放宽；graph-embed 探针为门控
+   本地件不入默认套件，单测实录见 ③ 节）
+
+--- ⑧ 诚实边界 ---
+1. **单机口径**：全部数字来自 Kubuntu 本机（16 核/62G）单实例运行，非多机/生产负载口径；
+   回填为单行串行嵌入（嵌入器 Mutex 串行化），无批调度优化——预算达线不外推为吞吐上界。
+2. **模型经代理下载**：hf-mirror 直连协议不兼容本次复现（②节实录，t03 前科一致），
+   Xenova/bge-small-zh-v1.5 实际经 HTTPS_PROXY=127.0.0.1:7897 下载；哈希五文件逐字一致（④节）。
+3. **位级确定性未证**：ONNX 跨平台/跨运行业位一致未实测（SPEC §6-7）；P25 只承诺
+   维度/结构/生命周期不变量。同进程重复嵌入抽查未在本件展开（探针单轮）。
+4. **语义收益 = 单库抽样演示**：查询对为对真实语料叶的人工改写（2 组），非真实使用流量；
+   LCSTS 为公开微博摘要语料（沿 t1-corpus-evidence 降格口径），「语义收益」不外推为
+   全量召回质量提升（无 golden 集评测）。
+5. **延迟口径**：hybrid 0.88s 为 curl 客户端墙钟（含 HTTP/rmcp/JSON 开销），非纯通道耗时；
+   BM25 对照 0.076s 同口径。kNN 118076 条目纯检索耗时未单独计量。
+6. **库主文件增长**：回填写伴表使主文件 233,230,336 → 255,565,824 B（+9.6%）；
+   artifact 预算双口径 1.015×/1.112× 均达线，伴表体积增长未入 SPEC §2.6 预算文本
+   （其口径仅锚 artifact vs 主文件），如实并报。
+7. **WAL 未 checkpoint**：运行库 graph.db-wal（80,294,712 B）为库自身既有状态，
+   本任务不触碰 checkpoint 语义。

@@ -389,6 +389,47 @@ mod tests {
     }
 }
 
+/// M11-WP06-T06 维度契约真模型探针（SPEC M11-WP06 §3：真模型嵌入
+/// ≥10 句 → 全 512 维，命令+输出全文归档 docs/reviews/；`graph-embed`
+/// 门控、模型文件不进 CI，评估件 M11-WP05-t05 §7 判例）。缓存目录经
+/// `FASTEMBED_CACHE_DIR` 注入（下载腿 = HF_ENDPOINT / HTTPS_PROXY
+/// 环境面，SPEC §6-3）；模型缓存缺失时由 fastembed 走 HF 下载。
+#[cfg(all(test, feature = "graph-embed"))]
+mod real_model_probe {
+    use super::{embed::FastembedMemoryEmbedder, MemoryEmbedder, MEMORY_VECTOR_DIM};
+
+    /// 探针语料：12 句中文知识库风格异构句（≥10，覆盖摘要/百科/问句形态）。
+    const PROBE_SENTENCES: [&str; 12] = [
+        "中华人民共和国立法法于二〇〇〇年三月由全国人民代表大会通过。",
+        "向量数据库通过近似最近邻搜索在高维空间中检索相似向量。",
+        "北京是中华人民共和国的首都，也是全国政治文化中心。",
+        "混合检索将稀疏的词法通道与稠密的语义通道融合排序。",
+        "设计一个高可用的分布式系统需要考虑一致性与容错。",
+        " reciprocity 是什么意思？",
+        "blake3 是一个快速的密码学哈希函数。",
+        "稀疏检索依赖倒排索引，稠密检索依赖嵌入向量。",
+        "LCSTS 数据集来自新浪微博，用于中文摘要任务。",
+        "递归特征融合以倒数排名加权合并多路召回结果。",
+        " ONNX Runtime 在本地执行量化后的推理模型。",
+        "轻量级嵌入模型在CPU上也能达到毫秒级延迟。",
+    ];
+
+    #[test]
+    fn dimension_contract_12_sentences_all_512() {
+        let embedder = FastembedMemoryEmbedder::new(None).expect("BGESmallZHV15 加载");
+        let dims: Vec<usize> = PROBE_SENTENCES
+            .iter()
+            .map(|s| embedder.embed(s).expect("嵌入成功").len())
+            .collect();
+        println!("dim per sentence: {dims:?}");
+        assert_eq!(dims.len(), 12);
+        assert!(
+            dims.iter().all(|d| *d == MEMORY_VECTOR_DIM),
+            "维度契约违约: dims = {dims:?}（预期全 {MEMORY_VECTOR_DIM}）"
+        );
+    }
+}
+
 /// fastembed BGESmallZHV15 真嵌入器（SPEC M11-WP06 §2.1/§2.2；ADR-0035
 /// 决策 1——`graph-embed` feature 门控默认关，沿 ai-embed/index-embed
 /// 判例 partisync-index Cargo.toml:11-12；模型下载/推理不入 CI，评估件
