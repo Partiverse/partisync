@@ -39,8 +39,47 @@ use partisync_core::error::{PartisyError, Severity};
 /// 非 in-repo 判例推断；与 TextDenseZh512 判例对齐 vector.rs:39-41）。
 pub const MEMORY_VECTOR_DIM: usize = 512;
 
+/// 降级标记（SPEC M11-WP06 §2.4 fail-open）：向量腿不可用时响应载荷
+/// 携带此值，不静默、不报错。ADR-0035 决策 2 落锤。
+pub const DEGRADED_VECTOR_UNAVAILABLE: &str = "vector_unavailable";
+
+/// 嵌入器初始化探针内容（SPEC §2.2 init fail-fast 的首嵌校验输入：
+/// attach 时对嵌入器试嵌一次校验维度；空串对嵌入模型是合法输入）。
+pub const EMBED_PROBE_CONTENT: &str = "";
+
 /// RRF 融合 k 值（SPEC M11-WP06 §2.5：对齐 hybrid.rs:25 判例 k=60）。
 const RRF_K: f32 = 60.0;
+
+/// 嵌入调用面接口（SPEC M11-WP06 §2.1：嵌入与落库分离——嵌入器输出
+/// `Vec<f32>`，落库走 [`MemoryVectorIndex::upsert`] 预计算向量注入）。
+/// fastembed 实现随 `graph-embed` feature 门控落地（默认关）；本 trait
+/// 使 P25 全链契约可无模型测试（测试注入合成嵌入器）。
+pub trait MemoryEmbedder: Send + Sync {
+    /// 嵌入一段文本；维度必须 == [`MEMORY_VECTOR_DIM`]（attach 时首嵌
+    /// fail-fast 校验，SPEC §2.2；运行期偏差由查询腿 fail-open 兜底）。
+    ///
+    /// # Errors
+    /// 模型/运行时故障 → Err（查询腿降级，写入腿记伴表 failed）。
+    fn embed(&self, content: &str) -> Result<Vec<f32>, PartisyError>;
+}
+
+/// 记忆域向量通道：索引实例 + 可选嵌入器（T04 store 三腿接线持有件）。
+/// `embedder = None`（或通道未挂载）= 向量腿不可用 → 查询腿降级
+/// （SPEC §2.4）；通道缺位 = 派生数据不在本机，可随时回填重建
+/// （ADR-0035 决策 3）。
+pub struct MemoryVectorChannel {
+    pub index: std::sync::Arc<MemoryVectorIndex>,
+    pub embedder: Option<std::sync::Arc<dyn MemoryEmbedder>>,
+}
+
+// 通道随 Store 进异步上下文（sqlx 并发面），Send+Sync 是硬前提：
+// RwLock<usearch::Index> 的线程安全性与 index crate VectorStore 判例同构
+// （vector.rs:74-80）；此处编译期钉死，漂移即编译错。
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<MemoryVectorIndex>();
+    assert_send_sync::<MemoryVectorChannel>();
+};
 
 /// memory 专享 key 派生（ADR-0035 决策 5）：blake3(memory_id) 前 8 字节大端
 /// u64。key 仅由 memory_id 决定（P25-b）；与资产域 content_key（vector.rs:22-28）

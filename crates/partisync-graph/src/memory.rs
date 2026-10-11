@@ -267,6 +267,20 @@ pub struct MemorySearchReport {
     pub total: i64,
 }
 
+/// `memory_search` hybrid 报告（SPEC M11-WP06 §2.5/§2.4，T04 store 查询腿）：
+/// BM25 Top-N + 向量近邻 Top-N → RRF 融合（k=60）。results 按 RRF 融合分
+/// 降序（score = 融合分），total = 融合命中数（截断前）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemoryHybridReport {
+    pub results: Vec<MemorySearchHit>,
+    pub total: i64,
+    /// 降级标记（SPEC §2.4 fail-open）：`Some("vector_unavailable")` =
+    /// 向量腿不可用（通道未挂载/嵌入器缺失/嵌入失败），BM25 结果原样
+    /// 返回；`None` = 向量腿已参与（含向量腿零命中的正常态——通道可用
+    /// 但索引为空不是不可用）。零静默零 panic。
+    pub degraded: Option<&'static str>,
+}
+
 /// `memory_verify(memory_id)` 单叶包含证明（SPEC §2.3/§2.4 有 id 分支；
 /// 自包含：不需数据库即可验证，hex 编码）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
