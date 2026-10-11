@@ -4,7 +4,56 @@
 （SPEC docs/specs/M9-WP06.md §2.2-5；判例 M8-WP02 §2.4）。格式沿
 Keep a Changelog 约定；semver pre-release 口径见各版本节。
 
-## [0.2.0-rc.1] — 草稿（待用户终审后随 Release publish；tag 前另有一道终审，cadence §3.2-3/4）
+## [0.2.0] — 草稿（GA；tag 待 J1 窗口计满 + J4 B1–B8 复跑 + 用户终审，cadence v1.1 执行纪律）
+
+> 口径（M11-WP01-T07 三轴确认 2026-10-11，M12-WP01-T01 起草）：tag
+> `v0.2.0`（去 rc 段）、产物文件名 `-0.2.0-`、workspace 版本维持
+> 0.2.0（整数版，零 Cargo 面 diff，cadence §3.1）。本节范围 =
+> `v0.2.0-rc.1..GA tag`（rc.1 → GA 增量，起草 2026-10-11；tag 前如
+> 有新增如实续登）。
+
+### Added
+
+- **记忆域语义向量检索**（M11-WP06，ADR-0035/P25）：schema v19 +
+  usearch 独立实例（512d，key = blake3(memory_id) 前 8B）+ MCP
+  `memory_search` mode=hybrid（RRF 融合）+ fail-open 降级显式标记 +
+  异步伴生嵌入 + 崩溃回填器；118,076 叶真库实测：回填 1450s（≤1800s
+  预算）、artifact 1.015×（≤1.5× 预算）、负控 BM25 0 命中 vs hybrid
+  命中目标叶（语义收益 e2e）。
+- **LCSTS 语料批量导入器**（M11-WP05-T04，example）：memory 域 T1
+  语料 118,076 叶直插（幂等重跑同根，verify ok）。
+
+### Changed
+
+- **基座许可 AGPL-3.0-only（ADR-0034）**：取代 ADR-0033 的 Apache-2.0
+  终局条款——核心下游强制开源；deny licenses 同步（#233）。
+- **检索深化（M11-WP04）**：BM25 schema 增 stored 原文域
+  （ocr_text_orig/transcript_text_orig）——中文命中摘要改为可读原文
+  定位（四级回落链：原文→扇出串→头截→None），存量索引自动降级兼
+  容；存储 +9.5%/+10.3%（≤+35% 预算达线）、reindex +7.8%（预算经用
+  户裁决 SPEC v0.2 ≤+10%）。
+
+### Fixed
+
+- **中文高亮碎片流修复**（M11-WP04）：中文查询命中词摘要不再出现
+  「字 间空格」fan-out 碎片（随 stored 原文域落地，rc.1 已知限制第
+  4 条清偿）。
+
+### Known limitations（rc.1 清单逐项复核：清偿/延续标注，不假绿）
+
+- ✅ **已清偿 2 项**：语义向量检索暂不实施 → 本节 Added（M11-WP06
+  实施落地）；中文摘要 CJK fan-out 碎片 → 本节 Fixed（stored 原文域）。
+- ⏳ **延续**：远程 MCP mock AS 边界（真实 IdP 端到端 = NB-WP05-1 条
+  件触发）；loopback partisd 面无鉴权（127.0.0.1 信任域，ADR-0032
+  决策 5，设计内）；桌面记忆编辑/删除 UI（D19 归 Partiverse）；CAS
+  存量 read_errors；跨进程索引 reader 自动 reload（改进债）；macOS
+  dmg 未公证（Apple Developer 外部依赖）；hub 产物为演示面
+  （hub-demo-web）；macOS 无 FUSE；桌面 GUI 维护冻结（D19）。
+- 🆕 **新增（M11-WP01-T08 全量实测登记）**：CLI 库×FUSE 指纹缺口；
+  by-hash 小文件 ENOENT；T04 语料库 device 缺口；`--help` 输出微债
+  （第 5 项 loopback 无鉴权已列延续段）。
+
+## [0.2.0-rc.1] — 2026-10-10（已发布：首个公开 GitHub Release；发布报告 docs/reviews/M11-WP01-release-report-rc1.md）
 
 > 口径（已确认 2026-10-10，M11-WP01-T01）：tag `v0.2.0-rc.1`、产物
 > 文件名带 `-rc.1` 后缀、**workspace 版本真 bump 0.1.0→0.2.0**（整数
