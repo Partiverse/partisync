@@ -15,11 +15,12 @@ pub mod watch;
 
 pub use journal::{apply_pending, record, Applied, EventKind, JournalEvent};
 pub use memory::{
-    MemoryInclusionProof, MemoryRootSnapshot, MemoryRow, MemorySearchHit, MemorySearchReport,
-    MemoryWriteOutcome, VerifyReport,
+    MemoryHybridReport, MemoryInclusionProof, MemoryRootSnapshot, MemoryRow, MemorySearchHit,
+    MemorySearchReport, MemoryWriteOutcome, VerifyReport,
 };
 pub use memory_vector::{
-    memory_vector_key, rrf_fuse, MemoryVectorHit, MemoryVectorIndex, MEMORY_VECTOR_DIM,
+    memory_vector_key, rrf_fuse, MemoryEmbedder, MemoryVectorChannel, MemoryVectorHit,
+    MemoryVectorIndex, DEGRADED_VECTOR_UNAVAILABLE, MEMORY_VECTOR_DIM,
 };
 pub use store::{
     ApplyConflict, ApplyOutcome, ConflictRow, DupGroup, EntryKind, EntryRow, EntryState,

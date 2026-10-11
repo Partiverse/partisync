@@ -3,11 +3,18 @@
 //! 错误分类约定：sqlx 错误一律 Fatal（库级故障重试无意义）；
 //! UNIQUE 冲突（path 已存在）在 [`Store::add_entry`] 内部转为幂等语义，不外溢。
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::memory::{
-    canonical_json, canonical_tags, content_digest, memory_identity, MemoryRootSnapshot, MemoryRow,
-    MemorySearchHit, MemorySearchReport, MemoryWriteOutcome, VerifyReport,
+    canonical_json, canonical_tags, content_digest, memory_identity, MemoryHybridReport,
+    MemoryRootSnapshot, MemoryRow, MemorySearchHit, MemorySearchReport, MemoryWriteOutcome,
+    VerifyReport,
+};
+use crate::memory_vector::{
+    memory_vector_key, rrf_fuse, MemoryEmbedder, MemoryVectorChannel, MemoryVectorIndex,
+    DEGRADED_VECTOR_UNAVAILABLE, MEMORY_VECTOR_DIM,
 };
 use partisync_core::error::{PartisyError, Severity};
 use partisync_core::Ulid;
@@ -162,6 +169,12 @@ pub struct Store {
     pool: SqlitePool,
     /// oplog 时钟（M2-WP01）：进程内单调 HLC；None = 尚未初始化（首次捕获时从墙钟起步）
     oplog_clock: std::sync::Arc<tokio::sync::Mutex<Option<partisync_core::Hlc>>>,
+    /// 记忆域向量通道（M11-WP06-T04，SPEC §2.1/§2.5；ADR-0035 决策 1/3）：
+    /// 默认 None = 未挂载，BM25 通道行为逐字节零变更（SPEC §2.0）；
+    /// 宿主（partisd）经 [`Store::attach_vector_channel`] 显式挂载后才启用
+    /// 三腿接线（写入伴生/查询融合/生命周期同步）。Arc<RwLock> 内壳：
+    /// Store 为 #[derive(Clone)]（RwLock 本身非 Clone）。
+    vector_channel: Arc<std::sync::RwLock<Option<Arc<MemoryVectorChannel>>>>,
 }
 
 fn db_err(what: &str, e: sqlx::Error) -> PartisyError {
@@ -169,6 +182,100 @@ fn db_err(what: &str, e: sqlx::Error) -> PartisyError {
         severity: Severity::Fatal,
         source: Some(format!("{what}: {e}").into()),
     }
+}
+
+fn lock_poison(what: &str) -> PartisyError {
+    PartisyError {
+        severity: Severity::Fatal,
+        source: Some(format!("{what}: lock poison").into()),
+    }
+}
+
+/// 伴生任务体（M11-WP06-T04 写入腿；SPEC §2.5 + ADR-0035 决策 3）：单条
+/// memory 的嵌入 → 向量落库 → 伴表状态落账。独立于 `Store`（tokio::spawn
+/// 只持 pool clone + channel Arc，不持 Store 引用）。失败路径全部落伴表
+/// （status=4 failed + detail），不上抛不 panic——派生数据无一致性债，
+/// 回填器全量重算补齐（ADR-0035 决策 3）。
+async fn embed_companion_task(
+    pool: &SqlitePool,
+    channel: &MemoryVectorChannel,
+    memory_id: &str,
+) -> Result<bool, PartisyError> {
+    let row: Option<(String, i64)> =
+        sqlx::query_as("SELECT content, deleted FROM memory WHERE memory_id = ?")
+            .bind(memory_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| db_err("伴生任务查 memory", e))?;
+    let Some((content, deleted)) = row else {
+        return Ok(false);
+    };
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as i64);
+    // 已墓碑（伴生任务晚于 delete 到达的竞态）：向量摘除兜底（幂等），
+    // 伴表行随 GC 物理删级联清（v19 FK CASCADE）
+    if deleted != 0 {
+        channel.index.remove(memory_id)?;
+        return Ok(false);
+    }
+    // SPEC §2.2 init fail-fast 已在 attach 校验维度；此处为运行期防线
+    //（维度漂移/嵌入故障 → 伴表 failed 记账，不 panic 不上抛）
+    let outcome = match channel.embedder.as_ref() {
+        None => None,
+        Some(embedder) => match embedder.embed(&content) {
+            Ok(vec) if vec.len() == MEMORY_VECTOR_DIM => Some(Ok(vec)),
+            Ok(vec) => Some(Err(format!("嵌入维度 {} ≠ {MEMORY_VECTOR_DIM}", vec.len()))),
+            Err(e) => Some(Err(format!("{e}"))),
+        },
+    };
+    match outcome {
+        None => Ok(false),
+        Some(Err(detail)) => {
+            embed_status_record(pool, memory_id, 4, None, &detail, now_ns).await?;
+            Ok(false)
+        }
+        Some(Ok(vector)) => {
+            channel.index.upsert(memory_id, &vector)?;
+            embed_status_record(
+                pool,
+                memory_id,
+                2,
+                Some(i64::try_from(MEMORY_VECTOR_DIM).unwrap_or(i64::MAX)),
+                "done",
+                now_ns,
+            )
+            .await?;
+            Ok(true)
+        }
+    }
+}
+
+/// 伴表状态落账（v19 `memory_embedding`，upsert 幂等——同 id 重嵌覆盖）。
+async fn embed_status_record(
+    pool: &SqlitePool,
+    memory_id: &str,
+    status: i64,
+    dim: Option<i64>,
+    detail: &str,
+    now_ns: i64,
+) -> Result<(), PartisyError> {
+    sqlx::query(
+        "INSERT INTO memory_embedding (memory_id, status, dim, detail, updated_ns)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(memory_id) DO UPDATE SET
+            status = excluded.status, dim = excluded.dim,
+            detail = excluded.detail, updated_ns = excluded.updated_ns",
+    )
+    .bind(memory_id)
+    .bind(status)
+    .bind(dim)
+    .bind(detail)
+    .bind(now_ns)
+    .execute(pool)
+    .await
+    .map_err(|e| db_err("伴表状态落账", e))?;
+    Ok(())
 }
 
 /// 批量文件插入记录（[`Store::add_file_batch`] 的输入）。
@@ -254,6 +361,7 @@ impl Store {
             oplog_clock: std::sync::Arc::new(tokio::sync::Mutex::new(
                 top.and_then(|k| partisync_core::Hlc::from_key(&k)),
             )),
+            vector_channel: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -2163,6 +2271,9 @@ impl Store {
                 .await
                 .map_err(|e| db_err("复活 memory", e))?;
             self.refresh_memory_root().await?;
+            // 写入腿伴生挂点（M11-WP06-T04）：复活行向量已在 tombstone 时
+            // 摘除——重新伴生嵌入（事务外异步，SPEC §2.5）。
+            self.spawn_embed_companion(id.clone());
             return Ok(MemoryWriteOutcome {
                 memory_id: id,
                 deduplicated: false,
@@ -2206,6 +2317,9 @@ impl Store {
         .await
         .map_err(|e| db_err("写 memory", e))?;
         self.refresh_memory_root().await?;
+        // 写入腿伴生挂点（M11-WP06-T04，SPEC §2.5）：事务已提交，嵌入
+        // 异步伴生不进写事务；通道缺位 = no-op（零行为变更）。
+        self.spawn_embed_companion(id.clone());
         Ok(MemoryWriteOutcome {
             memory_id: id,
             deduplicated: false,
@@ -2265,6 +2379,9 @@ impl Store {
             .await
             .map_err(|e| db_err("墓碑 memory", e))?;
         self.refresh_memory_root().await?;
+        // 生命周期腿（M11-WP06-T04，P25-c 全链）：tombstone 后向量通道
+        // 不可召回——同步摘除（通道缺位 no-op；remove 幂等）。
+        self.vector_lifecycle_remove(memory_id).await?;
         Ok(())
     }
 
@@ -2335,6 +2452,8 @@ impl Store {
             .execute(&self.pool)
             .await
             .map_err(|e| db_err("墓碑 memory", e))?;
+        // 生命周期腿（M11-WP06-T04，P25-c 全链）：旧 id 向量同步摘除。
+        self.vector_lifecycle_remove(memory_id).await?;
         // ② 写入新行（活行已存在则不重复建；oplog 先行同 memory_write 判例）
         if self.memory_by_id(&new_id).await?.is_none() {
             let payload = serde_json::json!({
@@ -2375,6 +2494,9 @@ impl Store {
             .map_err(|e| db_err("写 memory", e))?;
         }
         self.refresh_memory_root().await?;
+        // 写入腿伴生挂点（M11-WP06-T04）：新内容行嵌入伴生（旧 id 已在
+        // 墓碑臂同步摘除向量）。
+        self.spawn_embed_companion(new_id.clone());
         Ok(MemoryWriteOutcome {
             memory_id: new_id,
             deduplicated: false,
@@ -2438,11 +2560,14 @@ impl Store {
             .bind(created_ns)
             .bind(origin_device)
             .bind(hlc_key)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| db_err("应用远端 memory", e))?;
+                .execute(&self.pool)
+                .await
+                .map_err(|e| db_err("应用远端 memory", e))?;
         }
         self.refresh_memory_root().await?;
+        // 写入腿伴生挂点（M11-WP06-T04）：远端 upsert 胜出 = 本地内容到达
+        // /更新，嵌入伴生保持向量通道与内容一致（通道缺位 no-op）。
+        self.spawn_embed_companion(memory_id.to_string());
         Ok(true)
     }
 
@@ -2473,6 +2598,9 @@ impl Store {
             .await
             .map_err(|e| db_err("应用远端 memory 墓碑", e))?;
         self.refresh_memory_root().await?;
+        // 生命周期腿（M11-WP06-T04，P25-c 全链）：远端墓碑同样摘除向量
+        // （多端同步面与本地 tombstone 同口径）。
+        self.vector_lifecycle_remove(memory_id).await?;
         Ok(true)
     }
 
@@ -2663,6 +2791,245 @@ impl Store {
         Ok(n > 0)
     }
 
+    // -----------------------------------------------------------------------
+    // 记忆域向量通道三腿接线（M11-WP06-T04，SPEC M11-WP06 §2.1/§2.4/§2.5；
+    // ADR-0035 决策 1/2/3/5）。默认未挂载 = 全部路径 no-op，BM25 通道行为
+    // 逐字节零变更（SPEC §2.0）；宿主（partisd）显式 attach 后启用。
+    // -----------------------------------------------------------------------
+
+    /// 挂载记忆域向量通道（写入伴生/查询融合/生命周期同步三腿总开关）。
+    ///
+    /// **init fail-fast（SPEC §2.2）**：`embedder` 在位时首嵌校验——探针
+    /// 嵌入出错或维度 ≠ [`MEMORY_VECTOR_DIM`] → 拒绝挂载报错（模型漂移
+    /// 防线）。挂载失败后通道保持 None，查询腿自动降级（§2.4 fail-open）。
+    /// 重复挂载 = 替换通道（幂等覆盖）。
+    ///
+    /// # Errors
+    /// usearch artifact 打开失败 / 探针嵌入失败 / 维度 ≠ 512 → Fatal。
+    pub fn attach_vector_channel(
+        &self,
+        artifact_path: impl AsRef<Path>,
+        embedder: Option<Arc<dyn MemoryEmbedder>>,
+    ) -> Result<(), PartisyError> {
+        let index = MemoryVectorIndex::open_or_create(artifact_path)?;
+        if let Some(embedder) = &embedder {
+            let probe = embedder
+                .embed(crate::memory_vector::EMBED_PROBE_CONTENT)
+                .map_err(|e| PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(
+                        format!("向量通道挂载拒绝（首嵌失败，SPEC §2.2 fail-fast）: {e}").into(),
+                    ),
+                })?;
+            if probe.len() != MEMORY_VECTOR_DIM {
+                return Err(PartisyError {
+                    severity: Severity::Fatal,
+                    source: Some(
+                        format!(
+                            "向量通道挂载拒绝（首嵌维度 {} ≠ {MEMORY_VECTOR_DIM}，SPEC §2.2 fail-fast）",
+                            probe.len()
+                        )
+                        .into(),
+                    ),
+                });
+            }
+        }
+        *self
+            .vector_channel
+            .write()
+            .map_err(|_| lock_poison("vector_channel attach"))? =
+            Some(Arc::new(MemoryVectorChannel {
+                index: Arc::new(index),
+                embedder,
+            }));
+        Ok(())
+    }
+
+    fn vector_channel_ref(&self) -> Option<Arc<MemoryVectorChannel>> {
+        self.vector_channel
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// 写入腿伴生挂点（SPEC §2.5：嵌入异步伴生，**不进 memory_write 写
+    /// 事务**）：事务提交后 tokio 生成伴生任务（embed → 向量落库 → 伴表
+    /// 状态落账）。通道/嵌入器缺位 = no-op（零行为变更）；伴生任务失败
+    /// 仅记伴表 failed（派生数据无一致性债，回填器全量重算补齐——
+    /// ADR-0035 决策 3），不上抛不打断写入。
+    fn spawn_embed_companion(&self, memory_id: String) {
+        let Some(channel) = self.vector_channel_ref() else {
+            return;
+        };
+        if channel.embedder.is_none() {
+            return;
+        }
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            // 伴生任务零 panic：全部失败路径走伴表 failed 记账或静默放弃
+            //（回填器可重算，ADR-0035 决策 3）。
+            let _ = embed_companion_task(&pool, &channel, &memory_id).await;
+        });
+    }
+
+    /// 生命周期腿原语（P25-c 全链）：tombstone/GC 物理删后向量通道同步
+    /// 摘除。通道缺位 = no-op；摘除幂等（remove 语义，T03 探针判例）。
+    ///
+    /// # Errors
+    /// usearch remove 错误 → Fatal（维护腿响亮失败，派生数据可回填重建）。
+    async fn vector_lifecycle_remove(&self, memory_id: &str) -> Result<(), PartisyError> {
+        let Some(channel) = self.vector_channel_ref() else {
+            return Ok(());
+        };
+        channel.index.remove(memory_id)?;
+        Ok(())
+    }
+
+    /// 确定性伴生嵌入接口（写入腿伴生任务体 + 批量回填器/探针共用）：
+    /// 单条 memory 嵌入 → 向量落库 → 伴表状态落账。返回 `Ok(true)` =
+    /// 已嵌入；`Ok(false)` = 跳过（通道缺位 / 行不存在 / 已墓碑→仅摘除
+    /// / 嵌入失败已记伴表 failed）。嵌入失败**不报错不 panic**——按
+    /// ADR-0035 决策 3 记账后由回填器重算（派生数据无一致性债）。
+    ///
+    /// # Errors
+    /// usearch 落库/伴表 DB 错误 → Fatal。
+    pub async fn memory_embed_one(&self, memory_id: &str) -> Result<bool, PartisyError> {
+        let Some(channel) = self.vector_channel_ref() else {
+            return Ok(false);
+        };
+        embed_companion_task(&self.pool, &channel, memory_id).await
+    }
+
+    /// memory_search hybrid 查询腿（SPEC M11-WP06 §2.5，T04；mode 参数在
+    /// gateway 层透出）：BM25 Top-N（既有 [`Store::memory_search`] 全路径，
+    /// FTS5+LIKE 行为零变更）+ 向量近邻 Top-N → RRF 融合（k=60，
+    /// [`rrf_fuse`]）。
+    ///
+    /// **fail-open（SPEC §2.4，ADR-0035 决策 2）**：通道未挂载 / 嵌入器
+    /// 缺失 / 嵌入出错 / 维度漂移 / usearch 检索错误 → 原样返回 BM25 结果
+    /// 且 `degraded = Some("vector_unavailable")`，零静默零 panic；
+    /// `degraded = None` = 向量腿已参与（索引为空但通道可用属正常态）。
+    ///
+    /// key→memory_id 映射：blake3 单向不可反解——候选集 = 伴表 done 行
+    /// JOIN 活行（deleted=0，tag 过滤同 BM25 口径）逐 id 派生 key 比对；
+    /// 未命中映射的向量 hit（伴表滞后/派生不一致）跳过不计。
+    ///
+    /// # Errors
+    /// BM25 腿 DB 错误 → Fatal（与既有路径同口径；向量腿错误不 Fatal）。
+    pub async fn memory_search_hybrid(
+        &self,
+        query: &str,
+        tag: Option<&str>,
+        limit: u32,
+    ) -> Result<MemoryHybridReport, PartisyError> {
+        // BM25 腿：既有通道全路径（FTS5 trigram + LIKE 兜底 + tag 过滤）
+        let bm25 = self.memory_search(Some(query), tag, None, limit, 0).await?;
+        let degraded = |report: MemorySearchReport| {
+            Ok(MemoryHybridReport {
+                results: report.results,
+                total: report.total,
+                degraded: Some(DEGRADED_VECTOR_UNAVAILABLE),
+            })
+        };
+        let Some(channel) = self.vector_channel_ref() else {
+            return degraded(bm25);
+        };
+        let Some(embedder) = &channel.embedder else {
+            return degraded(bm25);
+        };
+        // 查询期嵌入失败 = 环境状态 → fail-open（与 §2.2 init fail-fast
+        // 的不对称是有意设计，SPEC §2.4 依据 ③）
+        let Ok(query_vec) = embedder.embed(query) else {
+            return degraded(bm25);
+        };
+        if query_vec.len() != MEMORY_VECTOR_DIM {
+            return degraded(bm25);
+        }
+        let Ok(vector_hits) = channel.index.search(&query_vec, limit as usize) else {
+            return degraded(bm25);
+        };
+
+        // key→id 候选映射：伴表 done JOIN 活行（tag 过滤同 BM25 口径）
+        let candidate_sql = if tag.is_some() {
+            "SELECT m.* FROM memory_embedding e \
+             JOIN memory m ON m.memory_id = e.memory_id \
+             WHERE e.status = 2 AND m.deleted = 0 \
+             AND EXISTS (SELECT 1 FROM json_each(m.tags) je WHERE je.value = ?)"
+        } else {
+            "SELECT m.* FROM memory_embedding e \
+             JOIN memory m ON m.memory_id = e.memory_id \
+             WHERE e.status = 2 AND m.deleted = 0"
+        };
+        let rows: Vec<MemoryRow> = if let Some(t) = tag {
+            sqlx::query_as::<_, MemoryRow>(candidate_sql)
+                .bind(t)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| db_err("memory_search_hybrid 候选映射", e))?
+        } else {
+            sqlx::query_as::<_, MemoryRow>(candidate_sql)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| db_err("memory_search_hybrid 候选映射", e))?
+        };
+        let mut candidates_by_key: HashMap<u64, MemorySearchHit> = HashMap::new();
+        for row in rows {
+            let key = memory_vector_key(&row.memory_id);
+            candidates_by_key.insert(
+                key,
+                MemorySearchHit {
+                    memory_id: row.memory_id,
+                    content: row.content,
+                    tags: row.tags,
+                    metadata: row.metadata,
+                    created_ns: row.created_ns,
+                    origin_device: row.origin_device,
+                    score: 0.0,
+                },
+            );
+        }
+        // 向量榜：hit key → memory_id（映射缺失 = 伴表滞后/派生不一致，跳过）
+        let vector_ranked: Vec<String> = vector_hits
+            .iter()
+            .filter_map(|hit| {
+                candidates_by_key
+                    .get(&hit.key)
+                    .map(|row| row.memory_id.clone())
+            })
+            .collect();
+        let bm25_ranked: Vec<String> = bm25
+            .results
+            .iter()
+            .map(|hit| hit.memory_id.clone())
+            .collect();
+
+        let fused = rrf_fuse(&bm25_ranked, &vector_ranked);
+        // 行装配：BM25 行 + 向量映射行合并（id 去重），按融合分降序取 Top-N
+        let mut merged: HashMap<String, MemorySearchHit> = bm25
+            .results
+            .into_iter()
+            .map(|hit| (hit.memory_id.clone(), hit))
+            .collect();
+        for hit in candidates_by_key.into_values() {
+            merged.entry(hit.memory_id.clone()).or_insert(hit);
+        }
+        let results = fused
+            .iter()
+            .take(limit as usize)
+            .filter_map(|(id, score)| {
+                merged.remove(id).map(|mut hit| {
+                    hit.score = f64::from(*score);
+                    hit
+                })
+            })
+            .collect();
+        Ok(MemoryHybridReport {
+            results,
+            total: fused.len() as i64,
+            degraded: None,
+        })
+    }
+
     /// 可验证性全检（SPEC §2.4 `memory_verify` 语义）：快照根 vs 全量重算根 +
     /// 逐行 content_hash 列级校验（P20-c：篡改/损坏报不一致，不静默通过）。
     /// memory_count 口径 = 含墓碑承诺集规模（P20 措辞注记，M10-WP04 §2.1），
@@ -2718,6 +3085,17 @@ impl Store {
         let retention_ms = u64::from(retention_days).saturating_mul(86_400_000);
         let cutoff =
             partisync_core::Hlc::from_wall(0, now_ms.saturating_sub(retention_ms)).to_key();
+        // 生命周期腿（M11-WP06-T04，P25-c 全链）：先取物理删目标 id（同一
+        // 判据），删除后逐 id 同步摘除向量——覆盖「通道摘除期挂载/重放」
+        // 场景（remove 幂等；通道缺位 no-op）。伴表行随 DELETE 级联清
+        //（v19 FK CASCADE）。
+        let purged_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT memory_id FROM memory WHERE deleted != 0 AND hlc IS NOT NULL AND hlc < ?",
+        )
+        .bind(&cutoff)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| db_err("memory gc 目标选取", e))?;
         let result =
             sqlx::query("DELETE FROM memory WHERE deleted != 0 AND hlc IS NOT NULL AND hlc < ?")
                 .bind(&cutoff)
@@ -2725,6 +3103,9 @@ impl Store {
                 .await
                 .map_err(|e| db_err("memory gc", e))?;
         let purged = result.rows_affected();
+        for id in &purged_ids {
+            self.vector_lifecycle_remove(id).await?;
+        }
         let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM memory WHERE deleted != 0")
             .fetch_one(&self.pool)
             .await
